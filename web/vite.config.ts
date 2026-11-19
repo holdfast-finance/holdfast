@@ -60,8 +60,22 @@ function mockServiceWorker(): Plugin {
   }
 }
 
+// `%VITE_BRAND%` in index.html is replaced when the env is set. An unset or empty
+// value would leave the placeholder, so first paint falls back to signal (the CSS default).
+function defaultBrandAttribute(): Plugin {
+  return {
+    name: 'holdfast-default-brand',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        return html.replace(/data-brand="(?:%VITE_BRAND%|)"/, 'data-brand="signal"')
+      },
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), mockServiceWorker()],
+  plugins: [react(), tailwindcss(), mockServiceWorker(), defaultBrandAttribute()],
   cacheDir,
   build: {
     assetsInlineLimit: (filePath) => (FONT_FILE.test(filePath) ? false : undefined),

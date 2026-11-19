@@ -97,6 +97,11 @@ describe('brand guardrails', () => {
     expect(offenders).toEqual([])
   })
 
+  it('sets data-brand from VITE_BRAND before the module graph loads', () => {
+    const html = readFileSync(join(WEB, 'index.html'), 'utf8')
+    expect(html).toMatch(/<html[^>]*\sdata-brand="%VITE_BRAND%"/)
+  })
+
   it('never loads fonts or scripts from a third-party CDN', () => {
     const files = [join(WEB, 'index.html'), ...walk(SRC).filter((f) => !f.includes('.test.'))]
     const offenders = files.filter((f) =>
