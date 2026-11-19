@@ -95,6 +95,19 @@ def _parse_cursor(value: str) -> tuple[datetime, uuid.UUID] | None:
         return None
 
 
+async def household_page(
+    factory: async_sessionmaker[AsyncSession],
+    household_id: uuid.UUID,
+    person_id: uuid.UUID | None,
+    *,
+    limit: int,
+    before: str | None,
+) -> AuditPage:
+    """Open the household-scoped session and read one page (routers never open sessions)."""
+    async with scoped_session(factory, household_id, person_id) as s:
+        return await page(s, limit=limit, before=before)
+
+
 async def page(s: AsyncSession, *, limit: int, before: str | None) -> AuditPage:
     """Newest first. RLS limits rows to the session's household."""
     limit = max(1, min(limit, MAX_LIMIT))

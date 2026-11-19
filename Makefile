@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint fmt migrate seed keys check health ports env-check
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -79,9 +79,13 @@ test: ## Backend pytest (needs `make up` for the db) + web vitest
 	else echo "skip backend: no backend/pyproject.toml"; fi
 	@if [ -f web/package.json ]; then cd web && pnpm test --run; else echo "skip web: no web/package.json"; fi
 
-lint: ## ruff + ruff format --check + mypy, eslint + tsc
+lint: ## ruff + ruff format --check + mypy + import-linter, eslint + tsc
 	@if [ -f backend/pyproject.toml ]; then cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy app; else echo "skip backend: no backend/pyproject.toml"; fi
+	@$(MAKE) --no-print-directory lint-imports
 	@if [ -f web/package.json ]; then cd web && pnpm lint && pnpm typecheck; else echo "skip web: no web/package.json"; fi
+
+lint-imports: ## Layering contracts (ADR 0011): api -> services -> domain, pure domain
+	@if [ -f backend/pyproject.toml ]; then cd backend && uv run lint-imports; else echo "skip backend: no backend/pyproject.toml"; fi
 
 fmt: ## Format backend (ruff) and web (format script, if any)
 	@if [ -f backend/pyproject.toml ]; then cd backend && uv run ruff format . && uv run ruff check --fix .; fi
