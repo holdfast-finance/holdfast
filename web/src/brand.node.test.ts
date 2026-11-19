@@ -18,7 +18,7 @@ function walk(dir: string): string[] {
  * brand theme (Direction 01 or Holo) is a token swap. Brand hue names live only in index.css and
  * lib/tokens.ts. The match targets utility prefixes and CSS variables, so `AbortSignal` passes.
  */
-const HUES = 'signal|deepwater|abyss|hull|flare|breach'
+const HUES = 'signal|deepwater|abyss|hull|flare|breach|indigo|lavender|cloud|grow|heads-up|alert'
 const UTILITY =
   'bg|text|border(?:-[trblxyse])?|fill|stroke|ring(?:-offset)?|outline|from|via|to|shadow|decoration|divide|accent|caret|placeholder'
 const BRAND_HUE = new RegExp(

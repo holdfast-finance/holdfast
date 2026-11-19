@@ -4,54 +4,69 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  ABYSS_INK,
-  CHIP_TINT,
+  BRANDS,
   contrast,
-  DEEPWATER_INK,
-  FILL,
-  FOCUS_RING,
-  GROUND,
   hexToRgb,
-  INPUT_BORDER,
+  HOLO_FILL,
+  HOLO_TEXT,
   over,
-  TEXT,
-  type ThemePair,
+  type BrandTokens,
 } from './lib/tokens.ts'
 
 const CSS = readFileSync(join(import.meta.dirname, 'index.css'), 'utf8').toLowerCase()
 const THEMES = ['light', 'dark'] as const
-const HUES = Object.keys(TEXT) as (keyof typeof TEXT)[]
 
-function declares(name: string, pair: ThemePair): boolean {
-  return CSS.includes(`--${name}: light-dark(${pair.light}, ${pair.dark});`)
+function at<T>(rec: Record<string, T>, key: string): T {
+  const v = rec[key]
+  if (v === undefined) throw new Error(`missing token ${key}`)
+  return v
 }
 
-describe('index.css mirrors src/lib/tokens.ts', () => {
-  it.each([
-    ...HUES.map((h) => [h, FILL[h]] as const),
-    ...HUES.map((h) => [`${h}-text`, TEXT[h]] as const),
-    ['abyss', GROUND.abyss] as const,
-    ['hull', GROUND.hull] as const,
-    ['focus-ring', FOCUS_RING] as const,
-    ['deepwater-ink', DEEPWATER_INK] as const,
-    ['input-border', INPUT_BORDER] as const,
-  ])('--%s', (name, pair) => {
-    expect(declares(name, pair)).toBe(true)
+/** Holo's block starts at its selector; Signal's tokens live in `:root` above it. */
+const HOLO_AT = CSS.indexOf(":root[data-brand='holo'] {")
+const HOLO_END = CSS.indexOf('@media (prefers-color-scheme: dark)', HOLO_AT)
+const SCOPE: Record<keyof typeof BRANDS, string> = {
+  signal: CSS.slice(0, HOLO_AT),
+  holo: CSS.slice(HOLO_AT, HOLO_END),
+}
+
+describe('Holo theme is scoped', () => {
+  it('has a [data-brand=holo] block after the default tokens', () => {
+    expect(HOLO_AT).toBeGreaterThan(0)
+    expect(HOLO_END).toBeGreaterThan(HOLO_AT)
   })
 })
 
-describe('WCAG AA contrast', () => {
+const brandEntries = Object.entries(BRANDS) as [keyof typeof BRANDS, BrandTokens][]
+
+describe.each(brandEntries)('%s: index.css mirrors src/lib/tokens.ts', (brand, t) => {
+  const hues = Object.keys(t.fill)
+  const cases: [string, { light: string; dark: string }][] = [
+    ...hues.map((h): [string, { light: string; dark: string }] => [h, at(t.fill, h)]),
+    ...hues.map((h): [string, { light: string; dark: string }] => [`${h}-text`, at(t.text, h)]),
+    ...Object.entries(t.grounds),
+    ['focus-ring', t.focusRing],
+    ['input-border', t.inputBorder],
+  ]
+  it.each(cases)('--%s', (name, pair) => {
+    expect(SCOPE[brand]).toContain(`--${name}: light-dark(${pair.light}, ${pair.dark});`)
+  })
+})
+
+describe.each(brandEntries)('%s: WCAG AA contrast', (_brand, t) => {
+  const hues = Object.keys(t.fill)
+  const grounds = Object.values(t.grounds)
   const textCases = THEMES.flatMap((theme) =>
-    HUES.flatMap((hue) => {
-      const fg = hexToRgb(TEXT[hue][theme])
-      const tint = hexToRgb(FILL[hue][theme])
-      return (['abyss', 'hull'] as const).flatMap((g) => {
-        const bg = hexToRgb(GROUND[g][theme])
+    hues.flatMap((hue) => {
+      const fg = hexToRgb(at(t.text, hue)[theme])
+      const tint = hexToRgb(at(t.fill, hue)[theme])
+      return grounds.flatMap((g, i) => {
+        const bg = hexToRgb(g[theme])
         return [
-          [`${theme} ${hue}-text on ${g}`, contrast(fg, bg)] as const,
+          [`${theme} ${hue}-text on ground ${String(i)}`, contrast(fg, bg)] as const,
           [
-            `${theme} ${hue}-text in chip on ${g}`,
-            contrast(fg, over(tint, CHIP_TINT[hue], bg)),
+            `${theme} ${hue}-text in chip on ground ${String(i)}`,
+            contrast(fg, over(tint, at(t.chipTint, hue), bg)),
           ] as const,
         ]
       })
@@ -63,14 +78,14 @@ describe('WCAG AA contrast', () => {
   })
 
   const ringCases = THEMES.flatMap((theme) =>
-    (['abyss', 'hull'] as const).flatMap((g) => [
+    grounds.flatMap((g, i) => [
       [
-        `${theme} focus ring on ${g}`,
-        contrast(hexToRgb(FOCUS_RING[theme]), hexToRgb(GROUND[g][theme])),
+        `${theme} focus ring on ground ${String(i)}`,
+        contrast(hexToRgb(t.focusRing[theme]), hexToRgb(g[theme])),
       ] as const,
       [
-        `${theme} input border on ${g}`,
-        contrast(hexToRgb(INPUT_BORDER[theme]), hexToRgb(GROUND[g][theme])),
+        `${theme} input border on ground ${String(i)}`,
+        contrast(hexToRgb(t.inputBorder[theme]), hexToRgb(g[theme])),
       ] as const,
     ]),
   )
@@ -79,14 +94,24 @@ describe('WCAG AA contrast', () => {
     expect(ratio).toBeGreaterThanOrEqual(3)
   })
 
-  it.each(THEMES)('%s primary button: Abyss ink on the Signal fill >= 4.5', (theme) => {
-    expect(contrast(hexToRgb(ABYSS_INK), hexToRgb(FILL.signal[theme]))).toBeGreaterThanOrEqual(4.5)
-  })
+  const buttonCases = THEMES.flatMap((theme) =>
+    t.buttons.map(
+      ([hue, ink]) =>
+        [
+          `${theme} button ink on the ${hue} fill`,
+          contrast(hexToRgb(ink[theme]), hexToRgb(at(t.fill, hue)[theme])),
+        ] as const,
+    ),
+  )
 
-  it.each(THEMES)('%s secondary button: Deepwater ink on the Deepwater fill >= 4.5', (theme) => {
-    expect(
-      contrast(hexToRgb(DEEPWATER_INK[theme]), hexToRgb(FILL.deepwater[theme])),
-    ).toBeGreaterThanOrEqual(4.5)
+  it.each(buttonCases)('%s >= 4.5 (got %f)', (_label, ratio) => {
+    expect(ratio).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+describe('Holo exports stay in step', () => {
+  it('every Holo fill has a text variant', () => {
+    expect(Object.keys(HOLO_TEXT)).toEqual(Object.keys(HOLO_FILL))
   })
 })
 

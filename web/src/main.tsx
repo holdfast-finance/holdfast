@@ -10,8 +10,10 @@ import { createBrowserRouter, RouterProvider } from 'react-router'
 
 import { Providers } from '@/app/Providers'
 import { routes } from '@/app/routes'
+import { initBrand } from '@/lib/brand'
 import { initTheme } from '@/stores/theme'
 
+initBrand()
 initTheme()
 
 async function enableMocking(): Promise<void> {
