@@ -166,33 +166,56 @@ class AuthService:
             )
             raise _rate_limited(attempt.retry_after, attempt.message)
 
-        token: str | None = None
-        user: AppUser | None = None
+        # No DB connection is held while queued for or running argon2: read the user in one short
+        # session, verify with no session open, then open a second session only to finish a login
+        # that passed the password (and TOTP) check.
         async with unscoped_session(self.ctx.factory) as s:
             user = (
                 await s.execute(
                     select(AppUser).where(AppUser.email == email, AppUser.disabled_at.is_(None))
                 )
             ).scalar_one_or_none()
-            ok = await passwords.verify_password_async(
-                user.password_hash if user else None, body.password
-            )
-            if ok and user is not None and user.totp_enabled:
-                if body.totp_code is not None:
-                    ok = await self._totp_matches(user, body.totp_code)
-                elif body.recovery_code is not None:
-                    ok = await self._consume_recovery_code(s, user, body.recovery_code)
-                else:
-                    ok = False
+        verified_hash = user.password_hash if user else None
+        ok = await passwords.verify_password_async(verified_hash, body.password)
+        if ok and user is not None and user.totp_enabled:
+            if body.totp_code is not None:
+                ok = await self._totp_matches(user, body.totp_code)
             else:
-                ok = False  # no user, wrong password, or no second factor configured
-            if ok and user is not None:
-                if user.password_hash and passwords.needs_rehash(user.password_hash):
-                    user.password_hash = await passwords.hash_password_async(body.password)
-                user.last_login_at = sessions.utcnow()
-                token = await sessions.create(
-                    s, user.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
+                ok = body.recovery_code is not None  # consumed below, inside the session
+        else:
+            ok = False  # no user, wrong password, or no second factor configured
+
+        token: str | None = None
+        if ok and user is not None:
+            rehashed = None
+            if verified_hash and passwords.needs_rehash(verified_hash):
+                rehashed = await passwords.hash_password_async(body.password)
+            async with unscoped_session(self.ctx.factory) as s:
+                current = (
+                    await s.execute(
+                        select(AppUser)
+                        .where(AppUser.id == user.id, AppUser.disabled_at.is_(None))
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                # The account may have changed while we verified (disabled, new password, TOTP
+                # off). Any of those fails the attempt instead of trusting what we read before.
+                fresh = (
+                    current is not None
+                    and current.password_hash == verified_hash
+                    and current.totp_enabled
                 )
+                recovery = body.recovery_code if body.totp_code is None else None
+                if fresh and current is not None and recovery is not None:
+                    fresh = await self._consume_recovery_code(s, current, recovery)
+                if fresh and current is not None:
+                    if rehashed is not None:
+                        current.password_hash = rehashed
+                    current.last_login_at = sessions.utcnow()
+                    token = await sessions.create(
+                        s, current.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
+                    )
+                    user = current
 
         if token is None or user is None:
             # The reserved attempt stays counted as the failure.
