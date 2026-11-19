@@ -48,6 +48,8 @@ def load_allowlist(path: Path, scope: str) -> tuple[set[str], list[str]]:
 
 
 def pip_findings(data: dict) -> list[tuple[str, set[str]]]:
+    if not isinstance(data, dict) or not isinstance(data.get("dependencies"), list):
+        raise ValueError("pip-audit output lacks a 'dependencies' list")
     out = []
     for dep in data.get("dependencies", []):
         for v in dep.get("vulns", []):
@@ -57,8 +59,10 @@ def pip_findings(data: dict) -> list[tuple[str, set[str]]]:
 
 
 def pnpm_findings(data: dict) -> list[tuple[str, set[str]]]:
+    if not isinstance(data, dict) or "error" in data or not isinstance(data.get("advisories"), dict):
+        raise ValueError("pnpm audit output lacks an 'advisories' object (or reports an error)")
     out = []
-    for adv in (data.get("advisories") or {}).values():
+    for adv in data["advisories"].values():
         if adv.get("severity") in ("high", "critical"):
             ids = {str(adv.get("github_advisory_id", "")), *map(str, adv.get("cves", []))}
             label = f"{adv.get('module_name')}: {adv.get('title')} [{adv.get('severity')}]"
@@ -74,7 +78,11 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         print(f"::error::could not read audit output {audit}: {exc}")
         return 1
-    findings = pip_findings(data) if scope == "pip" else pnpm_findings(data)
+    try:
+        findings = pip_findings(data) if scope == "pip" else pnpm_findings(data)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"::error::malformed {scope} audit output, failing closed: {exc}")
+        return 1
     for label, ids in findings:
         if ids & allowed:
             print(f"allowlisted: {label}")

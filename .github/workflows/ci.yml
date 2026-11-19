@@ -110,7 +110,7 @@ jobs:
       - name: pip-audit (blocking, expiring allowlist)
         run: |
           uv export --frozen --no-hashes --no-emit-project --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
-          uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --progress-spinner off -f json -o "$RUNNER_TEMP/pip-audit.json" || true
+          uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/requirements.txt" --progress-spinner off -f json -o "$RUNNER_TEMP/pip-audit.json" || true
           python3 ../scripts/audit_gate.py pip "$RUNNER_TEMP/pip-audit.json" ../.github/audit-allowlist.yml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -167,7 +167,7 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             opts=(--log-opts="$BASE_SHA..$HEAD_SHA")
           fi
-          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 \
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git --no-banner --redact -v "${opts[@]}" /repo
 
   protected-paths:
@@ -224,11 +224,26 @@ jobs:
         if: always()
         run: rm -f .env
 
+  # New pushes invalidate a Bulwark sign-off: drop the label on every synchronize.
+  revoke-approval:
+    if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Remove bulwark-approved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/bulwark-approved" || echo "label not present"
+
   # The single stable required check. Jobs skipped by `detect` count as passing; failed or
   # cancelled jobs do not. Add every new job to `needs`.
   ci-required:
     if: always()
-    needs: [detect, backend, web, secrets, protected-paths, compose]
+    needs: [detect, backend, web, secrets, protected-paths, revoke-approval, compose]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

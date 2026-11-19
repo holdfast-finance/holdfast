@@ -11,25 +11,34 @@ case ",${LABELS:-}," in *,bulwark-approved,*) approved=true ;; esac
 problems=()
 range="$base...$head"
 
-protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/caddy/)'
+protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/caddy/|scripts/(check-protected-paths\.sh|audit_gate\.py|protect-main\.sh)$)'
 while IFS= read -r f; do
   [ -n "$f" ] && problems+=("protected path touched: $f")
-done < <(git diff --name-only "$range" | grep -E "$protected_re" || true)
+done < <(git diff --no-renames --name-only "$range" | grep -E "$protected_re" || true)
 
 # RLS migrations: any added/modified migration that mentions RLS or policies.
 while IFS= read -r f; do
   [ -z "$f" ] && continue
-  if git show "$head:$f" 2>/dev/null | grep -qiE 'row level security|create policy|drop policy|force row'; then
+  if git show "$head:$f" 2>/dev/null | grep -qiE 'row level security|create policy|alter policy|drop policy|force row'; then
     problems+=("RLS migration touched: $f")
   fi
-done < <(git diff --name-only --diff-filter=AM "$range" -- backend/migrations/versions)
+done < <(git diff --no-renames --name-only --diff-filter=AM "$range" -- backend/migrations/versions)
 
 while IFS= read -r f; do
   [ -n "$f" ] && problems+=("test deleted: $f")
-done < <(git diff --name-only --diff-filter=D -M "$range" -- backend/tests)
+done < <(git diff --no-renames --name-only --diff-filter=D "$range" -- backend/tests)
 
-skips=$(git diff -U0 --diff-filter=AM "$range" -- backend/tests |
+while IFS= read -r f; do
+  [ -n "$f" ] && problems+=("migration deleted: $f")
+done < <(git diff --no-renames --name-only --diff-filter=D "$range" -- backend/migrations/versions)
+
+skips=$(git diff --no-renames -U0 --diff-filter=AM "$range" -- backend/tests |
   grep -E '^\+[^+]' | grep -E 'pytest\.mark\.skip|pytest\.skip\(|@unittest\.skip' || true)
+weakened=$(git diff --no-renames -U0 --diff-filter=AM "$range" -- backend/migrations/versions |
+  grep -E '^\+[^+]' | grep -iE 'alter policy|drop policy|disable row level security|no force row' || true)
+if [ -n "$weakened" ]; then
+  problems+=("RLS weakened in migration diff: $(echo "$weakened" | head -3 | tr '\n' ' ')")
+fi
 if [ -n "$skips" ]; then
   problems+=("newly added skip marker(s) under backend/tests: $(echo "$skips" | head -3 | tr '\n' ' ')")
 fi
