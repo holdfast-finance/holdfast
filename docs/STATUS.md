@@ -6,7 +6,7 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 |---|---|---|---|---|
 | −1 | Repo foundation + Claude Code setup | PASS (2026-11-18) | `main` | this commit |
 | 0 | Scaffold | PASS-WITH-BLOCKED (2026-11-19), merged `phase-0` | `phase/0-scaffold` | [PHASE-0](phases/PHASE-0.md) |
-| 1 | Auth, household, data model (+ RLS, per-person visibility) | IN PROGRESS (2026-11-19) | `phase/1-auth-data-model` | |
+| 1 | Auth, household, data model (+ RLS, per-person visibility) | PASS (2026-11-19), merged `phase-1` | `phase/1-auth-data-model` | [PHASE-1](phases/PHASE-1.md) |
 | 2 | Bank connectors: Plaid sandbox + SimpleFIN + Sync Health | NOT STARTED | | |
 | 3 | Historical import (+ competitor exports) | NOT STARTED | | |
 | 4 | Categorization, transfers, recurring | NOT STARTED | | |
@@ -23,17 +23,9 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 ## Resume here (checkpoint 2026-11-19)
 
-- **Active phase:** 1 (auth, household, data model) on branch `phase/1-auth-data-model`. The contract is `docs/phases/PHASE-1-contract.md`.
-- **In flight at checkpoint:** two worktree subagents under `.claude/worktrees/`:
-  - data-model (models, `0002_core_schema` migration, RLS, `app/db_context.py`, RLS tests)
-  - web-auth (setup wizard, passkey login, Household/Security settings, MSW mocks)
-  Their branches are named `worktree-agent-*`. If they finished, they have commits. If the session ended mid-run, they may hold partial work.
-- **Next steps:**
-  1. Check each `worktree-agent-*` branch: `git log phase/1-auth-data-model..<branch>`. Review, run its verification, and merge `--no-ff` into the phase branch. Rerun any workstream that's missing or incomplete, from the contract.
-  2. After data-model merges, start **auth-api** (contract "Auth model" + "API contract"): routes, services, sessions, CSRF, rate limits, setup token, audit, plus a Playwright e2e test with a CDP virtual authenticator in `web/e2e/`.
-  3. Integrate (`make up && make migrate && make test && make lint && make ports`). Run security-reviewer, money-invariants-reviewer, ui-brand-reviewer and phase-acceptance-checker, write `docs/phases/PHASE-1.md`, update this file, and **stop for owner approval** before merging to main.
+- **Phase 1 is done:** PASS, merged to `main` and tagged `phase-1`. The report is `docs/phases/PHASE-1.md`. The next phase waits for the owner's go.
+- **Before Phase 2 starts:** brand-theme plumbing (below), and security lows 1–2 from the Phase 1 report (argon2 queue holding a DB connection; confirm real client IPs reach Caddy).
 - **Queued after Phase 1 (owner decision 2026-11-18, ADR 0009):** two brands. Holo for Holdfast Cloud + mainstream marketing, Direction 01 for self-host. First task after Phase 1: brand-theme plumbing (`data-brand`, Holo tokens/fonts, AA test for both themes). The Cloud marketing site comes when the hosted tier is scheduled.
-- **Phase 1 progress (2026-11-18):** data-model and web-auth are merged and independently re-verified (backend 288 passed; web 141 passed). Running now: auth-api (with the Playwright passkey e2e test), data-model-fixes (the security and money review findings, edited into the unreleased 0002), and web-cleanup (token-pure components, lazy routes, UI review fixes). The security, UI-brand and money reviewers have run once on the merged work. Rerun security-reviewer on auth-api before phase-review.
 - **Carry into Phase 2 (money review):** dedupe Plaid against imported rows by `(account_id, posted_date, amount)` (Plaid wins); the import fingerprint hash includes a same-day ordinal; handle pending→posted via `transaction.pending_external_id`; save `tx_cursor` only after its batch commits; upsert on `(account_id, external_id)` and handle `removed`; parse Plaid JSON with `parse_float=Decimal`; negate Plaid signs once in `integrations/plaid/`, with a sign test per product; API amounts are strings, with an OpenAPI test; never sum across currencies; splits are written through one domain service; transfer pairing is service-enforced (2 legs, opposite signs, different accounts); metrics use `COALESCE(splits, parent)` and exclude `is_transfer`.
 - **Local env:** `.env` exists (includes Plaid sandbox/prod keys, `PLAID_ENV=sandbox`; never print or commit it). The dev stack is compose project `holdfast` on 127.0.0.1:443 / 5432 / 56379. Subagents must use their own containers and ports.
 - **Shell gotchas:** `cp` is interactive (use `command cp -f`), and a bare `ls` can hang.
