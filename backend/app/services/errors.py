@@ -21,6 +21,7 @@ STATUS: dict[str, int] = {
     "not_found": 404,
     "rate_limited": 429,
     "validation_error": 422,
+    "payload_too_large": 413,
 }
 
 

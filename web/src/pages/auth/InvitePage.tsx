@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query'
 import { KeyRound } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 
 import { registerPasskey, useAcceptInvite } from '@/api/auth'
 import { passkeysAvailable } from '@/api/client'
@@ -11,7 +11,7 @@ import { PasskeyNotice } from '@/components/PasskeyNotice'
 import { Button } from '@/components/ui/button'
 
 /**
- * /invite#<token> (and the older /invite/:token). Accepting creates this person's user and a
+ * /invite#<token> (older /invite/:token links are redirected here by the router). Accepting creates this person's user and a
  * session; the passkey comes right after so they never end up with an account they can't get
  * back into.
  *
@@ -19,9 +19,8 @@ import { Button } from '@/components/ui/button'
  * of proxy logs and Referer headers. It's read once, then stripped from the address bar.
  */
 export function InvitePage() {
-  const params = useParams()
   const location = useLocation()
-  const [token] = useState(() => params.token ?? location.hash.slice(1))
+  const [token] = useState(() => location.hash.slice(1))
   const navigate = useNavigate()
   const accept = useAcceptInvite()
   const passkey = useMutation({

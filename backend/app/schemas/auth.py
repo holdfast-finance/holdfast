@@ -7,11 +7,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.schemas.common import Code, Email, FilingRole, Model, Name, Token, UserRole
+from app.schemas.common import (
+    Code,
+    Email,
+    FilingRole,
+    Model,
+    Name,
+    Token,
+    UserRole,
+    WebAuthnCredential,
+)
 from app.security.passwords import MAX_LENGTH, MIN_LENGTH
 
 
@@ -64,12 +73,12 @@ class PasskeyRegisterOptionsIn(Model):
 
 
 class PasskeyRegisterVerifyIn(Model):
-    credential: dict[str, Any]
+    credential: WebAuthnCredential
     nickname: str | None = Field(default=None, max_length=100)
 
 
 class PasskeyAssertionIn(Model):
-    credential: dict[str, Any]
+    credential: WebAuthnCredential
 
 
 class CredentialOut(Model):

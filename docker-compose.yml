@@ -25,10 +25,12 @@ x-backend-env: &backend-env
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
   APP_ENV: ${APP_ENV:-dev}
+  E2E_HOOKS: ${E2E_HOOKS:-false}
   APP_BASE_URL: ${APP_BASE_URL:-}
   APP_HOST: ${APP_HOST:-}
   SESSION_SECRET: ${SESSION_SECRET:-}
   FERNET_KEY: ${FERNET_KEY:-}
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
   DATABASE_URL: ${DATABASE_URL:?set in .env (run make keys)}
   POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
   REDIS_URL: ${REDIS_URL:-}
@@ -214,7 +216,12 @@ networks:
   backend:
     internal: true
   # caddy <-> api/web. api and worker need egress here (Plaid, AI providers).
-  frontend: {}
+  # The subnet is pinned so the API can trust X-Forwarded-For from this network only
+  # (TRUSTED_PROXIES default = loopback + 172.30.10.0/24, app/config.py FRONTEND_SUBNET).
+  frontend:
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
 
 volumes:
   pgdata:

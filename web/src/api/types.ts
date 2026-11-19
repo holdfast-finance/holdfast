@@ -68,6 +68,8 @@ export const ERROR_CODES = {
   rateLimited: 'rate_limited',
   /** 422: request body failed validation. `message` is human readable. */
   validationError: 'validation_error',
+  /** 413: request body over 1 MiB (Caddy and the API both enforce it). */
+  payloadTooLarge: 'payload_too_large',
 } as const
 
 export type KnownErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]

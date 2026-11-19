@@ -114,6 +114,7 @@ def settings(api_db_url: str, api_redis_url: str) -> Settings:
     return Settings(
         _env_file=None,  # type: ignore[call-arg]
         app_env="test",
+        e2e_hooks=True,
         app_host=HOST,
         app_base_url=ORIGIN,
         database_url=api_db_url,

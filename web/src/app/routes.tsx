@@ -17,6 +17,7 @@ import {
   SectionSkeleton,
   ShellPageSkeleton,
 } from '@/components/layout/RouteSkeletons'
+import { LegacyInviteRedirect } from '@/pages/auth/LegacyInviteRedirect'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
@@ -34,9 +35,9 @@ export const routes: RouteObject[] = [
   // Lazy chunks: auth and settings load on demand (src/app/lazyRoutes.ts).
   { path: '/login', element: withSuspense(<LoginPage />, <AuthPageSkeleton />) },
   { path: '/setup', element: withSuspense(<SetupPage />, <AuthPageSkeleton />) },
-  // Invite token in the fragment (/invite#<token>); /invite/:token keeps old links working.
+  // Invite token in the fragment (/invite#<token>); old /invite/:token links are redirected there.
   { path: '/invite', element: withSuspense(<InvitePage />, <AuthPageSkeleton />) },
-  { path: '/invite/:token', element: withSuspense(<InvitePage />, <AuthPageSkeleton />) },
+  { path: '/invite/:token', element: <LegacyInviteRedirect /> },
   // Everything else sits behind the session guard.
   {
     element: <RequireAuth />,

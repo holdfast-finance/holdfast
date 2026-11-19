@@ -131,10 +131,12 @@ describe('invite link in the fragment', () => {
     expect(db.invites[0]?.used).toBe(true)
   })
 
-  it('still accepts the older /invite/<token> links', async () => {
+  it('moves older /invite/<token> links into the fragment, replacing history', async () => {
     seedInvite()
-    renderApp('/invite/tok123')
+    const { router } = renderApp('/invite/tok123')
     await userEvent.click(await screen.findByRole('button', { name: 'Accept invite' }))
+    expect(router.state.location.pathname).toBe('/invite')
+    expect(router.state.historyAction).toBe('REPLACE')
     expect(await screen.findByRole('heading', { name: 'Welcome, Sam Example' })).toBeVisible()
   })
 

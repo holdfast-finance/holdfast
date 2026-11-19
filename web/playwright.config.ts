@@ -6,7 +6,8 @@ import { defineConfig, devices } from '@playwright/test'
  * authenticator (Chromium only).
  *
  *   BASE_URL      default https://localhost (Caddy's self-signed dev cert is accepted)
- *   SETUP_TOKEN   optional; otherwise read from GET /api/test/setup-token (APP_ENV=test only) or
+ *   SETUP_TOKEN   optional; otherwise read from GET /api/test/setup-token (API with APP_ENV=test
+ *                 and E2E_HOOKS=true only) or
  *                 from `docker compose logs api` (override with SETUP_TOKEN_CMD)
  *
  * The first-run spec needs a fresh instance (GET /api/setup/status -> needs_setup) and skips
