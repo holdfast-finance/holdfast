@@ -44,6 +44,9 @@ export const GROUND = {
 /** Focus ring: non-text UI, needs 3:1 against ground and surface. Dark keeps Signal. */
 export const FOCUS_RING: ThemePair = { light: '#0b8a6f', dark: '#3df5c8' }
 
+/** Form control borders: non-text UI, needs 3:1 against ground and surface (WCAG 1.4.11). */
+export const INPUT_BORDER: ThemePair = { light: '#7d869a', dark: '#606879' }
+
 /** Ink that sits on a Signal fill (primary button text). */
 export const ABYSS_INK: Hex = '#07080c'
 

@@ -37,6 +37,10 @@
   /* Ink on a Deepwater fill (secondary button/badge text): >= 4.5:1 in both themes. */
   --deepwater-ink: light-dark(#ffffff, #07080c);
 
+  /* Form control borders (inputs, selects): >= 3:1 non-text contrast on ground and surface.
+     Hairline stays for decorative rules and card edges. */
+  --input-border: light-dark(#7d869a, #606879);
+
   /* Focus ring: >= 3:1 non-text contrast on ground and surface. Signal in dark. */
   --focus-ring: light-dark(#0b8a6f, #3df5c8);
 
@@ -76,7 +80,7 @@
   --accent-foreground: var(--text);
   --destructive: var(--breach);
   --border: var(--hairline);
-  --input: var(--hairline);
+  --input: var(--input-border);
   --ring: var(--focus-ring);
   --chart-1: var(--signal);
   --chart-2: var(--deepwater);
