@@ -27,6 +27,8 @@ Manage with: `cf email-routing rules list-account -z holdfastfinance.app`, `cf e
   - `@` A → 185.199.108–111.153, AAAA → 2606:50c0:8000–8003::153
   - `www` CNAME → `holdfast-finance.github.io` (GitHub redirects www → apex)
 - Pages custom domain `holdfastfinance.app`, HTTPS enforced.
+- **Verified domain** for the org (2026-11-19), which prevents takeover by other GitHub accounts. TXT `_github-pages-challenge-holdfast-finance` = `481396e08071f8a5b67f592ee1f1fa`. **Keep this record**, because GitHub re-checks it.
+- Org profile: name "Holdfast Finance", website https://holdfastfinance.app, public and billing email `hello@holdfastfinance.app`. Owner: GrayManSam (admin).
 - Why not proxied (orange cloud): proxying interferes with GitHub's certificate issuance and renewal, and GitHub Pages already serves over a CDN.
 
 ## GitHub org: `holdfast-finance`
@@ -34,5 +36,4 @@ Manage with: `cf email-routing rules list-account -z holdfastfinance.app`, `cf e
 - `holdfast`: product monorepo, private until the open-source milestone (PLAN 17.6). Pages for a private repo needs a paid plan, which is why the site is a separate public repo.
 
 ## Owner to-do (UI-only steps)
-1. **Verify the domain for Pages** (prevents domain takeover): GitHub → org `holdfast-finance` → Settings → Pages → *Add a domain* → `holdfastfinance.app`. Paste the `_github-pages-challenge-holdfast-finance` TXT value it shows to Claude, or add it in Cloudflare DNS, then click Verify.
-2. Org settings: require 2FA for members. Set the org's public email to `hello@holdfastfinance.app`.
+1. Org settings: require 2FA for members (https://github.com/organizations/holdfast-finance/settings/security).
