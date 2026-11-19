@@ -164,17 +164,20 @@ export function useAcceptInvite() {
 
 // --- Security settings -------------------------------------------------------------------------
 
-export function usePasskeys() {
+export function usePasskeys(enabled = true) {
   return useQuery({
     queryKey: queryKeys.passkeys,
     queryFn: ({ signal }) => api<PasskeyList>('/auth/passkeys', { signal }),
+    enabled,
   })
 }
 
 export function useAddPasskey() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (nickname?: string) => registerPasskey(nickname),
+    // Step-up once the account already has a way in; the API exempts the very first credential,
+    // so setup, invite accept and the missing-passkey banner never see the prompt.
+    mutationFn: (nickname?: string) => withReauth(() => registerPasskey(nickname)),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.passkeys }),
   })
 }
@@ -192,7 +195,8 @@ export function useRemovePasskey() {
 
 export function useTotpSetup() {
   return useMutation({
-    mutationFn: () => api<TotpSetupResponse>('/auth/totp/setup', { method: 'POST', body: {} }),
+    mutationFn: () =>
+      withReauth(() => api<TotpSetupResponse>('/auth/totp/setup', { method: 'POST', body: {} })),
   })
 }
 
@@ -200,7 +204,9 @@ export function useTotpEnable() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (code: string) =>
-      api<TotpEnableResponse>('/auth/totp/enable', { method: 'POST', body: { code } }),
+      withReauth(() =>
+        api<TotpEnableResponse>('/auth/totp/enable', { method: 'POST', body: { code } }),
+      ),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.me }),
   })
 }

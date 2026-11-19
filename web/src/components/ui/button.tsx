@@ -8,18 +8,18 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // Holdfast: Signal fill, Abyss text, soft Signal glow on hover (BRAND.md UI atoms).
+        // Holdfast: primary fill, primary-foreground text, soft primary glow on hover (BRAND.md UI atoms).
         default: 'bg-primary text-primary-foreground hover:shadow-glow',
-        // Holdfast secondary button: Hull fill, hairline border, Text.
+        // Holdfast secondary button: Card fill, border, foreground text.
         outline:
-          'border-border bg-card hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50',
+          'border-border bg-card hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-border dark:bg-border/30 dark:hover:bg-border/50',
         secondary:
           'bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground',
         ghost:
           'hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50',
         destructive:
-          'bg-destructive/10 text-breach-text hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40',
-        link: 'text-signal-text underline-offset-4 hover:underline',
+          'bg-destructive/10 text-destructive-text hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40',
+        link: 'text-primary-text underline-offset-4 hover:underline',
       },
       size: {
         // Holdfast: touch targets are >= 44px below md (PLAN 11.1).

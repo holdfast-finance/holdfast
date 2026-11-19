@@ -6,10 +6,12 @@ import { Navigate } from 'react-router'
 import { z } from 'zod'
 
 import { usePasskeyLogin, usePasswordLogin, useSetupStatus } from '@/api/auth'
+import { passkeysAvailable } from '@/api/client'
 import type { PasswordLoginRequest } from '@/api/types'
 import { RedirectIfSignedIn } from '@/app/guards'
 import { Field, FormError } from '@/components/forms/Field'
 import { AuthLayout } from '@/components/layout/AuthLayout'
+import { PasskeyNotice } from '@/components/PasskeyNotice'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -114,21 +116,20 @@ function LoginScreen() {
   const passkey = usePasskeyLogin()
   const setup = useSetupStatus()
   const [showFallback, setShowFallback] = useState(false)
+  const available = passkeysAvailable()
 
   if (setup.data?.needs_setup) return <Navigate to="/setup" replace />
 
   return (
-    <AuthLayout
-      title="Sign in"
-      subtitle="Your money, on your hardware. Unlock it with your passkey."
-    >
+    <AuthLayout title="Sign in" subtitle="Your money. Your keys. Unlock with your passkey.">
       <div className="flex flex-col gap-4">
+        {!available && <PasskeyNotice />}
         <FormError error={passkey.error} />
         <Button
           type="button"
           size="lg"
           className="h-14 text-base md:h-14"
-          disabled={passkey.isPending}
+          disabled={!available || passkey.isPending}
           onClick={() => {
             passkey.mutate()
           }}
@@ -136,20 +137,22 @@ function LoginScreen() {
           <KeyRound aria-hidden="true" className="size-5" />
           {passkey.isPending ? 'Waiting for your passkey…' : 'Sign in with passkey'}
         </Button>
-        {!showFallback ? (
-          <Button
-            type="button"
-            variant="link"
-            className="min-h-11"
-            aria-expanded={false}
-            onClick={() => {
-              setShowFallback(true)
-            }}
-          >
-            Use password + code instead
-          </Button>
-        ) : (
+        {/* The toggle stays mounted so focus never drops to <body> when the form opens. */}
+        <Button
+          type="button"
+          variant="link"
+          className="min-h-11"
+          aria-expanded={showFallback}
+          aria-controls="password-fallback"
+          onClick={() => {
+            setShowFallback((v) => !v)
+          }}
+        >
+          {showFallback ? 'Hide password + code' : 'Use password + code instead'}
+        </Button>
+        {showFallback && (
           <section
+            id="password-fallback"
             aria-labelledby="fallback-title"
             className="flex flex-col gap-4 border-t border-border pt-6"
           >

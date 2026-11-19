@@ -87,7 +87,8 @@ export function SettingsSection({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <h2 id={id} className="text-lg">
+          {/* tabIndex -1: flows that swap content move focus here (never in the tab order). */}
+          <h2 id={id} tabIndex={-1} className="text-lg outline-none">
             {title}
           </h2>
           {description && <p className="text-sm text-muted-foreground">{description}</p>}

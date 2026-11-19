@@ -1,18 +1,27 @@
 import { useMutation } from '@tanstack/react-query'
 import { KeyRound } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
 
 import { registerPasskey, useAcceptInvite } from '@/api/auth'
+import { passkeysAvailable } from '@/api/client'
 import { FormError } from '@/components/forms/Field'
 import { AuthLayout } from '@/components/layout/AuthLayout'
+import { PasskeyNotice } from '@/components/PasskeyNotice'
 import { Button } from '@/components/ui/button'
 
 /**
- * /invite/:token. Accepting creates this person's user and a session; the passkey comes right
- * after so they never end up with an account they can't get back into.
+ * /invite#<token> (and the older /invite/:token). Accepting creates this person's user and a
+ * session; the passkey comes right after so they never end up with an account they can't get
+ * back into.
+ *
+ * The token rides in the URL fragment, which browsers never send to a server, so it stays out
+ * of proxy logs and Referer headers. It's read once, then stripped from the address bar.
  */
 export function InvitePage() {
-  const { token = '' } = useParams()
+  const params = useParams()
+  const location = useLocation()
+  const [token] = useState(() => params.token ?? location.hash.slice(1))
   const navigate = useNavigate()
   const accept = useAcceptInvite()
   const passkey = useMutation({
@@ -22,18 +31,29 @@ export function InvitePage() {
     },
   })
 
+  useEffect(() => {
+    if (!window.location.hash) return
+    // Outside the router on purpose: a router navigation would re-render the route, and the
+    // token is already in state. Keeps the router's history entry (window.history.state).
+    const { pathname, search } = window.location
+    window.history.replaceState(window.history.state, '', pathname + search)
+  }, [])
+
   if (accept.isSuccess) {
     const name = accept.data.user.person?.display_name
+    const available = passkeysAvailable()
     return (
       <AuthLayout
         title={name ? `Welcome, ${name}` : 'Welcome in'}
-        subtitle={`You're part of ${accept.data.household.name}. Create your passkey to lock it in.`}
+        subtitle={`You're in ${accept.data.household.name}. Add a passkey to finish.`}
+        focusKey="accepted"
       >
         <div className="flex flex-col gap-4">
+          {!available && <PasskeyNotice />}
           <FormError error={passkey.error} />
           <Button
             size="lg"
-            disabled={passkey.isPending}
+            disabled={!available || passkey.isPending}
             onClick={() => {
               passkey.mutate()
             }}
@@ -49,7 +69,8 @@ export function InvitePage() {
   return (
     <AuthLayout
       title="You're invited"
-      subtitle="Someone you share finances with set up a Holdfast server and wants you in. Their server, shared books, your own sign-in."
+      subtitle="You've been invited to a shared Holdfast. Same books, your own sign-in."
+      focusKey="invite"
     >
       <div className="flex flex-col gap-4">
         <FormError error={accept.error} />
@@ -64,10 +85,12 @@ export function InvitePage() {
         </Button>
         <p className="text-xs text-muted-foreground">
           The link works once and expires after 24 hours. Already in?{' '}
-          <Link to="/login" className="text-primary-text underline-offset-4 hover:underline">
+          <Link
+            to="/login"
+            className="inline-flex min-h-11 items-center text-primary-text underline-offset-4 hover:underline"
+          >
             Sign in
           </Link>
-          .
         </p>
       </div>
     </AuthLayout>

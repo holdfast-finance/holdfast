@@ -7,10 +7,12 @@ import {
   ABYSS_INK,
   CHIP_TINT,
   contrast,
+  DEEPWATER_INK,
   FILL,
   FOCUS_RING,
   GROUND,
   hexToRgb,
+  INPUT_BORDER,
   over,
   TEXT,
   type ThemePair,
@@ -31,6 +33,8 @@ describe('index.css mirrors src/lib/tokens.ts', () => {
     ['abyss', GROUND.abyss] as const,
     ['hull', GROUND.hull] as const,
     ['focus-ring', FOCUS_RING] as const,
+    ['deepwater-ink', DEEPWATER_INK] as const,
+    ['input-border', INPUT_BORDER] as const,
   ])('--%s', (name, pair) => {
     expect(declares(name, pair)).toBe(true)
   })
@@ -59,13 +63,16 @@ describe('WCAG AA contrast', () => {
   })
 
   const ringCases = THEMES.flatMap((theme) =>
-    (['abyss', 'hull'] as const).map(
-      (g) =>
-        [
-          `${theme} focus ring on ${g}`,
-          contrast(hexToRgb(FOCUS_RING[theme]), hexToRgb(GROUND[g][theme])),
-        ] as const,
-    ),
+    (['abyss', 'hull'] as const).flatMap((g) => [
+      [
+        `${theme} focus ring on ${g}`,
+        contrast(hexToRgb(FOCUS_RING[theme]), hexToRgb(GROUND[g][theme])),
+      ] as const,
+      [
+        `${theme} input border on ${g}`,
+        contrast(hexToRgb(INPUT_BORDER[theme]), hexToRgb(GROUND[g][theme])),
+      ] as const,
+    ]),
   )
 
   it.each(ringCases)('%s >= 3.0 (got %f)', (_label, ratio) => {
@@ -74,6 +81,12 @@ describe('WCAG AA contrast', () => {
 
   it.each(THEMES)('%s primary button: Abyss ink on the Signal fill >= 4.5', (theme) => {
     expect(contrast(hexToRgb(ABYSS_INK), hexToRgb(FILL.signal[theme]))).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it.each(THEMES)('%s secondary button: Deepwater ink on the Deepwater fill >= 4.5', (theme) => {
+    expect(
+      contrast(hexToRgb(DEEPWATER_INK[theme]), hexToRgb(FILL.deepwater[theme])),
+    ).toBeGreaterThanOrEqual(4.5)
   })
 })
 

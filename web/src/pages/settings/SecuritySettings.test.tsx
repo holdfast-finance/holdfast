@@ -56,15 +56,27 @@ describe('Settings → Security: TOTP', () => {
     expect(codes).toHaveLength(10)
     expect(codes.map((li) => li.textContent)).toEqual(owner().recoveryCodes)
     expect(owner().totpEnabled).toBe(true)
+    // The form the user submitted is gone: focus lands on the codes' title.
+    expect(screen.getByRole('heading', { name: 'Save your recovery codes' })).toHaveFocus()
 
     await userEvent.click(screen.getByRole('button', { name: 'Copy codes' }))
     expect(writeText).toHaveBeenCalledWith(owner().recoveryCodes.join('\n'))
 
+    // Done waits for the "stored" checkbox.
+    const done = screen.getByRole('button', { name: 'Done' })
+    expect(done).toBeDisabled()
+    await userEvent.click(
+      screen.getByRole('checkbox', { name: "I've stored these somewhere safe" }),
+    )
+    expect(done).toBeEnabled()
+
     // Dismissed means gone: they are never shown again.
-    await userEvent.click(screen.getByRole('button', { name: 'I saved them' }))
+    await userEvent.click(done)
     expect(screen.queryByRole('list', { name: 'Recovery codes' })).not.toBeInTheDocument()
     expect(await screen.findByText('On')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Turn off' })).toBeEnabled()
+    // Focus returns to the section instead of falling to <body>.
+    expect(screen.getByRole('heading', { name: 'Authenticator codes' })).toHaveFocus()
   })
 
   it('validates the code format before calling the API', async () => {
@@ -82,7 +94,7 @@ describe('Settings → Security: passkeys', () => {
     renderSignedIn('/settings/security', { passkeys: 1 })
     const remove = await screen.findByRole('button', { name: 'Remove passkey Laptop' })
     expect(remove).toBeDisabled()
-    expect(remove).toHaveAccessibleDescription(/This is your only way in/)
+    expect(remove).toHaveAccessibleDescription(/Only one way in/)
   })
 
   it('allows removing the only passkey once TOTP is on', async () => {
@@ -181,9 +193,10 @@ describe('Settings → Security: password and sessions', () => {
     expect(await screen.findByText(/at least 12 characters/)).toBeVisible()
   })
 
-  it('shows active sessions as coming in Phase 9', async () => {
+  it('says the session list is on the way, without a phase number', async () => {
     renderSignedIn('/settings/security')
     expect(await screen.findByRole('heading', { name: 'Active sessions' })).toBeVisible()
-    expect(screen.getByText('Coming in Phase 9')).toBeVisible()
+    expect(screen.getByText(/Session list is on the way/)).toBeVisible()
+    expect(screen.queryByText(/Phase \d/)).not.toBeInTheDocument()
   })
 })

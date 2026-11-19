@@ -17,14 +17,14 @@ function SidebarLink({ id }: { id: PageId }) {
         end={page.path === '/'}
         className={({ isActive }) =>
           cn(
-            'flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium text-text-muted transition-colors hover:bg-hull-raised hover:text-text',
-            isActive && 'bg-sidebar-accent text-text',
+            'flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+            isActive && 'bg-sidebar-accent text-foreground',
           )
         }
       >
         {({ isActive }) => (
           <>
-            <Icon aria-hidden="true" className={cn('size-4', isActive && 'text-signal-text')} />
+            <Icon aria-hidden="true" className={cn('size-4', isActive && 'text-primary-text')} />
             {page.label}
           </>
         )}
@@ -37,14 +37,14 @@ export function Sidebar() {
   return (
     <aside
       data-testid="desktop-sidebar"
-      className="sticky top-0 flex h-dvh w-60 shrink-0 flex-col border-r border-hairline bg-sidebar px-3 py-5"
+      className="sticky top-0 flex h-dvh w-60 shrink-0 flex-col border-r border-border bg-sidebar px-3 py-5"
     >
       <NavLink
         to="/"
         className="mb-6 flex min-h-11 items-center gap-2.5 rounded-lg px-3"
         aria-label="holdfast home"
       >
-        <Logomark className="size-6 text-signal" />
+        <Logomark className="size-6 text-primary" />
         <Wordmark />
       </NavLink>
       <nav aria-label="Main" className="flex flex-1 flex-col gap-4 overflow-y-auto">
@@ -60,7 +60,7 @@ export function Sidebar() {
           ))}
         </ul>
       </nav>
-      <div className="mt-4 flex items-center justify-between gap-2 border-t border-hairline px-3 pt-4">
+      <div className="mt-4 flex items-center justify-between gap-2 border-t border-border px-3 pt-4">
         <ApiStatusIndicator />
         <ThemeToggle />
       </div>

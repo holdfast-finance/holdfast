@@ -1,27 +1,42 @@
+import { Suspense, type ReactNode } from 'react'
 import { Navigate, type RouteObject } from 'react-router'
 
 import { RequireAuth } from '@/app/guards'
 import { PAGES, type PageId } from '@/app/nav'
+import {
+  HouseholdSettings,
+  InvitePage,
+  LoginPage,
+  SecuritySettings,
+  SettingsLayout,
+  SetupPage,
+} from '@/app/lazyRoutes'
 import { AppShell } from '@/components/layout/AppShell'
-import { InvitePage } from '@/pages/auth/InvitePage'
-import { LoginPage } from '@/pages/auth/LoginPage'
-import { SetupPage } from '@/pages/auth/SetupPage'
+import {
+  AuthPageSkeleton,
+  SectionSkeleton,
+  ShellPageSkeleton,
+} from '@/components/layout/RouteSkeletons'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
-import { HouseholdSettings } from '@/pages/settings/HouseholdSettings'
-import { SecuritySettings } from '@/pages/settings/SecuritySettings'
-import { SettingsLayout } from '@/pages/settings/SettingsLayout'
 
 const placeholderIds = (Object.keys(PAGES) as PageId[]).filter(
   (id) => id !== 'overview' && id !== 'settings',
 )
 
+function withSuspense(node: ReactNode, fallback: ReactNode) {
+  return <Suspense fallback={fallback}>{node}</Suspense>
+}
+
 export const routes: RouteObject[] = [
   // Public: no session needed.
-  { path: '/login', element: <LoginPage /> },
-  { path: '/setup', element: <SetupPage /> },
-  { path: '/invite/:token', element: <InvitePage /> },
+  // Lazy chunks: auth and settings load on demand (src/app/lazyRoutes.ts).
+  { path: '/login', element: withSuspense(<LoginPage />, <AuthPageSkeleton />) },
+  { path: '/setup', element: withSuspense(<SetupPage />, <AuthPageSkeleton />) },
+  // Invite token in the fragment (/invite#<token>); /invite/:token keeps old links working.
+  { path: '/invite', element: withSuspense(<InvitePage />, <AuthPageSkeleton />) },
+  { path: '/invite/:token', element: withSuspense(<InvitePage />, <AuthPageSkeleton />) },
   // Everything else sits behind the session guard.
   {
     element: <RequireAuth />,
@@ -32,11 +47,17 @@ export const routes: RouteObject[] = [
           { index: true, element: <OverviewPage /> },
           {
             path: 'settings',
-            element: <SettingsLayout />,
+            element: withSuspense(<SettingsLayout />, <ShellPageSkeleton />),
             children: [
               { index: true, element: <Navigate to="household" replace /> },
-              { path: 'household', element: <HouseholdSettings /> },
-              { path: 'security', element: <SecuritySettings /> },
+              {
+                path: 'household',
+                element: withSuspense(<HouseholdSettings />, <SectionSkeleton />),
+              },
+              {
+                path: 'security',
+                element: withSuspense(<SecuritySettings />, <SectionSkeleton />),
+              },
             ],
           },
           ...placeholderIds.map((id) => ({

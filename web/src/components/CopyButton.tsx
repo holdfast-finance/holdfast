@@ -14,29 +14,31 @@ export function CopyButton({
   variant?: 'outline' | 'default'
 }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const shown =
+    state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy blocked: select it by hand' : label
   return (
-    <Button
-      type="button"
-      variant={variant}
-      onClick={() => {
-        navigator.clipboard.writeText(text).then(
-          () => {
-            setState('copied')
-          },
-          () => {
-            setState('failed')
-          },
-        )
-      }}
-    >
-      {state === 'copied' ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-      <span aria-live="polite">
-        {state === 'copied'
-          ? 'Copied'
-          : state === 'failed'
-            ? 'Copy blocked: select it by hand'
-            : label}
+    <>
+      <Button
+        type="button"
+        variant={variant}
+        onClick={() => {
+          navigator.clipboard.writeText(text).then(
+            () => {
+              setState('copied')
+            },
+            () => {
+              setState('failed')
+            },
+          )
+        }}
+      >
+        {state === 'copied' ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        {shown}
+      </Button>
+      {/* Announced from a sibling: a live region inside the focused button is read unreliably. */}
+      <span role="status" className="sr-only">
+        {state === 'idle' ? '' : shown}
       </span>
-    </Button>
+    </>
   )
 }

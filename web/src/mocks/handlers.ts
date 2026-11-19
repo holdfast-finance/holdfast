@@ -116,6 +116,11 @@ function publicRoute(fn: (ctx: Ctx) => ReturnType<Resolver>): Resolver {
 interface GuardOptions {
   owner?: boolean
   reauth?: boolean
+  /**
+   * Step-up only once the user already has a way in (a passkey or TOTP). Adding a credential to
+   * an account that has none (setup, invite accept, the missing-passkey banner) stays exempt.
+   */
+  reauthIfCredentialed?: boolean
 }
 
 function authed(fn: Guarded, options: GuardOptions = {}): Resolver {
@@ -126,7 +131,9 @@ function authed(fn: Guarded, options: GuardOptions = {}): Resolver {
     if (options.owner && user.role !== 'owner') {
       return apiError(ERROR_CODES.forbidden, 'Only the household owner can do that.')
     }
-    if (options.reauth && Date.now() - db.session.reauthAt > REAUTH_WINDOW_MS) {
+    const credentialed = user.credentials.length > 0 || user.totpEnabled
+    const needsReauth = options.reauth || (options.reauthIfCredentialed && credentialed)
+    if (needsReauth && Date.now() - db.session.reauthAt > REAUTH_WINDOW_MS) {
       return apiError(ERROR_CODES.reauthRequired, 'Confirm it is you to continue.')
     }
     return fn(ctx, user)
@@ -192,17 +199,31 @@ export const handlers = [
   ),
 
   // Setup
-  http.get(path('/setup/status'), () => HttpResponse.json({ needs_setup: db.household === null })),
+  // Setup stays "needed" until the owner holds a credential, so a reload before the passkey step
+  // can't strand the instance (the real API does the same).
+  http.get(path('/setup/status'), () => {
+    const owner = db.users.find((u) => u.role === 'owner')
+    const ownerHasCredential = owner !== undefined && owner.credentials.length > 0
+    return HttpResponse.json({ needs_setup: db.household === null || !ownerHasCredential })
+  }),
 
   http.post(
     path('/setup'),
     publicRoute(async ({ request }) => {
       const body = await readJson(request)
-      if (db.household)
+      const existingOwner = db.users.find((u) => u.role === 'owner')
+      if (db.household && existingOwner && existingOwner.credentials.length > 0)
         return apiError(ERROR_CODES.setupComplete, 'This instance is already set up.')
       if (str(body, 'setup_token') !== MOCK_SETUP_TOKEN) {
         audit('setup.attempt', 'failure')
         return apiError(ERROR_CODES.invalidSetupToken, 'That setup token is wrong or expired.')
+      }
+      // Resume: setup was claimed but the owner never registered a credential. The token holder
+      // gets a fresh session for the existing owner (no second household), as the real API does.
+      if (db.household && existingOwner) {
+        startSession(existingOwner)
+        audit('setup.resume')
+        return HttpResponse.json(sessionJson(existingOwner), { status: 200 })
       }
       const householdName = str(body, 'household_name')
       const displayName = str(body, 'display_name')
@@ -241,50 +262,55 @@ export const handlers = [
   // Passkey registration (setup, invite accept, Security → Add)
   http.post(
     path('/auth/passkey/register/options'),
-    authed(({ request }, user) =>
-      HttpResponse.json({
-        challenge: newChallenge(),
-        rp: { id: rpId(request), name: 'Holdfast' },
-        user: { id: btoa(user.id).replace(/=+$/, ''), name: user.email, displayName: user.email },
-        pubKeyCredParams: [
-          { type: 'public-key', alg: -7 },
-          { type: 'public-key', alg: -257 },
-        ],
-        timeout: 60000,
-        attestation: 'none',
-        excludeCredentials: user.credentials.map((c) => ({
-          id: c.credentialId,
-          type: 'public-key',
-        })),
-        authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-      }),
+    authed(
+      ({ request }, user) =>
+        HttpResponse.json({
+          challenge: newChallenge(),
+          rp: { id: rpId(request), name: 'Holdfast' },
+          user: { id: btoa(user.id).replace(/=+$/, ''), name: user.email, displayName: user.email },
+          pubKeyCredParams: [
+            { type: 'public-key', alg: -7 },
+            { type: 'public-key', alg: -257 },
+          ],
+          timeout: 60000,
+          attestation: 'none',
+          excludeCredentials: user.credentials.map((c) => ({
+            id: c.credentialId,
+            type: 'public-key',
+          })),
+          authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+        }),
+      { reauthIfCredentialed: true },
     ),
   ),
 
   http.post(
     path('/auth/passkey/register/verify'),
-    authed(async ({ request }, user) => {
-      const body = await readJson(request)
-      const credentialId = credentialIdOf(body)
-      if (!credentialId || findByCredential(credentialId)) {
-        return apiError(
-          ERROR_CODES.passkeyVerificationFailed,
-          'That passkey could not be verified.',
-        )
-      }
-      const cred: MockCredential = {
-        id: nextId('cred'),
-        credentialId,
-        nickname: str(body, 'nickname') || 'Passkey',
-        created_at: now(),
-        last_used_at: null,
-      }
-      user.credentials.push(cred)
-      audit('auth.passkey.registered')
-      return HttpResponse.json({
-        credential: { id: cred.id, nickname: cred.nickname, created_at: cred.created_at },
-      })
-    }),
+    authed(
+      async ({ request }, user) => {
+        const body = await readJson(request)
+        const credentialId = credentialIdOf(body)
+        if (!credentialId || findByCredential(credentialId)) {
+          return apiError(
+            ERROR_CODES.passkeyVerificationFailed,
+            'That passkey could not be verified.',
+          )
+        }
+        const cred: MockCredential = {
+          id: nextId('cred'),
+          credentialId,
+          nickname: str(body, 'nickname') || 'Passkey',
+          created_at: now(),
+          last_used_at: null,
+        }
+        user.credentials.push(cred)
+        audit('auth.passkey.registered')
+        return HttpResponse.json({
+          credential: { id: cred.id, nickname: cred.nickname, created_at: cred.created_at },
+        })
+      },
+      { reauthIfCredentialed: true },
+    ),
   ),
 
   // Passkey login
@@ -419,33 +445,39 @@ export const handlers = [
   // TOTP
   http.post(
     path('/auth/totp/setup'),
-    authed((_ctx, user) => {
-      user.totpPending = true
-      const secret = 'JBSWY3DPEHPK3PXP'
-      const label = encodeURIComponent(`Holdfast:${user.email}`)
-      return HttpResponse.json({
-        secret,
-        otpauth_uri: `otpauth://totp/${label}?secret=${secret}&issuer=Holdfast&algorithm=SHA1&digits=6&period=30`,
-      })
-    }),
+    authed(
+      (_ctx, user) => {
+        user.totpPending = true
+        const secret = 'JBSWY3DPEHPK3PXP'
+        const label = encodeURIComponent(`Holdfast:${user.email}`)
+        return HttpResponse.json({
+          secret,
+          otpauth_uri: `otpauth://totp/${label}?secret=${secret}&issuer=Holdfast&algorithm=SHA1&digits=6&period=30`,
+        })
+      },
+      { reauthIfCredentialed: true },
+    ),
   ),
 
   http.post(
     path('/auth/totp/enable'),
-    authed(async ({ request }, user) => {
-      const code = str(await readJson(request), 'code')
-      if (!user.totpPending || code !== MOCK_TOTP_CODE) {
-        return apiError(
-          ERROR_CODES.invalidCode,
-          'That code did not match. Check the time on your device.',
-        )
-      }
-      user.totpPending = false
-      user.totpEnabled = true
-      user.recoveryCodes = generateRecoveryCodes()
-      audit('auth.totp.enabled')
-      return HttpResponse.json({ recovery_codes: [...user.recoveryCodes] })
-    }),
+    authed(
+      async ({ request }, user) => {
+        const code = str(await readJson(request), 'code')
+        if (!user.totpPending || code !== MOCK_TOTP_CODE) {
+          return apiError(
+            ERROR_CODES.invalidCode,
+            'That code did not match. Check the time on your device.',
+          )
+        }
+        user.totpPending = false
+        user.totpEnabled = true
+        user.recoveryCodes = generateRecoveryCodes()
+        audit('auth.totp.enabled')
+        return HttpResponse.json({ recovery_codes: [...user.recoveryCodes] })
+      },
+      { reauthIfCredentialed: true },
+    ),
   ),
 
   http.post(
@@ -624,7 +656,8 @@ export const handlers = [
         const token = randomToken()
         db.invites.push({ token, personId: person.id, email, used: false })
         audit('household.invite.created')
-        return HttpResponse.json({ invite_url: `${new URL(request.url).origin}/invite/${token}` })
+        // Token in the fragment: it never reaches a server log or a Referer header.
+        return HttpResponse.json({ invite_url: `${new URL(request.url).origin}/invite#${token}` })
       },
       { owner: true, reauth: true },
     ),

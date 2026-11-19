@@ -77,7 +77,8 @@ function SheetHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot="sheet-header"
-      className={cn('flex flex-col gap-0.5 p-4', className)}
+      // pr-12 last, so callers' `p-0` can't remove it: the close button sits top-right (44px).
+      className={cn('flex flex-col gap-0.5 p-4', className, 'pr-12')}
       {...props}
     />
   )

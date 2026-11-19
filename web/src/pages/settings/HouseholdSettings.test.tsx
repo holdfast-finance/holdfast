@@ -108,13 +108,16 @@ describe('Settings → Household', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Confirm with passkey' }))
     const link = await screen.findByLabelText('Invite link')
     const token = db.invites[0]?.token ?? 'missing'
-    expect(link).toHaveValue(`http://localhost:3000/invite/${token}`)
+    // Token in the fragment: never sent to a server, so never in a log or Referer.
+    expect(link).toHaveValue(`http://localhost:3000/invite#${token}`)
 
     const writeText = vi.fn(() => Promise.resolve())
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     await userEvent.click(screen.getByRole('button', { name: 'Copy invite link' }))
-    expect(writeText).toHaveBeenCalledWith(`http://localhost:3000/invite/${token}`)
-    expect(await screen.findByText('Copied')).toBeVisible()
+    expect(writeText).toHaveBeenCalledWith(`http://localhost:3000/invite#${token}`)
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeVisible()
+    // Announced from a polite status region next to the button.
+    expect(screen.getAllByRole('status').some((el) => el.textContent === 'Copied')).toBe(true)
   })
 
   it('shows members the list without owner actions', async () => {
