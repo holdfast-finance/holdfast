@@ -32,4 +32,5 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 - [ ] Pull 3 credit reports from AnnualCreditReport.com (Phase 6)
 - [ ] Last year's return + forms for engine validation (Phase 7)
 - [ ] Backup target (B2 or similar). Store the restic password + Fernet key in a password manager
-- [ ] Decide whether and when to create the GitHub remote (private until the open-source milestone, PLAN 17.6)
+- [ ] Create GitHub org **`holdfast-finance`** (free as of 2026-11-18; `holdfast` is taken) and repo `holdfast`, private until the open-source milestone (PLAN 17.6). Optional: also register `holdfastfinance` and `getholdfast` so nobody squats them
+- [ ] Check matching domains: `holdfast.finance`, `holdfastfinance.com`, `getholdfast.com`
