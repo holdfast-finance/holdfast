@@ -9,6 +9,10 @@ Rules (Phase 1 contract + security review amendments):
   session with zero credentials (fresh from setup or an invite) may add its first one.
 - A user is never left without a way in: the last passkey can go only if TOTP *and* a password
   are set, and TOTP can be turned off only while a passkey exists.
+- Removing a passkey, turning TOTP off and setting a password revoke every *other* session of
+  the user (a stolen session must not outlive the credential change).
+- Rate limits reserve the attempt before verifying (``RateLimiter.reserve``). Password and TOTP
+  count per IP and per account; passkeys count per IP only (they can't be guessed).
 - Never logged or audited: tokens, codes, secrets, passwords.
 """
 
@@ -33,7 +37,7 @@ from app.schemas.auth import (
     UserOut,
 )
 from app.security import crypto, passwords, totp
-from app.security.ratelimit import RateLimiter, account_scope, ip_scope
+from app.security.ratelimit import Locked, RateLimiter, account_scope, ip_scope
 from app.services import audit, sessions
 from app.services.context import RequestContext
 from app.services.errors import ApiError
@@ -48,6 +52,9 @@ from app.services.setup import clear_setup_token
 from app.services.users import get_user, has_any_credential, has_passkey, session_out, user_out
 
 TOTP_REPLAY_TTL_SECONDS = 120
+# POST /auth/passkey/login/options is public and writes a challenge to Redis on every call.
+LOGIN_OPTIONS_PER_WINDOW = 30
+LOGIN_OPTIONS_WINDOW_SECONDS = 60
 DEFAULT_NICKNAME = "Passkey"
 
 INVALID_CREDENTIALS = "Email, password or code is wrong."
@@ -147,8 +154,8 @@ class AuthService:
 
     async def password_login(self, body: PasswordLoginIn) -> tuple[str, UserOut]:
         email = body.email.strip().lower()
-        scopes = (ip_scope(self.ctx.ip), account_scope(email))
-        if locked := await self.limiter.check(*scopes):
+        attempt = await self.limiter.reserve(ip_scope(self.ctx.ip), account_scope(email))
+        if isinstance(attempt, Locked):
             await audit.record(
                 self.ctx.factory,
                 "auth.login.password",
@@ -157,7 +164,7 @@ class AuthService:
                 outcome="failure",
                 detail={"reason": "rate_limited"},
             )
-            raise _rate_limited(locked.retry_after, locked.message)
+            raise _rate_limited(attempt.retry_after, attempt.message)
 
         token: str | None = None
         user: AppUser | None = None
@@ -167,7 +174,9 @@ class AuthService:
                     select(AppUser).where(AppUser.email == email, AppUser.disabled_at.is_(None))
                 )
             ).scalar_one_or_none()
-            ok = passwords.verify_password(user.password_hash if user else None, body.password)
+            ok = await passwords.verify_password_async(
+                user.password_hash if user else None, body.password
+            )
             if ok and user is not None and user.totp_enabled:
                 if body.totp_code is not None:
                     ok = await self._totp_matches(user, body.totp_code)
@@ -179,14 +188,14 @@ class AuthService:
                 ok = False  # no user, wrong password, or no second factor configured
             if ok and user is not None:
                 if user.password_hash and passwords.needs_rehash(user.password_hash):
-                    user.password_hash = passwords.hash_password(body.password)
+                    user.password_hash = await passwords.hash_password_async(body.password)
                 user.last_login_at = sessions.utcnow()
                 token = await sessions.create(
                     s, user.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
                 )
 
         if token is None or user is None:
-            await self.limiter.fail(*scopes)
+            # The reserved attempt stays counted as the failure.
             await audit.record(
                 self.ctx.factory,
                 "auth.login.password",
@@ -197,7 +206,7 @@ class AuthService:
             )
             raise ApiError("invalid_credentials", INVALID_CREDENTIALS)
 
-        await self.limiter.succeed(scopes[1])
+        await self.limiter.succeed(attempt)
         async with scoped_session(self.ctx.factory, user.household_id, user.person_id) as s:
             audit.add(
                 s,
@@ -213,12 +222,21 @@ class AuthService:
     # ------------------------------------------------------------------ passkey login
 
     async def passkey_login_options(self) -> dict[str, Any]:
+        # Public and stores a challenge in Redis per call: cap how fast one address can mint them.
+        if throttled := await self.limiter.throttle(
+            "login-options:" + ip_scope(self.ctx.ip),
+            limit=LOGIN_OPTIONS_PER_WINDOW,
+            window=LOGIN_OPTIONS_WINDOW_SECONDS,
+        ):
+            raise _rate_limited(throttled.retry_after, throttled.message)
         return await self.webauthn.authentication_options("login", bound_to="login", allow=[])
 
     async def passkey_login(self, credential: dict[str, Any]) -> tuple[str, UserOut]:
-        ip = ip_scope(self.ctx.ip)
-        if locked := await self.limiter.check(ip):
-            raise _rate_limited(locked.retry_after, locked.message)
+        # IP scope only: a passkey can't be guessed, and an account-scope lock here would let
+        # anyone who knows an email lock its owner out of their passkey (a cheap DoS).
+        attempt = await self.limiter.reserve(ip_scope(self.ctx.ip))
+        if isinstance(attempt, Locked):
+            raise _rate_limited(attempt.retry_after, attempt.message)
 
         token: str | None = None
         user: AppUser | None = None
@@ -237,8 +255,6 @@ class AuthService:
                 if row is None:
                     raise VerificationFailed
                 cred, user = row
-                if locked := await self.limiter.check(account_scope(user.email)):
-                    raise _rate_limited(locked.retry_after, locked.message)
                 if user.disabled_at is not None:
                     raise VerificationFailed
                 handle = user_handle_of(credential)
@@ -259,8 +275,6 @@ class AuthService:
                     s, user.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
                 )
         except VerificationFailed:
-            scopes = [ip] if user is None else [ip, account_scope(user.email)]
-            await self.limiter.fail(*scopes)
             await audit.record(
                 self.ctx.factory,
                 "auth.login.passkey",
@@ -273,7 +287,9 @@ class AuthService:
 
         if token is None or user is None:  # unreachable: every failure path raised above
             raise ApiError("passkey_verification_failed", PASSKEY_FAILED)
-        await self.limiter.succeed(account_scope(user.email))
+        await self.limiter.succeed(attempt)
+        # The real owner just proved themselves: lift any password/TOTP lockout on the account.
+        await self.limiter.clear(account_scope(user.email))
         async with scoped_session(self.ctx.factory, user.household_id, user.person_id) as s:
             audit.add(
                 s,
@@ -303,9 +319,10 @@ class AuthService:
         )
 
     async def reauth_passkey(self, principal: Principal, credential: dict[str, Any]) -> None:
-        scopes = (ip_scope(self.ctx.ip), account_scope(principal.email))
-        if locked := await self.limiter.check(*scopes):
-            raise _rate_limited(locked.retry_after, locked.message)
+        # IP scope only, as for passkey login (an account lock would only enable a DoS).
+        attempt = await self.limiter.reserve(ip_scope(self.ctx.ip))
+        if isinstance(attempt, Locked):
+            raise _rate_limited(attempt.retry_after, attempt.message)
         try:
             challenge = await self.webauthn.take_challenge(
                 "reauth", credential, str(principal.session_id)
@@ -336,7 +353,6 @@ class AuthService:
                 await sessions.mark_reauth(s, principal.session_id)
                 await self._audit(s, principal, "auth.reauth.passkey")
         except VerificationFailed:
-            await self.limiter.fail(*scopes)
             await audit.record(
                 self.ctx.factory,
                 "auth.reauth.passkey",
@@ -346,13 +362,13 @@ class AuthService:
                 outcome="failure",
             )
             raise ApiError("passkey_verification_failed", PASSKEY_FAILED) from None
-        await self.limiter.succeed(scopes[1])
+        await self.limiter.succeed(attempt)
 
     async def reauth_totp(self, principal: Principal, code: str) -> None:
         """TOTP only: recovery codes are kept for signing in after losing a device."""
-        scopes = (ip_scope(self.ctx.ip), account_scope(principal.email))
-        if locked := await self.limiter.check(*scopes):
-            raise _rate_limited(locked.retry_after, locked.message)
+        attempt = await self.limiter.reserve(ip_scope(self.ctx.ip), account_scope(principal.email))
+        if isinstance(attempt, Locked):
+            raise _rate_limited(attempt.retry_after, attempt.message)
         ok = False
         async with self._scoped(principal) as s:
             user = await get_user(s, principal.user_id)
@@ -361,7 +377,6 @@ class AuthService:
                 await sessions.mark_reauth(s, principal.session_id)
                 await self._audit(s, principal, "auth.reauth.totp")
         if not ok:
-            await self.limiter.fail(*scopes)
             await audit.record(
                 self.ctx.factory,
                 "auth.reauth.totp",
@@ -371,7 +386,7 @@ class AuthService:
                 outcome="failure",
             )
             raise ApiError("invalid_code", INVALID_CODE)
-        await self.limiter.succeed(scopes[1])
+        await self.limiter.succeed(attempt)
 
     # ------------------------------------------------------------------ passkey registration
 
@@ -492,6 +507,7 @@ class AuthService:
                     "turn on codes first.",
                 )
             await s.delete(cred)
+            await sessions.revoke_others(s, user.id, principal.session_id)
             await self._audit(
                 s,
                 principal,
@@ -540,12 +556,14 @@ class AuthService:
             user.totp_enabled = False
             user.totp_secret_enc = None
             await s.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
+            await sessions.revoke_others(s, user.id, principal.session_id)
             await self._audit(s, principal, "auth.totp.disabled")
 
     async def set_password(self, principal: Principal, password: str) -> None:
         require_fresh(principal)
-        hashed = passwords.hash_password(password)
+        hashed = await passwords.hash_password_async(password)
         async with self._scoped(principal) as s:
             user = await get_user(s, principal.user_id)
             user.password_hash = hashed
+            await sessions.revoke_others(s, user.id, principal.session_id)
             await self._audit(s, principal, "auth.password.set")

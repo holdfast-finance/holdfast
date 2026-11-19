@@ -1,6 +1,8 @@
 """Opaque cookie sessions (``auth_session``). Only ``sha256(token)`` is stored.
 
 - 12-hour absolute lifetime (no sliding renewal). Logout sets ``revoked_at``.
+- Credential changes (passkey removed, TOTP off, password set) revoke the user's other sessions
+  (:func:`revoke_others`).
 - ``reauth_at`` marks the last strong authentication (passkey or password + TOTP). Sensitive
   actions need it within ``REAUTH_WINDOW``. Sessions started from a setup token or invite link
   begin with no ``reauth_at``: holding a link is not proof of a credential.
@@ -129,3 +131,17 @@ async def mark_reauth(s: AsyncSession, session_id: uuid.UUID) -> None:
     await s.execute(
         update(AuthSession).where(AuthSession.id == session_id).values(reauth_at=utcnow())
     )
+
+
+async def revoke_others(s: AsyncSession, user_id: uuid.UUID, keep: uuid.UUID) -> int:
+    """Revoke every live session of ``user_id`` except ``keep`` (after a credential change)."""
+    result = await s.execute(
+        update(AuthSession)
+        .where(
+            AuthSession.user_id == user_id,
+            AuthSession.id != keep,
+            AuthSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=utcnow())
+    )
+    return int(getattr(result, "rowcount", 0) or 0)

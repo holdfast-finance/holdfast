@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db_context import scoped_session
 from app.models import AppUser, Person
 from app.schemas.auth import SessionOut
-from app.security.ratelimit import RateLimiter, ip_scope
+from app.security.ratelimit import Locked, RateLimiter, ip_scope
 from app.security.tokens import new_token, token_hash_hex
 from app.services import audit, sessions
 from app.services.auth import require_fresh
@@ -31,6 +31,7 @@ INVITE_TTL_SECONDS = 24 * 3600
 _KEY = "hf:invite:{}"
 _PERSON_KEY = "hf:invite:person:{}"
 INVALID = "This invite link is used, expired or wrong."
+INVITE_UNUSABLE = "This invite can't be used. Ask for a new one."
 
 
 async def create_invite(
@@ -46,7 +47,12 @@ async def create_invite(
             raise ApiError("not_found", "No such person.")
         if (await s.execute(select(exists().where(AppUser.person_id == person_id)))).scalar_one():
             raise ApiError("conflict", "This person already has an account.")
-        if (await s.execute(select(exists().where(AppUser.email == email)))).scalar_one():
+        # Only this household's users: an email taken in another household must not be
+        # revealed here. Such an invite fails generically when accepted (unique index).
+        taken = exists().where(
+            AppUser.email == email, AppUser.household_id == principal.household_id
+        )
+        if (await s.execute(select(taken))).scalar_one():
             raise ApiError("conflict", "That email already has an account.")
         token = new_token()
         digest = token_hash_hex(token)
@@ -79,14 +85,14 @@ async def create_invite(
 
 async def accept_invite(ctx: RequestContext, token: str) -> tuple[str, SessionOut]:
     limiter = RateLimiter(ctx.redis)
-    scope = ip_scope(ctx.ip)
-    if locked := await limiter.check(scope):
+    attempt = await limiter.reserve(ip_scope(ctx.ip))
+    if isinstance(attempt, Locked):
         raise ApiError(
-            "rate_limited", locked.message, headers={"Retry-After": str(locked.retry_after)}
+            "rate_limited", attempt.message, headers={"Retry-After": str(attempt.retry_after)}
         )
     raw = await ctx.redis.getdel(_KEY.format(token_hash_hex(token)))
     if raw is None:
-        await limiter.fail(scope)
+        # The reserved attempt stays counted as the failure.
         await audit.record(
             ctx.factory,
             "household.invite.accepted",
@@ -95,6 +101,8 @@ async def accept_invite(ctx: RequestContext, token: str) -> tuple[str, SessionOu
             outcome="failure",
         )
         raise ApiError("invalid_invite", INVALID)
+    # A real token was presented: the attempt was not a guess.
+    await limiter.succeed(attempt)
     invite = json.loads(raw)
     household_id = uuid.UUID(invite["household_id"])
     person_id = uuid.UUID(invite["person_id"])
@@ -128,6 +136,7 @@ async def accept_invite(ctx: RequestContext, token: str) -> tuple[str, SessionOu
             )
             out = await session_out(s, user)
     except IntegrityError:
-        # The person or the email got an account after the invite was sent.
-        raise ApiError("conflict", "That person or email already has an account.") from None
+        # The person or the email got an account after the invite was sent, or the email
+        # belongs to someone in another household. Say nothing about which, or where.
+        raise ApiError("conflict", INVITE_UNUSABLE) from None
     return session_token, out

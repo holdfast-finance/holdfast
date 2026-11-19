@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db_context import apply_context, create_household, unscoped_session
 from app.models import AppUser, Household, Person
 from app.schemas.auth import SessionOut, SetupIn
-from app.security.ratelimit import RateLimiter, ip_scope
+from app.security.ratelimit import Locked, RateLimiter, ip_scope
 from app.security.tokens import new_token, same_hash, token_hash_hex
 from app.services import audit, sessions
 from app.services.context import RequestContext
@@ -71,15 +71,16 @@ async def _token_ok(redis: Redis, token: str) -> bool:
 
 async def run_setup(ctx: RequestContext, body: SetupIn) -> tuple[str, SessionOut]:
     limiter = RateLimiter(ctx.redis)
-    scope = ip_scope(ctx.ip)
-    if locked := await limiter.check(scope):
+    attempt = await limiter.reserve(ip_scope(ctx.ip))
+    if isinstance(attempt, Locked):
         raise ApiError(
-            "rate_limited", locked.message, headers={"Retry-After": str(locked.retry_after)}
+            "rate_limited", attempt.message, headers={"Retry-After": str(attempt.retry_after)}
         )
     if await setup_state(ctx.factory) == "complete":
+        await limiter.refund(attempt)
         raise ApiError("setup_complete", "This instance is already set up.")
     if not await _token_ok(ctx.redis, body.setup_token):
-        await limiter.fail(scope)
+        # The reserved attempt stays counted as the failure.
         await audit.record(
             ctx.factory, "setup.attempt", household_id=None, ip=ctx.ip, outcome="failure"
         )
@@ -132,5 +133,5 @@ async def run_setup(ctx: RequestContext, body: SetupIn) -> tuple[str, SessionOut
             out = await session_out(s, user)
     except IntegrityError:
         raise ApiError("conflict", "That email already has an account.") from None
-    await limiter.succeed(scope)
+    await limiter.succeed(attempt)
     return token, out
