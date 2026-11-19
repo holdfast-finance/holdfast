@@ -6,11 +6,11 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
-	@grep -E '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-9s %s\n", $$1, $$2}'
+	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
@@ -122,3 +122,10 @@ ports: env-check ## Assert no compose service publishes beyond the rules
 	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
 	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+
+ci-minutes: ## Billed Actions minutes this UTC month (used/2000)
+	python3 scripts/ci_minutes.py
+
+ci-local: ## Local merge gate for a PR head (make ci-local PR=<n>)
+	@test -n "$(PR)" || { echo "usage: make ci-local PR=<n>" >&2; exit 2; }
+	python3 scripts/ci_local.py "$(PR)"

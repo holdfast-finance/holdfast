@@ -8,32 +8,96 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # hashFiles() isn't allowed in job-level `if`, so detect which parts of the repo exist first.
-  detect:
+  # One billed job for the old detect, secrets, scripts-test, and compose jobs (ADR 0013).
+  # A deleted manifest fails this job. ci-required must not treat that as a skip.
+  checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
-      backend: ${{ steps.d.outputs.backend }}
-      web: ${{ steps.d.outputs.web }}
+      backend: ${{ steps.plan.outputs.backend }}
+      web: ${{ steps.plan.outputs.web }}
+      backend_reason: ${{ steps.plan.outputs.backend_reason }}
+      web_reason: ${{ steps.plan.outputs.web_reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - id: d
-        # A PR that deletes these must fail, not skip the backend/web jobs (skips count as passing).
+        with:
+          fetch-depth: 0
+      - name: Manifests exist
         run: |
           for f in backend/pyproject.toml web/package.json; do
             [ -f "$f" ] || { echo "::error::$f is missing; backend and web jobs cannot be skipped"; exit 1; }
           done
-          echo "backend=true" >> "$GITHUB_OUTPUT"
-          echo "web=true" >> "$GITHUB_OUTPUT"
+      - id: plan
+        name: Plan backend and web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: python3 scripts/ci_plan.py >> "$GITHUB_OUTPUT"
+      # CLI image instead of gitleaks-action, which needs a paid license on organization repos.
+      # PRs scan only their own commit range; pushes scan full history.
+      - name: gitleaks
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          opts=()
+          if [ "$EVENT" = "pull_request" ]; then
+            opts=(--log-opts="$BASE_SHA..$HEAD_SHA")
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --no-banner --redact -v "${opts[@]}" /repo
+      - name: Gate script self-tests
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Throwaway .env
+        run: python3 scripts/gen-keys.py --write
+      - name: docker compose config
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
+            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config -q
+      - name: No ports beyond the rules (CLAUDE.md rule 12), prod renders APP_ENV=prod
+        run: |
+          docker compose config --format json | python3 scripts/check-compose-ports.py
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config --format json \
+            | python3 scripts/check-compose-ports.py --dev
+          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
+            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config --format json \
+            | python3 scripts/check-compose-ports.py --prod
+      - name: Validate Caddyfiles
+        run: |
+          # caddy:2-alpine
+          docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \
+            caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          # Prod image bundles Caddyfile.prod; the DNS provider only checks the token's format.
+          docker build -t holdfast-caddy:ci -f infra/caddy/Dockerfile.prod infra/caddy
+          docker run --rm -e APP_HOST=holdfast.example.com -e WEB_UPSTREAM=web:80 \
+            -e CF_API_TOKEN="$(python3 -c 'print("x" * 40)')" \
+            holdfast-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: docker compose build
+        run: docker compose build
+      - name: Remove throwaway .env
+        if: always()
+        run: rm -f .env
 
   backend:
-    needs: detect
-    if: needs.detect.outputs.backend == 'true'
+    needs: checks
+    if: needs.checks.result == 'success' && needs.checks.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -123,8 +187,8 @@ jobs:
           if-no-files-found: ignore
 
   web:
-    needs: detect
-    if: needs.detect.outputs.web == 'true'
+    needs: checks
+    if: needs.checks.result == 'success' && needs.checks.outputs.web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -151,91 +215,19 @@ jobs:
           pnpm audit --audit-level high --json > "$RUNNER_TEMP/pnpm-audit.json" || true
           python3 ../scripts/audit_gate.py pnpm "$RUNNER_TEMP/pnpm-audit.json" ../.github/audit-allowlist.yml
 
-  secrets:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      # CLI image instead of gitleaks-action, which needs a paid license on organization repos.
-      # PRs scan only their own commit range; pushes scan full history.
-      - name: gitleaks
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          opts=()
-          if [ "$EVENT" = "pull_request" ]; then
-            opts=(--log-opts="$BASE_SHA..$HEAD_SHA")
-          fi
-          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            git --no-banner --redact -v "${opts[@]}" /repo
-
-  scripts-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Gate script self-tests
-        run: python3 -m unittest discover -s scripts/tests -v
-
-  compose:
-    needs: detect
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Throwaway .env
-        run: python3 scripts/gen-keys.py --write
-      - name: docker compose config
-        run: |
-          docker compose config -q
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
-          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
-            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config -q
-      - name: No ports beyond the rules (CLAUDE.md rule 12), prod renders APP_ENV=prod
-        run: |
-          docker compose config --format json | python3 scripts/check-compose-ports.py
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml config --format json \
-            | python3 scripts/check-compose-ports.py --dev
-          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
-            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config --format json \
-            | python3 scripts/check-compose-ports.py --prod
-      - name: Validate Caddyfiles
-        run: |
-          docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \
-            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          # Prod image bundles Caddyfile.prod; the DNS provider only checks the token's format.
-          docker build -t holdfast-caddy:ci -f infra/caddy/Dockerfile.prod infra/caddy
-          docker run --rm -e APP_HOST=holdfast.example.com -e WEB_UPSTREAM=web:80 \
-            -e CF_API_TOKEN="$(python3 -c 'print("x" * 40)')" \
-            holdfast-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - name: docker compose build
-        if: needs.detect.outputs.backend == 'true' && needs.detect.outputs.web == 'true'
-        run: docker compose build
-      - name: Remove throwaway .env
-        if: always()
-        run: rm -f .env
-
-  # The single stable required check. Jobs skipped by `detect` count as passing; failed or
-  # cancelled jobs do not. Add every new job to `needs`.
+  # Stable required check. backend/web may skip for paths or an up-to-date main push.
+  # A failed checks job, including a missing manifest, is not a pass.
   ci-required:
     if: always()
-    needs: [detect, backend, web, secrets, scripts-test, compose]
+    needs: [checks, backend, web]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Evaluate needed jobs
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          bad = {k: v["result"] for k, v in json.loads(os.environ["RESULTS"]).items()
-                 if v["result"] not in ("success", "skipped")}
-          for k, v in bad.items():
-              print(f"::error::{k}: {v}")
-          sys.exit(1 if bad else 0)
-          PY
+        run: python3 scripts/ci_required_eval.py

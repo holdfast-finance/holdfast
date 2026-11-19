@@ -13,7 +13,7 @@ case ",${LABELS:-}," in *,bulwark-approved,*) approved=true ;; esac
 problems=()
 range="$base...$head"
 
-protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|\.gitleaks\.toml$|\.gitleaksignore$|backend/pyproject\.toml$|web/(package\.json|vitest\.config\.[^/]*|playwright\.config\.[^/]*)$|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/(caddy|postgres)/|scripts/(check-protected-paths\.sh|audit_gate\.py|protect-main\.sh)$|scripts/tests/|(.*/)?conftest\.py$)'
+protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|\.gitleaks\.toml$|\.gitleaksignore$|backend/pyproject\.toml$|web/(package\.json|vitest\.config\.[^/]*|playwright\.config\.[^/]*)$|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/(caddy|postgres)/|scripts/(check-protected-paths\.sh|audit_gate\.py|protect-main\.sh|ci_plan\.py|ci_required_eval\.py|main_guard\.py|ci_minutes\.py|ci_local\.py)$|scripts/tests/|(.*/)?conftest\.py$)'
 while IFS= read -r -d '' f; do
   [ -n "$f" ] && problems+=("protected path touched: $f")
 done < <(git -c core.quotePath=false diff -z --no-renames --name-only "$range" | grep -zE "$protected_re" || true)

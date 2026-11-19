@@ -10,7 +10,8 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked')]
+        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked',
+        'ci-minutes', 'ci-local')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -50,6 +51,8 @@ $Help = [ordered]@{
     'sync'    = 'Fast-forward main to origin/main; elsewhere print ahead/behind'
     'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
     'test-locked' = 'test under an exclusive lock so parallel worktrees share the test DB safely'
+    'ci-minutes'  = 'Billed Actions minutes this UTC month (used/2000)'
+    'ci-local'    = 'Local merge gate for a PR head: dev.ps1 ci-local <n>'
 }
 
 function Assert-Env {
@@ -126,7 +129,7 @@ function Invoke-Test {
 switch ($Target) {
     'help' {
         Write-Host 'Holdfast dev.ps1 targets:'
-        foreach ($e in $Help.GetEnumerator()) { Write-Host ("  {0,-9} {1}" -f $e.Key, $e.Value) }
+        foreach ($e in $Help.GetEnumerator()) { Write-Host ("  {0,-12} {1}" -f $e.Key, $e.Value) }
     }
     'up' {
         Assert-Env
@@ -194,5 +197,10 @@ switch ($Target) {
         $lockPath = Join-Path ([System.IO.Path]::GetTempPath()) 'holdfast-make-test.lock'
         $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
         try { Invoke-Test } finally { $lock.Dispose() }
+    }
+    'ci-minutes' { & $Python scripts/ci_minutes.py }
+    'ci-local' {
+        if (-not $Service) { Write-Error 'usage: ./scripts/dev.ps1 ci-local <PR>' }
+        & $Python scripts/ci_local.py $Service
     }
 }
