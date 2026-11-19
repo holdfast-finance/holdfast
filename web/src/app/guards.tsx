@@ -1,11 +1,12 @@
-import type { ReactNode } from 'react'
+import { Suspense, useState, type ReactNode } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router'
 
 import { useMe, useSetupStatus } from '@/api/auth'
 import { errorMessage } from '@/api/client'
 import { AuthLayout, Splash } from '@/components/layout/AuthLayout'
-import { ReauthDialog } from '@/components/ReauthDialog'
+import { ReauthDialog } from '@/app/lazyRoutes'
 import { Button } from '@/components/ui/button'
+import { useReauthStore } from '@/stores/reauth'
 
 export interface FromState {
   from?: string
@@ -46,7 +47,7 @@ export function RequireAuth() {
   return (
     <>
       <Outlet />
-      <ReauthDialog />
+      <ReauthHost />
     </>
   )
 }
@@ -63,4 +64,20 @@ export function RedirectIfSignedIn({ children }: { children: ReactNode }) {
     )
   }
   return children
+}
+
+/**
+ * Mounts the step-up prompt the first time `withReauth` asks for it, then keeps it mounted so
+ * it can animate closed and reopen instantly.
+ */
+function ReauthHost() {
+  const requested = useReauthStore((s) => s.pending !== null)
+  const [mounted, setMounted] = useState(false)
+  if (requested && !mounted) setMounted(true)
+  if (!mounted) return null
+  return (
+    <Suspense fallback={null}>
+      <ReauthDialog />
+    </Suspense>
+  )
 }
