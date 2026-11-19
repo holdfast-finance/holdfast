@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     )
 
     # Core
-    app_env: Literal["dev", "prod"] = "dev"
+    # "test" exists only for the automated e2e stack: it exposes the first-run setup token at
+    # GET /api/test/setup-token. "prod" can never expose it (see app.api.routes_testing).
+    app_env: Literal["dev", "test", "prod"] = "dev"
     app_base_url: str = "https://localhost"
     app_host: str = "localhost"
     caddy_bind: str = "127.0.0.1"
@@ -52,6 +54,22 @@ class Settings(BaseSettings):
     postgres_owner_password: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     document_store: Path = Path("/data/documents")
+
+    # Auth (PLAN 12). WebAuthn RP id is APP_HOST; the expected origin is https://{APP_HOST}
+    # unless WEBAUTHN_ORIGIN overrides it (e.g. a non-443 port).
+    webauthn_origin: str | None = None
+    # Peers whose X-Forwarded-For is trusted (Caddy on the compose network). Comma-separated
+    # CIDRs. The API port is never published, so only the proxy can reach it.
+    trusted_proxies: CsvList = Field(
+        default_factory=lambda: [
+            "127.0.0.0/8",
+            "::1/128",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "fc00::/7",
+        ]
+    )
 
     # Plaid
     plaid_env: Literal["sandbox", "production"] = "sandbox"
@@ -107,7 +125,7 @@ class Settings(BaseSettings):
     # Edge
     web_upstream: str = "web:80"
 
-    @field_validator("plaid_products", "plaid_country_codes", mode="before")
+    @field_validator("plaid_products", "plaid_country_codes", "trusted_proxies", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
         if isinstance(value, str):
@@ -117,6 +135,10 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.app_env == "prod"
+
+    @property
+    def expected_origin(self) -> str:
+        return self.webauthn_origin or f"https://{self.app_host}"
 
     @property
     def sqlalchemy_url(self) -> URL:

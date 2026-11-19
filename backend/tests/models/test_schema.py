@@ -112,7 +112,14 @@ def test_rls_enabled_and_forced_where_expected(owner_engine: Engine) -> None:
             .all()
         )
     # Any table that carries household_id must be protected (catches future tables too).
-    for name in (*HOUSEHOLD_TABLES, "household", "audit_log", *with_household_id):
+    # Identity tables are the deliberate exception: app_user.household_id (0003) is the login
+    # lookup that runs before any RLS context exists (ADR 0010).
+    for name in (
+        *HOUSEHOLD_TABLES,
+        "household",
+        "audit_log",
+        *(with_household_id - set(IDENTITY_TABLES)),
+    ):
         assert flags[name] == (True, True), name
         assert name in policies, name
     for name in (*IDENTITY_TABLES, *REFERENCE_TABLES):

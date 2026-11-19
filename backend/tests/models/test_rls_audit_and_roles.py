@@ -181,7 +181,13 @@ def test_user_delete_keeps_audit_user_id(
     row = {**_audit(a.household_id, "login"), "user_id": user_id}
     with app_engine.begin() as c:
         c.execute(
-            table("app_user").insert().values(id=user_id, email=f"u-{user_id.hex[:8]}@example.com")
+            table("app_user")
+            .insert()
+            .values(
+                id=user_id,
+                household_id=a.household_id,
+                email=f"u-{user_id.hex[:8]}@example.com",
+            )
         )
         set_ctx(c, a.household_id)
         c.execute(table("audit_log").insert().values(**row))
