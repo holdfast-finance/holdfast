@@ -10,11 +10,14 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'seed', 'keys', 'check', 'health', 'ports')]
+        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
-    [string]$Service
+    [string]$Service,
+
+    [Parameter(Position = 2)]
+    [string]$Base = 'origin/main'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +47,9 @@ $Help = [ordered]@{
     'check'   = 'lint + test'
     'health'  = 'GET /api/health through Caddy'
     'ports'   = 'Assert no compose service publishes beyond the rules'
+    'sync'    = 'Fast-forward main to origin/main; elsewhere print ahead/behind'
+    'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
+    'test-locked' = 'test under an exclusive lock so parallel worktrees share the test DB safely'
 }
 
 function Assert-Env {
@@ -171,5 +177,22 @@ switch ($Target) {
             $env:TAILSCALE_BIND_IP = $saved.TAILSCALE_BIND_IP
             $env:CF_API_TOKEN = $saved.CF_API_TOKEN
         }
+    }
+    'sync' {
+        git fetch origin --quiet
+        if ((git rev-parse --abbrev-ref HEAD) -eq 'main') { git merge --ff-only origin/main }
+        else {
+            $ab = (git rev-list --left-right --count 'HEAD...origin/main') -split '\s+'
+            Write-Host "ahead $($ab[0]), behind $($ab[1]) vs origin/main"
+        }
+    }
+    'wt-new' {
+        if (-not $Service) { Write-Error 'usage: dev.ps1 wt-new <branch> [base]' }
+        bash scripts/wt-new.sh $Service $Base
+    }
+    'test-locked' {
+        $lockPath = Join-Path ([System.IO.Path]::GetTempPath()) 'holdfast-make-test.lock'
+        $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        try { Invoke-Test } finally { $lock.Dispose() }
     }
 }
