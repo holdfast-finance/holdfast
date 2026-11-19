@@ -33,4 +33,4 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 - [ ] Last year's return + forms for engine validation (Phase 7)
 - [ ] Backup target (B2 or similar). Store the restic password + Fernet key in a password manager
 - [ ] Create GitHub org **`holdfast-finance`** (free as of 2026-11-18; `holdfast` is taken) and repo `holdfast`, private until the open-source milestone (PLAN 17.6). Optional: also register `holdfastfinance` and `getholdfast` so nobody squats them
-- [ ] Check matching domains: `holdfast.finance`, `holdfastfinance.com`, `getholdfast.com`
+- [ ] Register **`holdfastfinance.app`** (primary) + `runholdfast.com` and `holdfast-finance.com` (301 redirects). Unregistered as of 2026-11-18 (ADR 0002). Cloudflare Registrar sells at cost
