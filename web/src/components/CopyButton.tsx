@@ -31,7 +31,11 @@ export function CopyButton({
     >
       {state === 'copied' ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
       <span aria-live="polite">
-        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy blocked: select it by hand' : label}
+        {state === 'copied'
+          ? 'Copied'
+          : state === 'failed'
+            ? 'Copy blocked: select it by hand'
+            : label}
       </span>
     </Button>
   )

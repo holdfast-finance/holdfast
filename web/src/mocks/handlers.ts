@@ -70,7 +70,11 @@ function userJson(user: MockUser): User {
     id: user.id,
     email: user.email,
     role: user.role,
-    person: person && { id: person.id, display_name: person.display_name, filing_role: person.filing_role },
+    person: person && {
+      id: person.id,
+      display_name: person.display_name,
+      filing_role: person.filing_role,
+    },
     totp_enabled: user.totpEnabled,
     has_password: user.password !== null,
   }
@@ -166,7 +170,9 @@ function credentialIdOf(body: Record<string, unknown>): string {
   return ''
 }
 
-function findByCredential(credentialId: string): { user: MockUser; cred: MockCredential } | undefined {
+function findByCredential(
+  credentialId: string,
+): { user: MockUser; cred: MockCredential } | undefined {
   for (const user of db.users) {
     const cred = user.credentials.find((c) => c.credentialId === credentialId)
     if (cred) return { user, cred }
@@ -192,7 +198,8 @@ export const handlers = [
     path('/setup'),
     publicRoute(async ({ request }) => {
       const body = await readJson(request)
-      if (db.household) return apiError(ERROR_CODES.setupComplete, 'This instance is already set up.')
+      if (db.household)
+        return apiError(ERROR_CODES.setupComplete, 'This instance is already set up.')
       if (str(body, 'setup_token') !== MOCK_SETUP_TOKEN) {
         audit('setup.attempt', 'failure')
         return apiError(ERROR_CODES.invalidSetupToken, 'That setup token is wrong or expired.')
@@ -201,10 +208,17 @@ export const handlers = [
       const displayName = str(body, 'display_name')
       const email = str(body, 'email').toLowerCase()
       if (!householdName || !displayName || !email.includes('@')) {
-        return apiError(ERROR_CODES.validationError, 'Household name, your name and email are required.')
+        return apiError(
+          ERROR_CODES.validationError,
+          'Household name, your name and email are required.',
+        )
       }
       db.household = { id: nextId('hh'), name: householdName }
-      const person = { id: nextId('person'), display_name: displayName, filing_role: 'primary' as const }
+      const person = {
+        id: nextId('person'),
+        display_name: displayName,
+        filing_role: 'primary' as const,
+      }
       db.people.push(person)
       const user: MockUser = {
         id: nextId('user'),
@@ -238,7 +252,10 @@ export const handlers = [
         ],
         timeout: 60000,
         attestation: 'none',
-        excludeCredentials: user.credentials.map((c) => ({ id: c.credentialId, type: 'public-key' })),
+        excludeCredentials: user.credentials.map((c) => ({
+          id: c.credentialId,
+          type: 'public-key',
+        })),
         authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
       }),
     ),
@@ -250,7 +267,10 @@ export const handlers = [
       const body = await readJson(request)
       const credentialId = credentialIdOf(body)
       if (!credentialId || findByCredential(credentialId)) {
-        return apiError(ERROR_CODES.passkeyVerificationFailed, 'That passkey could not be verified.')
+        return apiError(
+          ERROR_CODES.passkeyVerificationFailed,
+          'That passkey could not be verified.',
+        )
       }
       const cred: MockCredential = {
         id: nextId('cred'),
@@ -261,7 +281,9 @@ export const handlers = [
       }
       user.credentials.push(cred)
       audit('auth.passkey.registered')
-      return HttpResponse.json({ credential: { id: cred.id, nickname: cred.nickname, created_at: cred.created_at } })
+      return HttpResponse.json({
+        credential: { id: cred.id, nickname: cred.nickname, created_at: cred.created_at },
+      })
     }),
   ),
 
@@ -285,7 +307,10 @@ export const handlers = [
       const found = findByCredential(credentialIdOf(await readJson(request)))
       if (!found) {
         audit('auth.login.passkey', 'failure')
-        return apiError(ERROR_CODES.passkeyVerificationFailed, 'That passkey is not registered here.')
+        return apiError(
+          ERROR_CODES.passkeyVerificationFailed,
+          'That passkey is not registered here.',
+        )
       }
       found.cred.last_used_at = now()
       startSession(found.user)
@@ -313,7 +338,12 @@ export const handlers = [
           user.recoveryCodes = user.recoveryCodes.filter((c) => c !== recovery)
         }
       }
-      if (!user || user.password === null || user.password !== str(body, 'password') || !secondFactor) {
+      if (
+        !user ||
+        user.password === null ||
+        user.password !== str(body, 'password') ||
+        !secondFactor
+      ) {
         db.failedLogins += 1
         audit('auth.login.password', 'failure')
         return apiError(ERROR_CODES.invalidCredentials, 'Email, password or code is wrong.')
@@ -405,7 +435,10 @@ export const handlers = [
     authed(async ({ request }, user) => {
       const code = str(await readJson(request), 'code')
       if (!user.totpPending || code !== MOCK_TOTP_CODE) {
-        return apiError(ERROR_CODES.invalidCode, 'That code did not match. Check the time on your device.')
+        return apiError(
+          ERROR_CODES.invalidCode,
+          'That code did not match. Check the time on your device.',
+        )
       }
       user.totpPending = false
       user.totpEnabled = true
@@ -417,28 +450,34 @@ export const handlers = [
 
   http.post(
     path('/auth/totp/disable'),
-    authed((_ctx, user) => {
-      if (user.credentials.length === 0) {
-        return apiError(ERROR_CODES.lastCredential, 'Add a passkey before turning off codes.')
-      }
-      user.totpEnabled = false
-      user.recoveryCodes = []
-      audit('auth.totp.disabled')
-      return new HttpResponse(null, { status: 204 })
-    }, { reauth: true }),
+    authed(
+      (_ctx, user) => {
+        if (user.credentials.length === 0) {
+          return apiError(ERROR_CODES.lastCredential, 'Add a passkey before turning off codes.')
+        }
+        user.totpEnabled = false
+        user.recoveryCodes = []
+        audit('auth.totp.disabled')
+        return new HttpResponse(null, { status: 204 })
+      },
+      { reauth: true },
+    ),
   ),
 
   http.post(
     path('/auth/password'),
-    authed(async ({ request }, user) => {
-      const password = str(await readJson(request), 'password')
-      if (password.length < 12) {
-        return apiError(ERROR_CODES.validationError, 'Use at least 12 characters.')
-      }
-      user.password = password
-      audit('auth.password.set')
-      return new HttpResponse(null, { status: 204 })
-    }, { reauth: true }),
+    authed(
+      async ({ request }, user) => {
+        const password = str(await readJson(request), 'password')
+        if (password.length < 12) {
+          return apiError(ERROR_CODES.validationError, 'Use at least 12 characters.')
+        }
+        user.password = password
+        audit('auth.password.set')
+        return new HttpResponse(null, { status: 204 })
+      },
+      { reauth: true },
+    ),
   ),
 
   // Passkeys
@@ -449,109 +488,146 @@ export const handlers = [
 
   http.delete(
     path('/auth/passkeys/:id'),
-    authed(({ params }, user) => {
-      const cred = user.credentials.find((c) => c.id === params.id)
-      if (!cred) return apiError(ERROR_CODES.notFound, 'No such passkey.')
-      if (user.credentials.length === 1 && !user.totpEnabled) {
-        return apiError(ERROR_CODES.lastCredential, 'This is your only way in. Add another passkey or turn on codes first.')
-      }
-      user.credentials = user.credentials.filter((c) => c.id !== cred.id)
-      audit('auth.passkey.removed')
-      return new HttpResponse(null, { status: 204 })
-    }, { reauth: true }),
+    authed(
+      ({ params }, user) => {
+        const cred = user.credentials.find((c) => c.id === params.id)
+        if (!cred) return apiError(ERROR_CODES.notFound, 'No such passkey.')
+        if (user.credentials.length === 1 && !user.totpEnabled) {
+          return apiError(
+            ERROR_CODES.lastCredential,
+            'This is your only way in. Add another passkey or turn on codes first.',
+          )
+        }
+        user.credentials = user.credentials.filter((c) => c.id !== cred.id)
+        audit('auth.passkey.removed')
+        return new HttpResponse(null, { status: 204 })
+      },
+      { reauth: true },
+    ),
   ),
 
   // Household
   http.get(
     path('/household'),
-    authed(() => (db.household ? HttpResponse.json({ ...db.household }) : apiError(ERROR_CODES.notFound, 'No household.'))),
+    authed(() =>
+      db.household
+        ? HttpResponse.json({ ...db.household })
+        : apiError(ERROR_CODES.notFound, 'No household.'),
+    ),
   ),
 
   http.patch(
     path('/household'),
-    authed(async ({ request }) => {
-      const name = str(await readJson(request), 'name')
-      if (!name || !db.household) return apiError(ERROR_CODES.validationError, 'Give the household a name.')
-      db.household.name = name
-      audit('household.renamed')
-      return HttpResponse.json({ ...db.household })
-    }, { owner: true }),
+    authed(
+      async ({ request }) => {
+        const name = str(await readJson(request), 'name')
+        if (!name || !db.household)
+          return apiError(ERROR_CODES.validationError, 'Give the household a name.')
+        db.household.name = name
+        audit('household.renamed')
+        return HttpResponse.json({ ...db.household })
+      },
+      { owner: true },
+    ),
   ),
 
   http.get(
     path('/household/people'),
     authed(() =>
-      HttpResponse.json({ items: db.people.map((p) => personJson(p.id)).filter((p) => p !== undefined) }),
+      HttpResponse.json({
+        items: db.people.map((p) => personJson(p.id)).filter((p) => p !== undefined),
+      }),
     ),
   ),
 
   http.post(
     path('/household/people'),
-    authed(async ({ request }) => {
-      const body = await readJson(request)
-      const displayName = str(body, 'display_name')
-      if (!displayName || !isFilingRole(body.filing_role)) {
-        return apiError(ERROR_CODES.validationError, 'A name and a filing role are required.')
-      }
-      const person = { id: nextId('person'), display_name: displayName, filing_role: body.filing_role }
-      db.people.push(person)
-      audit('household.person.created')
-      return HttpResponse.json(personJson(person.id), { status: 201 })
-    }, { owner: true }),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        const displayName = str(body, 'display_name')
+        if (!displayName || !isFilingRole(body.filing_role)) {
+          return apiError(ERROR_CODES.validationError, 'A name and a filing role are required.')
+        }
+        const person = {
+          id: nextId('person'),
+          display_name: displayName,
+          filing_role: body.filing_role,
+        }
+        db.people.push(person)
+        audit('household.person.created')
+        return HttpResponse.json(personJson(person.id), { status: 201 })
+      },
+      { owner: true },
+    ),
   ),
 
   http.patch(
     path('/household/people/:id'),
-    authed(async ({ request, params }) => {
-      const person = db.people.find((p) => p.id === params.id)
-      if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
-      const body = await readJson(request)
-      if ('display_name' in body) {
-        const displayName = str(body, 'display_name')
-        if (!displayName) return apiError(ERROR_CODES.validationError, 'A name is required.')
-        person.display_name = displayName
-      }
-      if ('filing_role' in body) {
-        if (!isFilingRole(body.filing_role)) return apiError(ERROR_CODES.validationError, 'Unknown filing role.')
-        person.filing_role = body.filing_role
-      }
-      audit('household.person.updated')
-      return HttpResponse.json(personJson(person.id))
-    }, { owner: true }),
+    authed(
+      async ({ request, params }) => {
+        const person = db.people.find((p) => p.id === params.id)
+        if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
+        const body = await readJson(request)
+        if ('display_name' in body) {
+          const displayName = str(body, 'display_name')
+          if (!displayName) return apiError(ERROR_CODES.validationError, 'A name is required.')
+          person.display_name = displayName
+        }
+        if ('filing_role' in body) {
+          if (!isFilingRole(body.filing_role))
+            return apiError(ERROR_CODES.validationError, 'Unknown filing role.')
+          person.filing_role = body.filing_role
+        }
+        audit('household.person.updated')
+        return HttpResponse.json(personJson(person.id))
+      },
+      { owner: true },
+    ),
   ),
 
   http.delete(
     path('/household/people/:id'),
-    authed(({ params }) => {
-      const person = db.people.find((p) => p.id === params.id)
-      if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
-      if (db.users.some((u) => u.personId === person.id)) {
-        return apiError(ERROR_CODES.conflict, 'This person has an account. Remove their access first.')
-      }
-      db.people = db.people.filter((p) => p.id !== person.id)
-      audit('household.person.deleted')
-      return new HttpResponse(null, { status: 204 })
-    }, { owner: true }),
+    authed(
+      ({ params }) => {
+        const person = db.people.find((p) => p.id === params.id)
+        if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
+        if (db.users.some((u) => u.personId === person.id)) {
+          return apiError(
+            ERROR_CODES.conflict,
+            'This person has an account. Remove their access first.',
+          )
+        }
+        db.people = db.people.filter((p) => p.id !== person.id)
+        audit('household.person.deleted')
+        return new HttpResponse(null, { status: 204 })
+      },
+      { owner: true },
+    ),
   ),
 
   http.post(
     path('/household/people/:id/invite'),
-    authed(async ({ request, params }) => {
-      const person = db.people.find((p) => p.id === params.id)
-      if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
-      if (db.users.some((u) => u.personId === person.id)) {
-        return apiError(ERROR_CODES.conflict, 'This person already has an account.')
-      }
-      const email = str(await readJson(request), 'email').toLowerCase()
-      if (!email.includes('@')) return apiError(ERROR_CODES.validationError, 'Enter a valid email.')
-      if (db.users.some((u) => u.email === email)) {
-        return apiError(ERROR_CODES.conflict, 'That email already has an account.')
-      }
-      const token = randomToken()
-      db.invites.push({ token, personId: person.id, email, used: false })
-      audit('household.invite.created')
-      return HttpResponse.json({ invite_url: `${new URL(request.url).origin}/invite/${token}` })
-    }, { owner: true, reauth: true }),
+    authed(
+      async ({ request, params }) => {
+        const person = db.people.find((p) => p.id === params.id)
+        if (!person) return apiError(ERROR_CODES.notFound, 'No such person.')
+        if (db.users.some((u) => u.personId === person.id)) {
+          return apiError(ERROR_CODES.conflict, 'This person already has an account.')
+        }
+        const email = str(await readJson(request), 'email').toLowerCase()
+        if (!email.includes('@'))
+          return apiError(ERROR_CODES.validationError, 'Enter a valid email.')
+        if (db.users.some((u) => u.email === email)) {
+          return apiError(ERROR_CODES.conflict, 'That email already has an account.')
+        }
+        const token = randomToken()
+        db.invites.push({ token, personId: person.id, email, used: false })
+        audit('household.invite.created')
+        return HttpResponse.json({ invite_url: `${new URL(request.url).origin}/invite/${token}` })
+      },
+      { owner: true, reauth: true },
+    ),
   ),
 
   http.post(
@@ -559,7 +635,8 @@ export const handlers = [
     publicRoute(async ({ request }) => {
       const token = str(await readJson(request), 'token')
       const invite = db.invites.find((i) => i.token === token && !i.used)
-      if (!invite) return apiError(ERROR_CODES.invalidInvite, 'This invite link is used, expired or wrong.')
+      if (!invite)
+        return apiError(ERROR_CODES.invalidInvite, 'This invite link is used, expired or wrong.')
       invite.used = true
       const user: MockUser = {
         id: nextId('user'),
@@ -582,15 +659,21 @@ export const handlers = [
   // Audit
   http.get(
     path('/audit'),
-    authed(({ request }) => {
-      const url = new URL(request.url)
-      const limit = Math.min(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 200)
-      const before = url.searchParams.get('before')
-      const start = before ? db.audit.findIndex((a) => a.id === before) + 1 : 0
-      const items = db.audit.slice(start, start + limit)
-      const last = items.at(-1)
-      const hasMore = start + limit < db.audit.length
-      return HttpResponse.json({ items, next_before: hasMore && last ? last.id : null })
-    }, { owner: true }),
+    authed(
+      ({ request }) => {
+        const url = new URL(request.url)
+        const limit = Math.min(
+          Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50,
+          200,
+        )
+        const before = url.searchParams.get('before')
+        const start = before ? db.audit.findIndex((a) => a.id === before) + 1 : 0
+        const items = db.audit.slice(start, start + limit)
+        const last = items.at(-1)
+        const hasMore = start + limit < db.audit.length
+        return HttpResponse.json({ items, next_before: hasMore && last ? last.id : null })
+      },
+      { owner: true },
+    ),
   ),
 ]

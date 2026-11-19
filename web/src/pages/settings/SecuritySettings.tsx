@@ -70,7 +70,10 @@ function PasskeysSection({ totpEnabled }: { totpEnabled: boolean }) {
       {items.length > 0 && (
         <ul aria-label="Your passkeys" className="flex flex-col divide-y divide-border">
           {items.map((pk) => (
-            <li key={pk.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <li
+              key={pk.id}
+              className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+            >
               <div className="flex flex-col gap-1">
                 <p className="font-medium">{pk.nickname}</p>
                 <p className="text-xs text-muted-foreground">
@@ -184,7 +187,10 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
         Shown once. Each code gets you in one time if you lose your authenticator. Store them
         offline.
       </p>
-      <ol aria-label="Recovery codes" className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-muted p-3 font-mono text-sm tabular-nums sm:grid-cols-2">
+      <ol
+        aria-label="Recovery codes"
+        className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-muted p-3 font-mono text-sm tabular-nums sm:grid-cols-2"
+      >
         {codes.map((code) => (
           <li key={code}>{code}</li>
         ))}
@@ -335,7 +341,13 @@ const passwordSchema = z
   .refine((v) => v.password === v.confirm, { path: ['confirm'], message: "Passwords don't match." })
 type PasswordForm = z.infer<typeof passwordSchema>
 
-function PasswordSection({ hasPassword, totpEnabled }: { hasPassword: boolean; totpEnabled: boolean }) {
+function PasswordSection({
+  hasPassword,
+  totpEnabled,
+}: {
+  hasPassword: boolean
+  totpEnabled: boolean
+}) {
   const setPassword = useSetPassword()
   const form = useForm<PasswordForm>({
     resolver: zodResolver(passwordSchema),
@@ -372,10 +384,24 @@ function PasswordSection({ hasPassword, totpEnabled }: { hasPassword: boolean; t
           </p>
         )}
         <Field label={hasPassword ? 'New password' : 'Password'} error={errors.password?.message}>
-          {(p) => <Input {...p} {...form.register('password')} type="password" autoComplete="new-password" />}
+          {(p) => (
+            <Input
+              {...p}
+              {...form.register('password')}
+              type="password"
+              autoComplete="new-password"
+            />
+          )}
         </Field>
         <Field label="Confirm password" error={errors.confirm?.message}>
-          {(p) => <Input {...p} {...form.register('confirm')} type="password" autoComplete="new-password" />}
+          {(p) => (
+            <Input
+              {...p}
+              {...form.register('confirm')}
+              type="password"
+              autoComplete="new-password"
+            />
+          )}
         </Field>
         <Button type="submit" className="self-start" disabled={setPassword.isPending}>
           {hasPassword ? 'Change password' : 'Set password'}
@@ -390,7 +416,11 @@ function PasswordSection({ hasPassword, totpEnabled }: { hasPassword: boolean; t
 function ActivitySection() {
   const audit = useAudit(true, 10)
   return (
-    <SettingsSection id="activity" title="Recent activity" description="Sign-ins and changes, from the audit log.">
+    <SettingsSection
+      id="activity"
+      title="Recent activity"
+      description="Sign-ins and changes, from the audit log."
+    >
       {audit.isPending && <Skeleton className="h-14 w-full" />}
       {audit.data && audit.data.items.length === 0 && (
         <p className="text-sm text-muted-foreground">Nothing yet.</p>
@@ -400,7 +430,13 @@ function ActivitySection() {
           {audit.data.items.map((entry) => (
             <li key={entry.id} className="flex flex-wrap justify-between gap-x-3">
               <span className="font-mono text-xs">{entry.action}</span>
-              <span className={entry.outcome === 'failure' ? 'text-xs text-destructive-text' : 'text-xs text-muted-foreground'}>
+              <span
+                className={
+                  entry.outcome === 'failure'
+                    ? 'text-xs text-destructive-text'
+                    : 'text-xs text-muted-foreground'
+                }
+              >
                 {entry.outcome === 'failure' ? 'Failed · ' : ''}
                 {entry.actor_display_name ?? 'Unknown'} · {formatDate(entry.created_at)}
               </span>

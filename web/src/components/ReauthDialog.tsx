@@ -41,7 +41,10 @@ export function ReauthDialog() {
   const [useCode, setUseCode] = useState(false)
 
   const passkey = useMutation({ mutationFn: reauthWithPasskey, onSuccess: confirm })
-  const totp = useMutation({ mutationFn: (code: string) => reauthWithTotp(code), onSuccess: confirm })
+  const totp = useMutation({
+    mutationFn: (code: string) => reauthWithTotp(code),
+    onSuccess: confirm,
+  })
   const form = useForm<CodeForm>({ resolver: zodResolver(codeSchema), defaultValues: { code: '' } })
 
   const open = pending !== null

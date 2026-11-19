@@ -8,7 +8,15 @@ import { encode } from 'uqr'
  * Dark modules on a white quiet zone regardless of theme: authenticator cameras expect
  * dark-on-light. Both colours are tokens (`--qr-ink`, `--qr-paper`).
  */
-export function QrCode({ value, label, size = 208 }: { value: string; label: string; size?: number }) {
+export function QrCode({
+  value,
+  label,
+  size = 208,
+}: {
+  value: string
+  label: string
+  size?: number
+}) {
   const path = useMemo(() => {
     const { data } = encode(value, { ecc: 'M', border: 0 })
     const parts: string[] = []

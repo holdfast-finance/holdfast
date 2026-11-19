@@ -81,7 +81,10 @@ export function SettingsSection({
   children: ReactNode
 }) {
   return (
-    <section aria-labelledby={id} className="flex flex-col gap-4 rounded-card border border-border bg-card p-4 md:p-5">
+    <section
+      aria-labelledby={id}
+      className="flex flex-col gap-4 rounded-card border border-border bg-card p-4 md:p-5"
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
           <h2 id={id} className="text-lg">

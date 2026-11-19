@@ -43,7 +43,9 @@ const FONT_FILE = /\.(woff2?|ttf|otf|eot)(\?.*)?$/i
 
 // Dev-only: serve MSW's worker script for `VITE_MOCK_API=1 pnpm dev`. It is deliberately not in
 // public/, so `vite build` never copies it into dist/ (prod ships no mock code at all).
-const MSW_WORKER = fileURLToPath(new URL('./node_modules/msw/lib/mockServiceWorker.js', import.meta.url))
+const MSW_WORKER = fileURLToPath(
+  new URL('./node_modules/msw/lib/mockServiceWorker.js', import.meta.url),
+)
 function mockServiceWorker(): Plugin {
   return {
     name: 'holdfast-msw-dev-worker',

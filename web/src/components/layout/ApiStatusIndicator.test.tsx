@@ -38,7 +38,10 @@ describe('<ApiStatusIndicator>', () => {
 
     expect(await screen.findByText('API ok')).toBeInTheDocument()
     expect(screen.getByText('v0.0.0')).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/api\/health$/), expect.anything())
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/health$/),
+      expect.anything(),
+    )
   })
 
   it('shows "API degraded" when a dependency is down (503)', async () => {

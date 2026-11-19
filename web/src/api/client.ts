@@ -118,13 +118,17 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 /** A human message for any error a query or mutation can throw. */
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.code === ERROR_CODES.csrfFailed) return 'Request blocked. Reload the page and try again.'
+    if (error.code === ERROR_CODES.csrfFailed)
+      return 'Request blocked. Reload the page and try again.'
     return error.message
   }
   if (error instanceof Error) {
     // WebAuthn: the user closed the prompt, it timed out, or no passkey matched. The browser
     // deliberately doesn't say which.
-    if (error.name === 'NotAllowedError' || ('code' in error && error.code === 'ERROR_CEREMONY_ABORTED')) {
+    if (
+      error.name === 'NotAllowedError' ||
+      ('code' in error && error.code === 'ERROR_CEREMONY_ABORTED')
+    ) {
       return 'Passkey prompt closed or timed out. Try again when you are ready.'
     }
     if (error.name === 'InvalidStateError') return 'This device already has a passkey here.'

@@ -25,8 +25,7 @@ export function useHousehold() {
 export function useRenameHousehold() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (body: HouseholdUpdate) =>
-      api<Household>('/household', { method: 'PATCH', body }),
+    mutationFn: (body: HouseholdUpdate) => api<Household>('/household', { method: 'PATCH', body }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: queryKeys.household, exact: true })
       await client.invalidateQueries({ queryKey: queryKeys.me })
@@ -80,9 +79,7 @@ export function useDeletePerson() {
 export function useInvitePerson() {
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: InviteRequest }) =>
-      withReauth(() =>
-        api<InviteResponse>(`${personPath(id)}/invite`, { method: 'POST', body }),
-      ),
+      withReauth(() => api<InviteResponse>(`${personPath(id)}/invite`, { method: 'POST', body })),
   })
 }
 

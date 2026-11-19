@@ -22,7 +22,11 @@ const passwordSchema = z
   })
   .superRefine((v, ctx) => {
     if (v.method === 'totp' && !/^\d{6}$/.test(v.code)) {
-      ctx.addIssue({ code: 'custom', path: ['code'], message: 'Enter the 6-digit code from your authenticator.' })
+      ctx.addIssue({
+        code: 'custom',
+        path: ['code'],
+        message: 'Enter the 6-digit code from your authenticator.',
+      })
     }
     if (v.method === 'recovery' && v.code.length < 6) {
       ctx.addIssue({ code: 'custom', path: ['code'], message: 'Enter one of your recovery codes.' })
@@ -62,7 +66,12 @@ function PasswordLoginForm() {
       </Field>
       <Field label="Password" error={errors.password?.message}>
         {(p) => (
-          <Input {...p} {...form.register('password')} type="password" autoComplete="current-password" />
+          <Input
+            {...p}
+            {...form.register('password')}
+            type="password"
+            autoComplete="current-password"
+          />
         )}
       </Field>
       <Field
@@ -90,7 +99,9 @@ function PasswordLoginForm() {
           form.clearErrors('code')
         }}
       >
-        {method === 'totp' ? 'Lost your authenticator? Use a recovery code' : 'Use an authenticator code'}
+        {method === 'totp'
+          ? 'Lost your authenticator? Use a recovery code'
+          : 'Use an authenticator code'}
       </Button>
       <Button type="submit" size="lg" disabled={login.isPending}>
         {login.isPending ? 'Signing in…' : 'Sign in'}
@@ -107,7 +118,10 @@ function LoginScreen() {
   if (setup.data?.needs_setup) return <Navigate to="/setup" replace />
 
   return (
-    <AuthLayout title="Sign in" subtitle="Your money, on your hardware. Unlock it with your passkey.">
+    <AuthLayout
+      title="Sign in"
+      subtitle="Your money, on your hardware. Unlock it with your passkey."
+    >
       <div className="flex flex-col gap-4">
         <FormError error={passkey.error} />
         <Button
@@ -135,7 +149,10 @@ function LoginScreen() {
             Use password + code instead
           </Button>
         ) : (
-          <section aria-labelledby="fallback-title" className="flex flex-col gap-4 border-t border-border pt-6">
+          <section
+            aria-labelledby="fallback-title"
+            className="flex flex-col gap-4 border-t border-border pt-6"
+          >
             <h2 id="fallback-title" className="text-lg">
               Password + code
             </h2>

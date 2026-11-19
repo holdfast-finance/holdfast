@@ -126,13 +126,21 @@ function AboutStep({
       }}
     >
       <FormError error={setup.error} />
-      <Field label="Household name" error={errors.household_name?.message} hint="Shown only to the people in it.">
+      <Field
+        label="Household name"
+        error={errors.household_name?.message}
+        hint="Shown only to the people in it."
+      >
         {(p) => <Input {...p} {...form.register('household_name')} autoComplete="off" />}
       </Field>
       <Field label="Your name" error={errors.display_name?.message}>
         {(p) => <Input {...p} {...form.register('display_name')} autoComplete="name" />}
       </Field>
-      <Field label="Your email" error={errors.email?.message} hint="Your sign-in name. Holdfast sends no email.">
+      <Field
+        label="Your email"
+        error={errors.email?.message}
+        hint="Your sign-in name. Holdfast sends no email."
+      >
         {(p) => <Input {...p} {...form.register('email')} type="email" autoComplete="email" />}
       </Field>
       <div className="flex flex-col-reverse gap-3 sm:flex-row">
@@ -206,8 +214,8 @@ function PersonStep({ onDone }: { onDone: () => void }) {
       }}
     >
       <p className="text-sm text-muted-foreground">
-        Sharing the books with someone? Add them now and send an invite from Settings. You can
-        also do this later.
+        Sharing the books with someone? Add them now and send an invite from Settings. You can also
+        do this later.
       </p>
       <FormError error={create.error} />
       <Field label="Their name" error={errors.display_name?.message}>
@@ -216,11 +224,13 @@ function PersonStep({ onDone }: { onDone: () => void }) {
       <Field label="Role" error={errors.filing_role?.message}>
         {(p) => (
           <NativeSelect {...p} {...form.register('filing_role')}>
-            {FILING_ROLES.filter((r): r is Exclude<FilingRole, 'primary'> => r !== 'primary').map((r) => (
-              <option key={r} value={r}>
-                {FILING_ROLE_LABELS[r]}
-              </option>
-            ))}
+            {FILING_ROLES.filter((r): r is Exclude<FilingRole, 'primary'> => r !== 'primary').map(
+              (r) => (
+                <option key={r} value={r}>
+                  {FILING_ROLE_LABELS[r]}
+                </option>
+              ),
+            )}
           </NativeSelect>
         )}
       </Field>
@@ -237,10 +247,19 @@ function PersonStep({ onDone }: { onDone: () => void }) {
 }
 
 const TITLES: Record<Step, { title: string; subtitle: string }> = {
-  token: { title: 'Claim this server', subtitle: 'First run. Nobody owns this instance yet. Make it yours.' },
+  token: {
+    title: 'Claim this server',
+    subtitle: 'First run. Nobody owns this instance yet. Make it yours.',
+  },
   about: { title: 'Your household', subtitle: 'One root for every account you hold.' },
-  passkey: { title: 'Create your passkey', subtitle: 'No password to leak. Your device holds the key.' },
-  person: { title: 'Add a second person', subtitle: 'Optional. Each person gets their own sign-in.' },
+  passkey: {
+    title: 'Create your passkey',
+    subtitle: 'No password to leak. Your device holds the key.',
+  },
+  person: {
+    title: 'Add a second person',
+    subtitle: 'Optional. Each person gets their own sign-in.',
+  },
 }
 
 export function SetupPage() {

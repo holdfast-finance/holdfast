@@ -65,7 +65,11 @@ function PersonFormFields({
       <Field label="Name" error={errors.display_name?.message}>
         {(p) => <Input {...p} {...form.register('display_name')} autoComplete="off" />}
       </Field>
-      <Field label="Filing role" error={errors.filing_role?.message} hint="Used later by the optional tax module.">
+      <Field
+        label="Filing role"
+        error={errors.filing_role?.message}
+        hint="Used later by the optional tax module."
+      >
         {(p) => (
           <NativeSelect {...p} {...form.register('filing_role')}>
             {Object.entries(FILING_ROLE_LABELS).map(([value, label]) => (
@@ -85,7 +89,10 @@ function PersonFormFields({
 
 function InviteFlow({ person, onClose }: { person: Person; onClose: () => void }) {
   const invite = useInvitePerson()
-  const form = useForm<InviteForm>({ resolver: zodResolver(inviteSchema), defaultValues: { email: '' } })
+  const form = useForm<InviteForm>({
+    resolver: zodResolver(inviteSchema),
+    defaultValues: { email: '' },
+  })
   if (invite.data) {
     const url = invite.data.invite_url
     return (
@@ -94,7 +101,15 @@ function InviteFlow({ person, onClose }: { person: Person; onClose: () => void }
           Send this to {person.display_name} however you like. It works once and expires in 24
           hours. Holdfast doesn&apos;t email it for you.
         </p>
-        <Input readOnly value={url} aria-label="Invite link" className="font-mono text-xs md:text-xs" onFocus={(e) => { e.currentTarget.select() }} />
+        <Input
+          readOnly
+          value={url}
+          aria-label="Invite link"
+          className="font-mono text-xs md:text-xs"
+          onFocus={(e) => {
+            e.currentTarget.select()
+          }}
+        />
         <CopyButton text={url} label="Copy invite link" variant="default" />
         <Button variant="outline" onClick={onClose}>
           Done
@@ -114,7 +129,11 @@ function InviteFlow({ person, onClose }: { person: Person; onClose: () => void }
       }}
     >
       <FormError error={error} />
-      <Field label="Their email" error={form.formState.errors.email?.message} hint="This becomes their sign-in name.">
+      <Field
+        label="Their email"
+        error={form.formState.errors.email?.message}
+        hint="This becomes their sign-in name."
+      >
         {(p) => <Input {...p} {...form.register('email')} type="email" autoComplete="off" />}
       </Field>
       <Button type="submit" size="lg" disabled={invite.isPending}>
@@ -125,7 +144,8 @@ function InviteFlow({ person, onClose }: { person: Person; onClose: () => void }
   )
 }
 
-type Panel = { kind: 'add' } | { kind: 'edit'; person: Person } | { kind: 'invite'; person: Person } | null
+type Panel =
+  { kind: 'add' } | { kind: 'edit'; person: Person } | { kind: 'invite'; person: Person } | null
 
 function HouseholdName({ name, isOwner }: { name: string; isOwner: boolean }) {
   const rename = useRenameHousehold()
@@ -136,7 +156,12 @@ function HouseholdName({ name, isOwner }: { name: string; isOwner: boolean }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-heading text-xl">{name}</p>
         {isOwner && (
-          <Button variant="outline" onClick={() => { setEditing(true) }}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setEditing(true)
+            }}
+          >
             <Pencil aria-hidden="true" />
             Rename
           </Button>
@@ -150,7 +175,11 @@ function HouseholdName({ name, isOwner }: { name: string; isOwner: boolean }) {
       className="flex flex-col gap-3 sm:flex-row sm:items-end"
       onSubmit={(e) => {
         void form.handleSubmit((v) => {
-          rename.mutate(v, { onSuccess: () => { setEditing(false) } })
+          rename.mutate(v, {
+            onSuccess: () => {
+              setEditing(false)
+            },
+          })
         })(e)
       }}
     >
@@ -158,7 +187,13 @@ function HouseholdName({ name, isOwner }: { name: string; isOwner: boolean }) {
         {(p) => <Input {...p} {...form.register('name')} autoComplete="off" />}
       </Field>
       <div className="flex gap-2">
-        <Button type="button" variant="outline" onClick={() => { setEditing(false) }}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            setEditing(false)
+          }}
+        >
           Cancel
         </Button>
         <Button type="submit" disabled={rename.isPending}>
@@ -207,7 +242,11 @@ export function HouseholdSettings() {
         }
         action={
           isOwner && (
-            <Button onClick={() => { setPanel({ kind: 'add' }) }}>
+            <Button
+              onClick={() => {
+                setPanel({ kind: 'add' })
+              }}
+            >
               <UserPlus aria-hidden="true" />
               Add person
             </Button>
@@ -220,15 +259,22 @@ export function HouseholdSettings() {
         {people.data && (
           <ul className="flex flex-col divide-y divide-border" aria-label="People">
             {people.data.items.map((person) => (
-              <li key={person.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <li
+                key={person.id}
+                className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+              >
                 <div className="flex min-w-0 flex-col gap-1">
                   <p className="truncate font-medium">
                     {person.display_name}
-                    {person.id === me?.user.person?.id && <span className="text-muted-foreground"> (you)</span>}
+                    {person.id === me?.user.person?.id && (
+                      <span className="text-muted-foreground"> (you)</span>
+                    )}
                   </p>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{FILING_ROLE_LABELS[person.filing_role]}</span>
-                    <Badge variant="outline">{person.has_account ? 'Has sign-in' : 'No sign-in yet'}</Badge>
+                    <Badge variant="outline">
+                      {person.has_account ? 'Has sign-in' : 'No sign-in yet'}
+                    </Badge>
                   </div>
                 </div>
                 {isOwner && (
@@ -236,7 +282,9 @@ export function HouseholdSettings() {
                     <Button
                       variant="outline"
                       aria-label={`Edit ${person.display_name}`}
-                      onClick={() => { setPanel({ kind: 'edit', person }) }}
+                      onClick={() => {
+                        setPanel({ kind: 'edit', person })
+                      }}
                     >
                       <Pencil aria-hidden="true" />
                       Edit
@@ -246,7 +294,9 @@ export function HouseholdSettings() {
                         <Button
                           variant="outline"
                           aria-label={`Invite ${person.display_name}`}
-                          onClick={() => { setPanel({ kind: 'invite', person }) }}
+                          onClick={() => {
+                            setPanel({ kind: 'invite', person })
+                          }}
                         >
                           <Send aria-hidden="true" />
                           Invite
@@ -289,31 +339,52 @@ export function HouseholdSettings() {
         )}
       </SettingsSection>
 
-      <ResponsiveSheet open={panel?.kind === 'add'} onOpenChange={(o) => { if (!o) close() }} title="Add a person">
+      <ResponsiveSheet
+        open={panel?.kind === 'add'}
+        onOpenChange={(o) => {
+          if (!o) close()
+        }}
+        title="Add a person"
+      >
         <PersonFormFields
           initial={{ display_name: '', filing_role: 'spouse' }}
           submitLabel="Add person"
           pending={create.isPending}
           error={create.error}
-          onSubmit={(v) => { create.mutate(v, { onSuccess: close }) }}
+          onSubmit={(v) => {
+            create.mutate(v, { onSuccess: close })
+          }}
         />
       </ResponsiveSheet>
 
-      <ResponsiveSheet open={panel?.kind === 'edit'} onOpenChange={(o) => { if (!o) close() }} title="Edit person">
+      <ResponsiveSheet
+        open={panel?.kind === 'edit'}
+        onOpenChange={(o) => {
+          if (!o) close()
+        }}
+        title="Edit person"
+      >
         {panel?.kind === 'edit' && (
           <PersonFormFields
-            initial={{ display_name: panel.person.display_name, filing_role: panel.person.filing_role }}
+            initial={{
+              display_name: panel.person.display_name,
+              filing_role: panel.person.filing_role,
+            }}
             submitLabel="Save changes"
             pending={update.isPending}
             error={update.error}
-            onSubmit={(v) => { update.mutate({ id: panel.person.id, body: v }, { onSuccess: close }) }}
+            onSubmit={(v) => {
+              update.mutate({ id: panel.person.id, body: v }, { onSuccess: close })
+            }}
           />
         )}
       </ResponsiveSheet>
 
       <ResponsiveSheet
         open={panel?.kind === 'invite'}
-        onOpenChange={(o) => { if (!o) close() }}
+        onOpenChange={(o) => {
+          if (!o) close()
+        }}
         title={panel?.kind === 'invite' ? `Invite ${panel.person.display_name}` : 'Invite'}
         description="They get their own passkey. You never see or share their credentials."
       >

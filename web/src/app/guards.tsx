@@ -58,7 +58,9 @@ export function RedirectIfSignedIn({ children }: { children: ReactNode }) {
   if (me.isPending) return <Splash />
   if (me.data) {
     const from = (location.state as FromState | null)?.from
-    return <Navigate to={from && from.startsWith('/') && !from.startsWith('//') ? from : '/'} replace />
+    return (
+      <Navigate to={from && from.startsWith('/') && !from.startsWith('//') ? from : '/'} replace />
+    )
   }
   return children
 }

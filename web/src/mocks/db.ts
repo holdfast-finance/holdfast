@@ -115,7 +115,10 @@ export function audit(action: string, outcome: AuditEntry['outcome'] = 'success'
 }
 
 export function generateRecoveryCodes(): string[] {
-  return Array.from({ length: 10 }, (_, i) => `rcv${String(i).padStart(2, '0')}-${randomToken().slice(0, 8)}`)
+  return Array.from(
+    { length: 10 },
+    (_, i) => `rcv${String(i).padStart(2, '0')}-${randomToken().slice(0, 8)}`,
+  )
 }
 
 // --- Seeds for tests and dev -------------------------------------------------------------------
@@ -146,7 +149,11 @@ export function seedHousehold(options: SeedOptions = {}): void {
   resetDb()
   const passkeys = options.passkeys ?? 1
   db.household = { id: nextId('hh'), name: SEED.householdName }
-  const owner: MockPerson = { id: nextId('person'), display_name: SEED.ownerName, filing_role: 'primary' }
+  const owner: MockPerson = {
+    id: nextId('person'),
+    display_name: SEED.ownerName,
+    filing_role: 'primary',
+  }
   db.people.push(owner)
   db.users.push({
     id: nextId('user'),
@@ -166,7 +173,11 @@ export function seedHousehold(options: SeedOptions = {}): void {
     })),
   })
   if (options.withMember || options.as === 'member') {
-    const member: MockPerson = { id: nextId('person'), display_name: SEED.memberName, filing_role: 'spouse' }
+    const member: MockPerson = {
+      id: nextId('person'),
+      display_name: SEED.memberName,
+      filing_role: 'spouse',
+    }
     db.people.push(member)
     db.users.push({
       id: nextId('user'),
