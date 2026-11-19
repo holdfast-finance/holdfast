@@ -28,8 +28,25 @@ const hmrClientPort = process.env.VITE_HMR_CLIENT_PORT
     ? 443
     : undefined
 
+// Dep-optimizer cache. Vite defaults to node_modules/.vite, but in the dev container
+// node_modules is an anonymous volume that compose carries over when the container is
+// recreated, while `pnpm install` on start may relink packages. The carried-over
+// _metadata.json then disagrees with the browser's hashes and Vite answers
+// `504 Outdated Optimize Dep`. /tmp is the container's own writable layer: every new container
+// starts empty and optimizes once from the deps it actually installed. A plain restart keeps the
+// cache, which is fine because the deps did not change. On the host the default stays.
+const cacheDir = inContainer ? '/tmp/vite-cache' : undefined
+
+// Never inline fonts as data: URIs: the prod CSP is `font-src 'self'`, so an inlined
+// @font-face src would be blocked. Other small assets keep Vite's default 4 KiB rule.
+const FONT_FILE = /\.(woff2?|ttf|otf|eot)(\?.*)?$/i
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  cacheDir,
+  build: {
+    assetsInlineLimit: (filePath) => (FONT_FILE.test(filePath) ? false : undefined),
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
