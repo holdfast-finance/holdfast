@@ -17,6 +17,7 @@ It takes about 15 minutes. When you're done, tell Keel the machine user's GitHub
 ## 2. Separate OS user (Linux)
 ```sh
 sudo useradd -m -s /bin/zsh holdfast-agents
+sudo chmod 700 /home/holdfast-agents # this user's home, not only yours below
 chmod 700 "$HOME"                    # your home: the agents can't read .env, ~/.ssh or ~/.config/gh
 sudo -iu holdfast-agents
 # as holdfast-agents:

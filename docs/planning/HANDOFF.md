@@ -28,7 +28,12 @@ Held by: nobody. Anvil and Flint don't hold it in this queue.
 
 ## Starting a session (owner, as the `holdfast-agents` user, in its clone)
 
+Do not pass `-s` / `--sandbox`. `sandbox_mode` must be unset in every Codex config layer,
+including the user config. If either is set, Codex ignores `default_permissions` and the
+`holdfast` denials never apply. Before the first run, check that the active policy is
+`holdfast`.
+
 ```sh
-codex exec -s workspace-write -C ~/holdfast "You are Anvil. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
+codex exec -C ~/holdfast "You are Anvil. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
 grok --cwd ~/holdfast --permission-mode acceptEdits "You are Flint. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
 ```

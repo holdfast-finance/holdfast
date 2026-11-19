@@ -84,6 +84,8 @@ def main(action):
         candidate = cwd / name
         absolute = candidate.resolve()
         if action == "guard":
+            if not absolute.is_relative_to(ROOT):
+                return block("patch target is outside the repository")
             if private(candidate) or private(absolute):
                 return block("patch targets a protected data or secret path")
             if absolute == ROOT / "CLAUDE.md" or absolute.is_relative_to(ROOT / ".claude"):

@@ -20,9 +20,7 @@ Anvil and Flint are the team's **backups** for when Claude usage runs out. In ba
 - **Never merge, label, approve or edit someone else's PR.** Work queues as PRs until Keel is back.
 - Pick work in this order: `HANDOFF.md`, then any Sprint story in `docs/planning/SPRINTS.md` that
   has a brief, no open PR and no forbidden path.
-- Until the owner finishes `docs/process/EXTERNAL-AGENTS-SETUP.md`, backups run under the owner's
-  account. The only enforcement is `.codex/rules/holdfast.rules` plus these rules, and that's an
-  accepted owner risk (ADR 0012).
+- Neither Anvil nor Flint is launched until `docs/process/EXTERNAL-AGENTS-SETUP.md` is done.
 
 ## Who you are
 
