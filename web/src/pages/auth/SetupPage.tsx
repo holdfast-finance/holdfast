@@ -6,15 +6,16 @@ import { useForm } from 'react-hook-form'
 import { Navigate, useNavigate } from 'react-router'
 import { z } from 'zod'
 
-import { registerPasskey, useSetup, useSetupStatus } from '@/api/auth'
-import { isApiError } from '@/api/client'
+import { registerPasskey, useMe, usePasskeys, useSetup, useSetupStatus } from '@/api/auth'
+import { isApiError, passkeysAvailable } from '@/api/client'
 import { createPerson } from '@/api/household'
-import { ERROR_CODES, FILING_ROLES, type FilingRole } from '@/api/types'
+import { ERROR_CODES } from '@/api/types'
 import { Field, FormError } from '@/components/forms/Field'
 import { AuthLayout, Splash } from '@/components/layout/AuthLayout'
+import { PasskeyNotice } from '@/components/PasskeyNotice'
 import { Button } from '@/components/ui/button'
 import { Input, NativeSelect } from '@/components/ui/input'
-import { FILING_ROLE_LABELS } from '@/pages/settings/labels'
+import { ASSIGNABLE_FILING_ROLES, FILING_ROLE_LABELS } from '@/pages/settings/labels'
 
 type Step = 'token' | 'about' | 'passkey' | 'person'
 const STEPS: Step[] = ['token', 'about', 'passkey', 'person']
@@ -29,7 +30,7 @@ const aboutSchema = z.object({
 })
 const personSchema = z.object({
   display_name: z.string().trim().min(1, 'Give them a name.').max(80),
-  filing_role: z.enum(['primary', 'spouse', 'dependent']),
+  filing_role: z.enum(['spouse', 'dependent']),
 })
 type TokenForm = z.infer<typeof tokenSchema>
 type AboutForm = z.infer<typeof aboutSchema>
@@ -38,7 +39,7 @@ type PersonForm = z.infer<typeof personSchema>
 function StepHeader({ step }: { step: Step }) {
   const index = STEPS.indexOf(step) + 1
   return (
-    <p className="font-mono text-xs text-muted-foreground tabular-nums">
+    <p role="status" className="font-mono text-xs text-muted-foreground tabular-nums">
       Step {index} of {STEPS.length}
     </p>
   )
@@ -71,7 +72,12 @@ function TokenStep({
       <Field
         label="Setup token"
         error={form.formState.errors.setup_token?.message}
-        hint="Printed once in the API log on startup (docker compose logs api). It proves you run this box."
+        hint={
+          <>
+            Printed once in the API log on startup (
+            <code className="font-mono">docker compose logs api</code>). It proves you run this box.
+          </>
+        }
       >
         {(p) => (
           <Input
@@ -161,12 +167,10 @@ function PasskeyStep({ onDone }: { onDone: () => void }) {
     mutationFn: () => registerPasskey(nickname.trim() || undefined),
     onSuccess: onDone,
   })
+  const available = passkeysAvailable()
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-muted-foreground">
-        Passkeys live on your device and can&apos;t be phished or reused. This becomes your key to
-        the place.
-      </p>
+      {!available && <PasskeyNotice />}
       <FormError error={register.error} />
       <Field label="Device name (optional)" hint="So you can tell your passkeys apart later.">
         {(p) => (
@@ -184,7 +188,7 @@ function PasskeyStep({ onDone }: { onDone: () => void }) {
       <Button
         type="button"
         size="lg"
-        disabled={register.isPending}
+        disabled={!available || register.isPending}
         onClick={() => {
           register.mutate()
         }}
@@ -221,16 +225,14 @@ function PersonStep({ onDone }: { onDone: () => void }) {
       <Field label="Their name" error={errors.display_name?.message}>
         {(p) => <Input {...p} {...form.register('display_name')} autoComplete="off" />}
       </Field>
-      <Field label="Role" error={errors.filing_role?.message}>
+      <Field label="Filing role" error={errors.filing_role?.message}>
         {(p) => (
           <NativeSelect {...p} {...form.register('filing_role')}>
-            {FILING_ROLES.filter((r): r is Exclude<FilingRole, 'primary'> => r !== 'primary').map(
-              (r) => (
-                <option key={r} value={r}>
-                  {FILING_ROLE_LABELS[r]}
-                </option>
-              ),
-            )}
+            {ASSIGNABLE_FILING_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {FILING_ROLE_LABELS[r]}
+              </option>
+            ))}
           </NativeSelect>
         )}
       </Field>
@@ -254,7 +256,7 @@ const TITLES: Record<Step, { title: string; subtitle: string }> = {
   about: { title: 'Your household', subtitle: 'One root for every account you hold.' },
   passkey: {
     title: 'Create your passkey',
-    subtitle: 'No password to leak. Your device holds the key.',
+    subtitle: 'Your device holds the key. Nothing to phish, nothing on the server to leak.',
   },
   person: {
     title: 'Add a second person',
@@ -263,16 +265,33 @@ const TITLES: Record<Step, { title: string; subtitle: string }> = {
 }
 
 export function SetupPage() {
-  const status = useSetupStatus()
+  const me = useMe()
+  const signedIn = Boolean(me.data)
+  const status = useSetupStatus(!signedIn)
+  const passkeys = usePasskeys(signedIn)
   const navigate = useNavigate()
-  const [step, setStep] = useState<Step>('token')
+  const [chosen, setStep] = useState<Step | null>(null)
   const [token, setToken] = useState('')
   const [tokenError, setTokenError] = useState<unknown>(null)
 
-  if (step === 'token') {
+  // Where to start. Once the user moves through the wizard, `chosen` wins. On a fresh load the
+  // server decides: a signed-in owner with no passkey (reloaded mid-setup) resumes at the
+  // passkey step; anyone else signed in is done here; signed out, claim the server or sign in.
+  let step: Step
+  if (chosen) {
+    step = chosen
+  } else if (me.isPending) {
+    return <Splash />
+  } else if (me.data) {
+    if (passkeys.isPending) return <Splash />
+    const noPasskey = passkeys.data?.items.length === 0
+    if (!noPasskey || me.data.user.role !== 'owner') return <Navigate to="/" replace />
+    step = 'passkey'
+  } else {
     if (status.isPending) return <Splash />
     // Setup already done: nothing to claim here.
     if (status.data && !status.data.needs_setup) return <Navigate to="/login" replace />
+    step = 'token'
   }
 
   const finish = () => {
@@ -280,7 +299,7 @@ export function SetupPage() {
   }
 
   return (
-    <AuthLayout title={TITLES[step].title} subtitle={TITLES[step].subtitle}>
+    <AuthLayout title={TITLES[step].title} subtitle={TITLES[step].subtitle} focusKey={step}>
       <StepHeader step={step} />
       {step === 'token' && (
         <TokenStep

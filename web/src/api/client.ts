@@ -21,6 +21,14 @@ import { CLIENT_ERROR_CODES, ERROR_CODES } from '@/api/types'
 
 export const CSRF_HEADER = 'X-Holdfast-CSRF'
 
+/** Shown when WebAuthn isn't available because the page isn't a secure context. */
+export const PASSKEYS_NEED_HTTPS = 'Passkeys need HTTPS. Open Holdfast at its https:// address.'
+
+/** WebAuthn needs a secure context (https, or localhost) and a browser that ships it. */
+export function passkeysAvailable(): boolean {
+  return window.isSecureContext && typeof window.PublicKeyCredential === 'function'
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
@@ -132,7 +140,16 @@ export function errorMessage(error: unknown): string {
       return 'Passkey prompt closed or timed out. Try again when you are ready.'
     }
     if (error.name === 'InvalidStateError') return 'This device already has a passkey here.'
-    return error.message
+    if (error.name === 'AbortError') {
+      return 'Passkey prompt closed or timed out. Try again when you are ready.'
+    }
+    if (error.name === 'SecurityError') return PASSKEYS_NEED_HTTPS
+    if (error.name === 'NotSupportedError') {
+      return "This browser or device can't use passkeys here. Try another device."
+    }
+    // Anything else (other WebAuthn or runtime errors): never show the raw browser message.
+    // It's developer text that can include origins and internal details.
+    return 'Something went wrong. Try again.'
   }
   return 'Something went wrong.'
 }

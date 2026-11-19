@@ -51,7 +51,10 @@ describe('first-run setup wizard', () => {
       }) as unknown,
     })
     await userEvent.type(screen.getByLabelText('Their name'), 'Sam Example')
-    await userEvent.selectOptions(screen.getByLabelText('Role'), 'spouse')
+    expect(
+      Array.from(screen.getByLabelText<HTMLSelectElement>('Filing role').options, (o) => o.value),
+    ).toEqual(['spouse', 'dependent'])
+    await userEvent.selectOptions(screen.getByLabelText('Filing role'), 'spouse')
     await userEvent.click(screen.getByRole('button', { name: 'Add person' }))
 
     await waitFor(() => {

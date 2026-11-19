@@ -97,4 +97,17 @@ describe('api client', () => {
     expect(errorMessage(notAllowed())).toMatch(/passkey prompt closed/i)
     expect(errorMessage('weird')).toBe('Something went wrong.')
   })
+
+  it('never shows raw WebAuthn or runtime error text', () => {
+    const named = (name: string, message: string) => Object.assign(new Error(message), { name })
+    expect(errorMessage(named('SecurityError', 'The RP ID "x" is invalid for this domain'))).toBe(
+      'Passkeys need HTTPS. Open Holdfast at its https:// address.',
+    )
+    expect(errorMessage(named('NotSupportedError', 'algorithm -7 unsupported'))).toMatch(
+      /can't use passkeys/,
+    )
+    expect(errorMessage(named('AbortError', 'aborted'))).toMatch(/prompt closed/)
+    const odd = errorMessage(new TypeError("Cannot read properties of undefined (reading 'id')"))
+    expect(odd).toBe('Something went wrong. Try again.')
+  })
 })
