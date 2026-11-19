@@ -3,6 +3,8 @@ import { join, relative, sep } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { defaultBrandEnv, rewriteDefaultBrand } from './lib/brand-html.ts'
+
 const WEB = join(import.meta.dirname, '..')
 const SRC = join(WEB, 'src')
 
@@ -100,6 +102,24 @@ describe('brand guardrails', () => {
   it('sets data-brand from VITE_BRAND before the module graph loads', () => {
     const html = readFileSync(join(WEB, 'index.html'), 'utf8')
     expect(html).toMatch(/<html[^>]*\sdata-brand="%VITE_BRAND%"/)
+    const viteConfig = readFileSync(join(WEB, 'vite.config.ts'), 'utf8')
+    expect(viteConfig).toMatch(/order:\s*'post'/)
+    expect(viteConfig).toContain('handler: rewriteDefaultBrand')
+  })
+
+  it('leaves an explicit brand and rewrites an unset attribute to signal', () => {
+    expect(rewriteDefaultBrand('data-brand="holo"')).toBe('data-brand="holo"')
+    expect(rewriteDefaultBrand('data-brand="signal"')).toBe('data-brand="signal"')
+    expect(rewriteDefaultBrand('data-brand="%VITE_BRAND%"')).toBe('data-brand="signal"')
+    expect(rewriteDefaultBrand('data-brand=""')).toBe('data-brand="signal"')
+  })
+
+  it('defaults an unset build brand to signal and keeps holo', () => {
+    expect(defaultBrandEnv(undefined)).toBe('signal')
+    expect(defaultBrandEnv('holo')).toBe('holo')
+    expect(defaultBrandEnv('signal')).toBe('signal')
+    expect(defaultBrandEnv('')).toBe('')
+    expect(defaultBrandEnv('other')).toBe('signal')
   })
 
   it('never loads fonts or scripts from a third-party CDN', () => {
