@@ -38,12 +38,14 @@ def test_single_head_with_baseline() -> None:
 
 
 @pytest.mark.services
-def test_upgrade_downgrade_upgrade(database_url: str) -> None:
-    cfg = _config(database_url)
+def test_upgrade_downgrade_upgrade(migrations_database_url: str) -> None:
+    """Runs as the schema owner (not a superuser), like production migrations."""
+    url = migrations_database_url
+    cfg = _config(url)
     command.downgrade(cfg, "base")  # start clean even if a previous run left state
     command.upgrade(cfg, "head")
-    assert _extensions(database_url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto"}
     command.downgrade(cfg, "base")
-    assert _extensions(database_url) == set()
+    assert _extensions(url) == set()
     command.upgrade(cfg, "head")
-    assert _extensions(database_url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto"}

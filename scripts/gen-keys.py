@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate Holdfast secrets.
 
-    python3 scripts/gen-keys.py            # print FERNET_KEY / SESSION_SECRET / POSTGRES_PASSWORD
+    python3 scripts/gen-keys.py            # print FERNET_KEY / SESSION_SECRET / POSTGRES_*PASSWORD
     python3 scripts/gen-keys.py --write    # create .env from .env.example with secrets filled in
     python3 scripts/gen-keys.py --write --force   # replace an existing .env
 
@@ -36,16 +36,25 @@ def generate() -> dict[str, str]:
     return {
         "FERNET_KEY": fernet_key(),
         "SESSION_SECRET": secrets.token_urlsafe(48),
-        # urlsafe alphabet needs no escaping inside DATABASE_URL.
+        # urlsafe alphabet needs no escaping inside the database URLs.
         "POSTGRES_PASSWORD": secrets.token_urlsafe(32),
+        "POSTGRES_OWNER_PASSWORD": secrets.token_urlsafe(32),
+        "POSTGRES_APP_PASSWORD": secrets.token_urlsafe(32),
     }
+
+
+# URL key -> the password variable whose value replaces its CHANGE_ME placeholder.
+URL_PASSWORDS = {
+    "DATABASE_URL": "POSTGRES_APP_PASSWORD",
+    "MIGRATIONS_DATABASE_URL": "POSTGRES_OWNER_PASSWORD",
+}
 
 
 LINE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 
 
 def render(template: str, values: dict[str, str]) -> str:
-    """Fill empty secret keys; sync DATABASE_URL's placeholder password. Keep everything else."""
+    """Fill empty secret keys; sync the URLs' placeholder passwords. Keep everything else."""
     out: list[str] = []
     for line in template.splitlines():
         m = LINE.match(line)
@@ -53,9 +62,9 @@ def render(template: str, values: dict[str, str]) -> str:
             key, value = m["key"], m["value"]
             if key in values and value.strip() == "":
                 line = f"{key}={values[key]}"
-            elif key == "DATABASE_URL" and f":{PLACEHOLDER}@" in value:
-                synced = value.replace(f":{PLACEHOLDER}@", f":{values['POSTGRES_PASSWORD']}@")
-                line = f"{key}={synced}"
+            elif key in URL_PASSWORDS and f":{PLACEHOLDER}@" in value:
+                password = values[URL_PASSWORDS[key]]
+                line = f"{key}={value.replace(f':{PLACEHOLDER}@', f':{password}@')}"
         out.append(line)
     return "\n".join(out) + "\n"
 
@@ -83,8 +92,8 @@ def write_env(example: Path, target: Path, force: bool) -> int:
     print(f"wrote {target.name}")
     if force:
         print(
-            "note: new POSTGRES_PASSWORD/FERNET_KEY. An existing pgdata volume keeps the old db "
-            "password, and data encrypted with the old FERNET_KEY can't be decrypted.",
+            "note: new Postgres passwords and FERNET_KEY. An existing pgdata volume keeps the old "
+            "role passwords, and data encrypted with the old FERNET_KEY can't be decrypted.",
             file=sys.stderr,
         )
     return 0

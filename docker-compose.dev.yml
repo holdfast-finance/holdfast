@@ -40,6 +40,11 @@ services:
     volumes:
       - ./backend:/app
 
+  # New migrations under ./backend/migrations run without an image rebuild.
+  migrate:
+    volumes:
+      - ./backend:/app
+
   web:
     image: node:24-alpine
     build: !reset null

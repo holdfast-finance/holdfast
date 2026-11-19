@@ -5,6 +5,17 @@
 # only (PLAN 12.1, CLAUDE.md rule 12). `!override` replaces the base ports list instead of merging.
 
 services:
+  # `environment` beats any .env value, so a prod stack can't boot with docs enabled.
+  api:
+    environment:
+      APP_ENV: prod
+  worker:
+    environment:
+      APP_ENV: prod
+  migrate:
+    environment:
+      APP_ENV: prod
+
   caddy:
     image: holdfast-caddy:local
     build:

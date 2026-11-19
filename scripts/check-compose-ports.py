@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Fail if the rendered compose config publishes a port it shouldn't (CLAUDE.md rule 12).
 
-    docker compose [-f ...] config --format json | python3 scripts/check-compose-ports.py [--dev]
+    docker compose [-f ...] config --format json | python3 scripts/check-compose-ports.py [--dev|--prod]
 
 Rules: only `caddy` publishes (plus `db`/`redis` on 127.0.0.1 with --dev), and never on 0.0.0.0 / :: /
-an empty host IP (which Docker treats as all interfaces).
+an empty host IP (which Docker treats as all interfaces). With --prod, the backend services must
+also render APP_ENV=prod (so /api/docs is off whatever .env says).
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ import sys
 ALLOWED = {"caddy"}
 DEV_LOOPBACK = {"db", "redis"}  # host-side tests only, loopback only
 WILDCARD = {"", "0.0.0.0", "::", "[::]"}
+PROD_APP_ENV = ("api", "worker")
 
 
 def main() -> int:
     dev = "--dev" in sys.argv[1:]
+    prod = "--prod" in sys.argv[1:]
     config = json.load(sys.stdin)
     problems: list[str] = []
     for name, svc in sorted(config.get("services", {}).items()):
@@ -33,6 +36,14 @@ def main() -> int:
                 continue
             else:
                 problems.append(f"{label} is not allowed to publish")
+    if prod:
+        services = config.get("services", {})
+        for name in PROD_APP_ENV:
+            env = (services.get(name) or {}).get("environment") or {}
+            app_env = env.get("APP_ENV")
+            print(f"{name}: APP_ENV={app_env}")
+            if app_env != "prod":
+                problems.append(f"{name}: APP_ENV must be prod in the prod config, got {app_env!r}")
     for msg in problems:
         print(f"error: {msg}", file=sys.stderr)
     if not problems:

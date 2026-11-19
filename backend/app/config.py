@@ -16,7 +16,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg://holdfast@db:5432/holdfast"
+DEFAULT_DATABASE_URL = "postgresql+psycopg://holdfast_app@db:5432/holdfast"
 DEFAULT_REDIS_URL = "redis://redis:6379/0"
 
 CsvList = Annotated[list[str], NoDecode]
@@ -41,8 +41,15 @@ class Settings(BaseSettings):
     cf_api_token: SecretStr | None = None
     session_secret: SecretStr | None = None
     fernet_key: SecretStr | None = None
+    # Runtime connection: the holdfast_app role (no superuser, no BYPASSRLS, no DDL).
     database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
+    # Alembic only: the holdfast_owner role. Unset falls back to DATABASE_URL.
+    migrations_database_url: SecretStr | None = None
+    # Bootstrap superuser (holdfast_admin). Read by the postgres image only; the app never uses it.
     postgres_password: SecretStr | None = None
+    # Fill the password into DATABASE_URL / MIGRATIONS_DATABASE_URL when the URL carries none.
+    postgres_app_password: SecretStr | None = None
+    postgres_owner_password: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     document_store: Path = Path("/data/documents")
 
@@ -113,12 +120,24 @@ class Settings(BaseSettings):
 
     @property
     def sqlalchemy_url(self) -> URL:
-        """DATABASE_URL as a SQLAlchemy URL, filling the password from POSTGRES_PASSWORD
-        when the URL carries none. Never log the rendered form of this value."""
-        url = make_url(self.database_url.get_secret_value())
-        if url.password is None and self.postgres_password is not None:
-            url = url.set(password=self.postgres_password.get_secret_value())
-        return url
+        """DATABASE_URL (app role) as a SQLAlchemy URL, filling the password from
+        POSTGRES_APP_PASSWORD when the URL carries none. Never log the rendered form."""
+        return _with_password(self.database_url, self.postgres_app_password)
+
+    @property
+    def migrations_sqlalchemy_url(self) -> URL:
+        """MIGRATIONS_DATABASE_URL (owner role), password filled from POSTGRES_OWNER_PASSWORD.
+        Falls back to :attr:`sqlalchemy_url` when MIGRATIONS_DATABASE_URL is unset."""
+        if self.migrations_database_url is None:
+            return self.sqlalchemy_url
+        return _with_password(self.migrations_database_url, self.postgres_owner_password)
+
+
+def _with_password(dsn: SecretStr, password: SecretStr | None) -> URL:
+    url = make_url(dsn.get_secret_value())
+    if url.password is None and password is not None:
+        url = url.set(password=password.get_secret_value())
+    return url
 
 
 @lru_cache(maxsize=1)
