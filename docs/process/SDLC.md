@@ -38,7 +38,7 @@ Until the CI pieces exist (Sprint 1, F7), Keel runs the same list locally (`make
 
 ## 3. Autonomy guardrails
 
-- Agents never touch: production Plaid keys or Items, DNS, Tailscale ACLs, GitHub org/repo settings, money, legal, real personal data. Those go to the owner queue. Branch protection/rulesets are applied once by F7; any later change needs a Bulwark verdict and is listed in the weekly digest.
+- Agents never touch: production Plaid keys or Items, DNS, Tailscale ACLs, GitHub org/repo settings, money, legal, real personal data. Those go to the owner queue. No paid plans (ADR 0013): on GitHub Free with a private repo there are no rulesets, so `main` is guarded by `main-guard` detection plus Keel-only merges, and CI fits 2,000 minutes a month with `make ci-local` as the fallback. `scripts/protect-main.sh` is applied only if the repo goes public; any change to it needs a Bulwark verdict and is listed in the weekly digest.
 - Tide stays off live Plaid (fixtures only) until the production keys are out of the dev `.env`.
 - No force-push, no history rewrite on `main`, no deleting tags. Rollback = revert PR.
 - Security tests can't be deleted or skip-marked without a Bulwark verdict. CI enforces this from Sprint 1 (F7); until then Bulwark checks it by hand in every protected-path review.
