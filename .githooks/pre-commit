@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Holdfast pre-commit: secret scan + block private data. Enabled via `git config core.hooksPath .githooks`.
+set -euo pipefail
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --no-banner --redact -v >/dev/null 2>&1 || { echo "pre-commit: gitleaks found a possible secret. Run: gitleaks git --staged -v" >&2; exit 1; }
+else
+  echo "pre-commit: gitleaks not installed; skipping secret scan (install it!)" >&2
+fi
+bad=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)\.env($|\.)|^data/|^secrets/' | grep -v '\.env\.example$' || true)
+if [ -n "$bad" ]; then echo "pre-commit: refusing to commit private paths:" >&2; echo "$bad" >&2; exit 1; fi

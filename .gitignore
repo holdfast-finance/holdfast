@@ -1,0 +1,54 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.restic
+
+# Private financial data — never commit
+data/
+exports/
+*.ofx
+*.qfx
+TaxPackage_*.zip
+# PDFs are blocked by default; only allow-listed brand/research docs and sanitized fixtures
+*.pdf
+!docs/brand/*.pdf
+!docs/research/*.pdf
+!backend/tests/fixtures/**/*.sanitized.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+web/dist/
+site/dist/
+.astro/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.swp
+
+# Claude Code personal
+.claude/settings.local.json
+CLAUDE.local.md
+.claude/worktrees/
