@@ -153,7 +153,7 @@ def test_mask_columns_reject_full_account_numbers(owner_engine: Engine) -> None:
             .all()
         )
     assert len(defs) == 2
-    assert all("[0-9]{5,}" in d for d in defs)
+    assert all("regexp_replace" in d and "{0,4}" in d for d in defs)
 
 
 def test_core_schema_round_trip(owner_url: str) -> None:

@@ -121,10 +121,8 @@ def test_household_sees_only_itself(app_engine: Engine, two_households: tuple[Se
             ).rowcount
             == 0
         )
-        assert (
-            c.execute(text("DELETE FROM household WHERE id = :id"), {"id": b.household_id}).rowcount
-            == 0
-        )
+        with pytest.raises(DBAPIError, match="permission denied"):
+            c.execute(text("DELETE FROM household WHERE id = :id"), {"id": b.household_id})
 
 
 def test_app_cannot_insert_household_directly(app_engine: Engine) -> None:

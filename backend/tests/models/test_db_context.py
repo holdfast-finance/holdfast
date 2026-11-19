@@ -93,7 +93,7 @@ async def test_household_session_dependency(
 
 
 async def test_atomic_first_run_setup(
-    factory: async_sessionmaker[AsyncSession], app_engine: Any
+    factory: async_sessionmaker[AsyncSession], owner_engine: Any
 ) -> None:
     """create_household -> apply_context -> person + owner user, in one transaction."""
     email = f"owner-{uuid.uuid4().hex[:8]}@example.com"
@@ -112,7 +112,7 @@ async def test_atomic_first_run_setup(
     async with scoped_session(factory, hid, user.person_id) as s:
         assert (await s.execute(select(Person.display_name))).scalar_one() == "Alex Example"
         assert await _count(s, AuditLog) == 1
-    delete_household(app_engine, hid)
+    delete_household(owner_engine, hid)
     async with unscoped_session(factory) as s:
         gone = (await s.execute(select(AppUser).where(AppUser.email == email))).first()
         assert gone is None  # person deleted -> user cascades

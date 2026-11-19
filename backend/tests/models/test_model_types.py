@@ -3,53 +3,96 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pytest
-from sqlalchemy import Float, Numeric
+from sqlalchemy import CheckConstraint, Float, Numeric
 
 import app.models  # noqa: F401  (registers every table)
 from app.db import Base
+from app.models._common import is_valid_mask
 from tests.models.conftest import CONTRACT_TABLES
 
 SECRETISH = re.compile(r"(^|_)(token|secret|password)(_|$)")
 
-MONEY_COLUMNS = {
-    ("transaction", "amount"),
-    ("transaction_split", "amount"),
-    ("balance_snapshot", "current"),
-    ("balance_snapshot", "available"),
-    ("balance_snapshot", "limit_amt"),
-    ("holding", "cost_basis"),
-    ("holding", "value"),
-    ("investment_txn", "amount"),
-    ("investment_txn", "fees"),
-    ("liability", "min_payment"),
-    ("liability", "statement_balance"),
-    ("liability", "original_principal"),
-    ("budget_line", "amount"),
-    ("tradeline", "credit_limit"),
-    ("tradeline", "balance"),
-    ("tradeline", "high_balance"),
-    ("tax_item", "amount"),
-    ("estimate_snapshot", "federal_liability"),
-    ("estimate_snapshot", "state_liability"),
-    ("estimate_snapshot", "withheld"),
-    ("estimate_snapshot", "projected_due"),
-    ("agent_finding", "est_savings"),
+# Every Numeric column in the schema, by kind. A new Numeric column fails until it's listed
+# here with the right kind, so nobody adds an unreviewed NUMERIC (or one with the wrong scale).
+NUMERIC_KINDS: dict[str, tuple[int, int]] = {
+    "money": (14, 2),
+    "quantity": (28, 10),
+    "price": (18, 8),
+    "ratio": (5, 4),
+    "rate": (7, 4),
 }
+NUMERIC_COLUMNS: dict[tuple[str, str], str] = {
+    ("transaction", "amount"): "money",
+    ("transaction_split", "amount"): "money",
+    ("balance_snapshot", "current"): "money",
+    ("balance_snapshot", "available"): "money",
+    ("balance_snapshot", "limit_amt"): "money",
+    ("holding", "quantity"): "quantity",
+    ("holding", "cost_basis"): "money",
+    ("holding", "value"): "money",
+    ("investment_txn", "quantity"): "quantity",
+    ("investment_txn", "price"): "price",
+    ("investment_txn", "amount"): "money",
+    ("investment_txn", "fees"): "money",
+    ("liability", "apr"): "rate",
+    ("liability", "min_payment"): "money",
+    ("liability", "statement_balance"): "money",
+    ("liability", "original_principal"): "money",
+    ("budget_line", "amount"): "money",
+    ("budget_line", "alert_pct"): "ratio",
+    ("tradeline", "credit_limit"): "money",
+    ("tradeline", "balance"): "money",
+    ("tradeline", "high_balance"): "money",
+    ("parsed_field", "confidence"): "ratio",
+    ("tax_item", "amount"): "money",
+    ("tax_item", "confidence"): "ratio",
+    ("estimate_snapshot", "federal_liability"): "money",
+    ("estimate_snapshot", "state_liability"): "money",
+    ("estimate_snapshot", "withheld"): "money",
+    ("estimate_snapshot", "projected_due"): "money",
+    ("agent_finding", "est_savings"): "money",
+}
+
+
+def _numeric_columns() -> dict[tuple[str, str], Numeric[Any]]:
+    return {
+        (t.name, c.name): c.type
+        for t in Base.metadata.tables.values()
+        for c in t.c
+        if isinstance(c.type, Numeric)
+    }
 
 
 def test_metadata_matches_contract_table_list() -> None:
     assert set(Base.metadata.tables) == set(CONTRACT_TABLES)
 
 
-@pytest.mark.parametrize(("tbl", "col"), sorted(MONEY_COLUMNS))
-def test_money_is_numeric_14_2(tbl: str, col: str) -> None:
-    column_type = Base.metadata.tables[tbl].c[col].type
-    assert isinstance(column_type, Numeric)
+def test_every_numeric_column_is_classified() -> None:
+    found = _numeric_columns()
+    assert set(found) - set(NUMERIC_COLUMNS) == set(), "unclassified Numeric column(s)"
+    assert set(NUMERIC_COLUMNS) - set(found) == set(), "allow-map lists a missing column"
+
+
+@pytest.mark.parametrize(("key", "kind"), sorted(NUMERIC_COLUMNS.items()))
+def test_numeric_precision_matches_kind(key: tuple[str, str], kind: str) -> None:
+    column_type = _numeric_columns()[key]
     assert not isinstance(column_type, Float)
-    assert (column_type.precision, column_type.scale) == (14, 2)
     assert column_type.asdecimal is True
+    assert (column_type.precision, column_type.scale) == NUMERIC_KINDS[kind], key
+
+
+@pytest.mark.parametrize("key", sorted(k for k, kind in NUMERIC_COLUMNS.items() if kind == "ratio"))
+def test_every_ratio_has_a_range_check(key: tuple[str, str]) -> None:
+    tbl, col = key
+    checks = {
+        str(c.sqltext)
+        for c in Base.metadata.tables[tbl].constraints
+        if isinstance(c, CheckConstraint)
+    }
+    assert f"{col} IS NULL OR {col} BETWEEN 0 AND 1" in checks
 
 
 def test_no_float_columns_anywhere() -> None:
@@ -58,15 +101,20 @@ def test_no_float_columns_anywhere() -> None:
             assert not isinstance(c.type, Float), f"{t.name}.{c.name}"
 
 
-def test_quantities_and_prices_use_their_precision() -> None:
-    tables = Base.metadata.tables
-    for tbl, col in (("holding", "quantity"), ("investment_txn", "quantity")):
-        typ = tables[tbl].c[col].type
-        assert isinstance(typ, Numeric)
-        assert (typ.precision, typ.scale) == (28, 10)
-    price = tables["investment_txn"].c["price"].type
-    assert isinstance(price, Numeric)
-    assert (price.precision, price.scale) == (18, 8)
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [
+        (None, True),
+        ("0000", True),
+        ("XXXX-0000", True),
+        ("", True),
+        ("00000", False),
+        ("4000-0000-0000-0002", False),
+        ("0 0 0 0 0", False),
+    ],
+)
+def test_is_valid_mask(value: str | None, ok: bool) -> None:
+    assert is_valid_mask(value) is ok
 
 
 def test_secrets_are_only_stored_encrypted_or_hashed() -> None:
