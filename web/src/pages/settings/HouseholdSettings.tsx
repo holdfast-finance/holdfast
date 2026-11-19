@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button'
 import { Input, NativeSelect } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ReauthCancelledError } from '@/stores/reauth'
-import { FILING_ROLE_LABELS } from '@/pages/settings/labels'
+import { ASSIGNABLE_FILING_ROLES, FILING_ROLE_LABELS } from '@/pages/settings/labels'
 import { SettingsSection } from '@/pages/settings/SettingsLayout'
 
 const personSchema = z.object({
@@ -65,21 +65,31 @@ function PersonFormFields({
       <Field label="Name" error={errors.display_name?.message}>
         {(p) => <Input {...p} {...form.register('display_name')} autoComplete="off" />}
       </Field>
-      <Field
-        label="Filing role"
-        error={errors.filing_role?.message}
-        hint="Used later by the optional tax module."
-      >
-        {(p) => (
-          <NativeSelect {...p} {...form.register('filing_role')}>
-            {Object.entries(FILING_ROLE_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </NativeSelect>
-        )}
-      </Field>
+      {initial.filing_role === 'primary' ? (
+        // The owner's role comes from setup and isn't reassignable here.
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium">Filing role</p>
+          <p className="text-sm text-muted-foreground">
+            {FILING_ROLE_LABELS.primary} (set up this household)
+          </p>
+        </div>
+      ) : (
+        <Field
+          label="Filing role"
+          error={errors.filing_role?.message}
+          hint="Used later by the optional tax module."
+        >
+          {(p) => (
+            <NativeSelect {...p} {...form.register('filing_role')}>
+              {ASSIGNABLE_FILING_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {FILING_ROLE_LABELS[r]}
+                </option>
+              ))}
+            </NativeSelect>
+          )}
+        </Field>
+      )}
       <Button type="submit" size="lg" disabled={pending}>
         {submitLabel}
       </Button>
@@ -105,7 +115,7 @@ function InviteFlow({ person, onClose }: { person: Person; onClose: () => void }
           readOnly
           value={url}
           aria-label="Invite link"
-          className="font-mono text-xs md:text-xs"
+          className="font-mono text-base md:text-xs"
           onFocus={(e) => {
             e.currentTarget.select()
           }}
@@ -237,8 +247,8 @@ export function HouseholdSettings() {
         title="People"
         description={
           isOwner
-            ? 'Everyone in the household. Invite someone to give them their own sign-in.'
-            : 'Everyone in the household. Only the owner can change this list.'
+            ? 'People who share these books.'
+            : 'People who share these books. Only the owner can change this list.'
         }
         action={
           isOwner && (
@@ -301,34 +311,44 @@ export function HouseholdSettings() {
                           <Send aria-hidden="true" />
                           Invite
                         </Button>
-                        {confirmingRemove === person.id ? (
-                          <Button
-                            variant="destructive"
-                            aria-label={`Confirm removing ${person.display_name}`}
-                            disabled={remove.isPending}
-                            onClick={() => {
-                              remove.mutate(person.id, {
-                                onSettled: () => {
-                                  setConfirmingRemove(null)
-                                },
-                              })
-                            }}
-                          >
-                            <Trash2 aria-hidden="true" />
-                            Yes, remove
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="destructive"
-                            aria-label={`Remove ${person.display_name}`}
-                            onClick={() => {
+                        {/*
+                         * One button that arms, then confirms. It keeps focus across the change;
+                         * Escape or moving focus away disarms it.
+                         */}
+                        <Button
+                          variant="destructive"
+                          aria-label={
+                            confirmingRemove === person.id
+                              ? `Confirm removing ${person.display_name}`
+                              : `Remove ${person.display_name}`
+                          }
+                          disabled={remove.isPending}
+                          onClick={() => {
+                            if (confirmingRemove !== person.id) {
                               setConfirmingRemove(person.id)
-                            }}
-                          >
-                            <Trash2 aria-hidden="true" />
-                            Remove
-                          </Button>
-                        )}
+                              return
+                            }
+                            remove.mutate(person.id, {
+                              onSettled: () => {
+                                setConfirmingRemove(null)
+                              },
+                            })
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape' && confirmingRemove === person.id) {
+                              e.preventDefault()
+                              setConfirmingRemove(null)
+                            }
+                          }}
+                          onBlur={() => {
+                            if (confirmingRemove === person.id && !remove.isPending) {
+                              setConfirmingRemove(null)
+                            }
+                          }}
+                        >
+                          <Trash2 aria-hidden="true" />
+                          {confirmingRemove === person.id ? 'Yes, remove' : 'Remove'}
+                        </Button>
                       </>
                     )}
                   </div>

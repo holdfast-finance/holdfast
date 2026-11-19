@@ -60,11 +60,14 @@ export function ReauthDialog() {
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side={isDesktop ? 'right' : 'bottom'} className="gap-6 p-5 pb-8">
+      <SheetContent
+        side={isDesktop ? 'right' : 'bottom'}
+        className="max-h-[90dvh] gap-6 overflow-y-auto p-5 pb-8"
+      >
         <SheetHeader className="p-0">
           <SheetTitle>Confirm it&apos;s you</SheetTitle>
           <SheetDescription>
-            This changes who can get in. One quick check and we&apos;ll carry on.
+            Sensitive action. One check, then you&apos;re back to it.
           </SheetDescription>
         </SheetHeader>
         {!useCode ? (
@@ -112,6 +115,8 @@ export function ReauthDialog() {
                   {...form.register('code')}
                   inputMode="numeric"
                   autoComplete="one-time-code"
+                  // The field replaces the button the user just pressed; put focus in it.
+                  autoFocus
                   className="font-mono tabular-nums"
                 />
               )}

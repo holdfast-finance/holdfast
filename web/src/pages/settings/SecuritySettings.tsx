@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Download, KeyRound, ShieldCheck, Trash2 } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
@@ -25,7 +25,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ReauthCancelledError } from '@/stores/reauth'
-import { formatDate } from '@/pages/settings/labels'
+import { auditLabel, formatDate, formatDateTime } from '@/pages/settings/labels'
 import { SettingsSection } from '@/pages/settings/SettingsLayout'
 
 /** Hide the "you cancelled the step-up" non-error. */
@@ -48,7 +48,7 @@ function PasskeysSection({ totpEnabled }: { totpEnabled: boolean }) {
     <SettingsSection
       id="passkeys"
       title="Passkeys"
-      description="Your primary key. Phishing-proof, stored on your devices, never on this server."
+      description="Your primary key. Stored on your devices, never on this server."
       action={
         <Button
           onClick={() => {
@@ -98,8 +98,7 @@ function PasskeysSection({ totpEnabled }: { totpEnabled: boolean }) {
       )}
       {onlyWayIn && (
         <p id="last-passkey-note" className="text-xs text-muted-foreground">
-          This is your only way in. Add another passkey or turn on authenticator codes before
-          removing it.
+          Only one way in. Add a second passkey or turn on codes first.
         </p>
       )}
 
@@ -174,13 +173,22 @@ function downloadCodes(codes: string[]): void {
   a.href = url
   a.download = 'holdfast-recovery-codes.txt'
   a.click()
-  URL.revokeObjectURL(url)
+  // Revoking synchronously can cancel the download in some browsers; let the click land first.
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url)
+  }, 0)
 }
 
 function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const [stored, setStored] = useState(false)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  // These replace the form the user just submitted: move focus to the new content.
+  useEffect(() => {
+    titleRef.current?.focus()
+  }, [])
   return (
-    <div className="flex flex-col gap-4" aria-labelledby="recovery-title">
-      <h3 id="recovery-title" className="text-base">
+    <div className="flex flex-col gap-4" role="group" aria-labelledby="recovery-title">
+      <h3 id="recovery-title" ref={titleRef} tabIndex={-1} className="text-base outline-none">
         Save your recovery codes
       </h3>
       <p className="text-sm text-muted-foreground">
@@ -206,10 +214,21 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
           <Download aria-hidden="true" />
           Download .txt
         </Button>
-        <Button onClick={onDone} className="sm:ml-auto">
-          I saved them
-        </Button>
       </div>
+      <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+        <input
+          type="checkbox"
+          className="size-5 shrink-0 accent-primary"
+          checked={stored}
+          onChange={(e) => {
+            setStored(e.target.checked)
+          }}
+        />
+        I&apos;ve stored these somewhere safe
+      </label>
+      <Button size="lg" disabled={!stored} onClick={onDone}>
+        Done
+      </Button>
     </div>
   )
 }
@@ -220,6 +239,17 @@ function TotpSection({ totpEnabled, hasPasskey }: { totpEnabled: boolean; hasPas
   const disable = useTotpDisable()
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
   const form = useForm<CodeForm>({ resolver: zodResolver(codeSchema), defaultValues: { code: '' } })
+
+  // When the body swaps (set up → QR, codes → done), the control the user pressed is gone.
+  // Send focus to the section heading so it doesn't fall to <body>. Recovery codes focus their
+  // own title (RecoveryCodes).
+  const stage = recoveryCodes ? 'codes' : totpEnabled ? 'on' : setup.data ? 'scan' : 'off'
+  const lastStage = useRef(stage)
+  useEffect(() => {
+    if (lastStage.current === stage) return
+    lastStage.current = stage
+    if (stage !== 'codes') document.getElementById('totp')?.focus()
+  }, [stage])
 
   let body: ReactNode
   if (recoveryCodes) {
@@ -324,7 +354,7 @@ function TotpSection({ totpEnabled, hasPasskey }: { totpEnabled: boolean; hasPas
     <SettingsSection
       id="totp"
       title="Authenticator codes"
-      description="Backup sign-in: password plus a 6-digit code. The QR code is drawn on this device; the secret never leaves your server."
+      description="Backup sign-in: password plus a 6-digit code. The QR code is drawn in your browser. No third-party service ever sees the secret."
     >
       {body}
     </SettingsSection>
@@ -360,8 +390,8 @@ function PasswordSection({
       title="Password"
       description={
         totpEnabled
-          ? 'Used only with an authenticator code. Never on its own.'
-          : 'Used only with an authenticator code, so turn those on too.'
+          ? 'Works only alongside an authenticator code.'
+          : 'Works only alongside an authenticator code, so turn those on too.'
       }
     >
       <form
@@ -429,7 +459,7 @@ function ActivitySection() {
         <ul className="flex flex-col gap-2 text-sm">
           {audit.data.items.map((entry) => (
             <li key={entry.id} className="flex flex-wrap justify-between gap-x-3">
-              <span className="font-mono text-xs">{entry.action}</span>
+              <span title={entry.action}>{auditLabel(entry.action)}</span>
               <span
                 className={
                   entry.outcome === 'failure'
@@ -438,7 +468,8 @@ function ActivitySection() {
                 }
               >
                 {entry.outcome === 'failure' ? 'Failed · ' : ''}
-                {entry.actor_display_name ?? 'Unknown'} · {formatDate(entry.created_at)}
+                {entry.actor_display_name ?? 'Unknown'} ·{' '}
+                <time dateTime={entry.created_at}>{formatDateTime(entry.created_at)}</time>
               </span>
             </li>
           ))}
@@ -461,9 +492,9 @@ export function SecuritySettings() {
       <SettingsSection
         id="sessions"
         title="Active sessions"
-        description="See and revoke signed-in devices. Coming in Phase 9. Sessions expire after 12 hours."
+        description="Session list is on the way. Sessions expire after 12 hours."
       >
-        <p className="text-xs text-muted-foreground">Coming in Phase 9</p>
+        {null}
       </SettingsSection>
       {me.user.role === 'owner' && <ActivitySection />}
     </div>
