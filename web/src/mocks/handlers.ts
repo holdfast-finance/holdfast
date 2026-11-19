@@ -211,11 +211,19 @@ export const handlers = [
     path('/setup'),
     publicRoute(async ({ request }) => {
       const body = await readJson(request)
-      if (db.household)
+      const existingOwner = db.users.find((u) => u.role === 'owner')
+      if (db.household && existingOwner && existingOwner.credentials.length > 0)
         return apiError(ERROR_CODES.setupComplete, 'This instance is already set up.')
       if (str(body, 'setup_token') !== MOCK_SETUP_TOKEN) {
         audit('setup.attempt', 'failure')
         return apiError(ERROR_CODES.invalidSetupToken, 'That setup token is wrong or expired.')
+      }
+      // Resume: setup was claimed but the owner never registered a credential. The token holder
+      // gets a fresh session for the existing owner (no second household), as the real API does.
+      if (db.household && existingOwner) {
+        startSession(existingOwner)
+        audit('setup.resume')
+        return HttpResponse.json(sessionJson(existingOwner), { status: 200 })
       }
       const householdName = str(body, 'household_name')
       const displayName = str(body, 'display_name')

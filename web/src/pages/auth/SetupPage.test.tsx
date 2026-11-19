@@ -71,6 +71,25 @@ describe('first-run setup wizard', () => {
     expect(db.users[0]?.credentials.map((c) => c.nickname)).toEqual(['Laptop'])
   })
 
+  it('resumes an abandoned setup with the token instead of creating a second household', async () => {
+    // First visit: household claimed, then the browser closed before the passkey step.
+    const first = renderApp('/setup')
+    await enterToken(MOCK_SETUP_TOKEN)
+    await enterAbout()
+    expect(await screen.findByRole('heading', { name: 'Create your passkey' })).toBeVisible()
+    first.unmount()
+    db.session = null
+
+    // Second visit, signed out: setup is still pending, and the token gets the owner back in.
+    renderApp('/')
+    expect(await screen.findByText('Step 1 of 4')).toBeVisible()
+    await enterToken(MOCK_SETUP_TOKEN)
+    await enterAbout()
+    expect(await screen.findByRole('heading', { name: 'Create your passkey' })).toBeVisible()
+    expect(db.users.filter((u) => u.role === 'owner')).toHaveLength(1)
+    expect(db.people).toHaveLength(1)
+  })
+
   it('sends a wrong setup token back to step 1 with the server message', async () => {
     renderApp('/setup')
     await enterToken('not-the-token')
