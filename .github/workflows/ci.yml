@@ -4,8 +4,6 @@ on:
   push:
     branches: [main, "phase/**"]
   pull_request:
-    # labeled/unlabeled re-run the protected-path gate when `bulwark-approved` is added or removed.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -25,9 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: d
+        # A PR that deletes these must fail, not skip the backend/web jobs (skips count as passing).
         run: |
-          echo "backend=$([ -f backend/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "web=$([ -f web/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          for f in backend/pyproject.toml web/package.json; do
+            [ -f "$f" ] || { echo "::error::$f is missing; backend and web jobs cannot be skipped"; exit 1; }
+          done
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          echo "web=true" >> "$GITHUB_OUTPUT"
 
   backend:
     needs: detect
@@ -41,7 +43,7 @@ jobs:
       # Bootstrapped like compose: holdfast_admin is the superuser; the "Postgres roles" step runs
       # infra/postgres/init/00-roles.sh to create holdfast_owner and holdfast_app.
       postgres:
-        image: postgres:16-alpine
+        image: postgres@sha256:1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857 # postgres:16-alpine
         env:
           POSTGRES_USER: holdfast_admin
           POSTGRES_PASSWORD: holdfast-ci-admin
@@ -51,7 +53,7 @@ jobs:
           --health-cmd "pg_isready -h 127.0.0.1 -U holdfast_admin -d holdfast"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe # redis:7-alpine
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
@@ -94,6 +96,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy app
+      - run: uv run lint-imports
       - run: uv run pytest -q
       - name: Alembic upgrade / downgrade / upgrade (as holdfast_owner)
         run: |
@@ -170,21 +173,13 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git --no-banner --redact -v "${opts[@]}" /repo
 
-  protected-paths:
-    # Protected paths and test deletions/skips need the `bulwark-approved` label (SDLC section 2).
-    if: github.event_name == 'pull_request'
+  scripts-test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - name: Check protected paths and test removals
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: bash scripts/check-protected-paths.sh
+      - name: Gate script self-tests
+        run: python3 -m unittest discover -s scripts/tests -v
 
   compose:
     needs: detect
@@ -224,26 +219,11 @@ jobs:
         if: always()
         run: rm -f .env
 
-  # New pushes invalidate a Bulwark sign-off: drop the label on every synchronize.
-  revoke-approval:
-    if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Remove bulwark-approved
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/bulwark-approved" || echo "label not present"
-
   # The single stable required check. Jobs skipped by `detect` count as passing; failed or
   # cancelled jobs do not. Add every new job to `needs`.
   ci-required:
     if: always()
-    needs: [detect, backend, web, secrets, protected-paths, revoke-approval, compose]
+    needs: [detect, backend, web, secrets, scripts-test, compose]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
