@@ -6,7 +6,7 @@ name: review-gate
 # This workflow only takes effect once it exists on main (it is new in F7), so it first runs after merge.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -52,10 +52,14 @@ jobs:
           persist-credentials: false
       - name: Fetch PR head as data (no checkout)
         env:
+          GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags origin "refs/pull/$PR/head"
+          # persist-credentials is off, so authenticate this one fetch explicitly (private repo).
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags origin "refs/pull/$PR/head"
           [ "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] || { echo "::error::PR head moved; this run is stale"; exit 1; }
       - name: Check protected paths and test removals (base-branch script)
         env:
