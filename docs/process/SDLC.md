@@ -33,13 +33,14 @@ Backlog (ROADMAP.md) ─► Sprint plan (Keel, per usage window)
 
 **Protected paths** need a separate Bulwark verdict even for one-line changes: `.github/`, `.claude/`, `CLAUDE.md`, `.githooks/`, `backend/app/security/`, RLS migrations, `agent/guardrails.py`, `docker-compose*.yml`, `infra/caddy/`.
 
-Until the CI pieces exist (Sprint 1), Keel runs the same list locally (`make test && make lint && make ports`) and dispatches the reviewer runs by hand.
+Until the CI pieces exist (Sprint 1, F7), Keel runs the same list locally (`make test && make lint && make ports`, `gitleaks git` over the PR range, `uv run pip-audit` and `pnpm audit --audit-level high`) and dispatches the reviewer runs by hand. Protected-path sign-off comes from a **separate** Bulwark run that names the head SHA; F7 adds CODEOWNERS for protected paths and a required check for that sign-off.
 
 ## 3. Autonomy guardrails
 
-- Agents never touch: production Plaid keys or Items, DNS, Tailscale ACLs, GitHub org/repo settings beyond branch protection, money, legal, real personal data. Those go to the owner queue.
+- Agents never touch: production Plaid keys or Items, DNS, Tailscale ACLs, GitHub org/repo settings, money, legal, real personal data. Those go to the owner queue. Branch protection/rulesets are applied once by F7; any later change needs a Bulwark verdict and is listed in the weekly digest.
+- Tide stays off live Plaid (fixtures only) until the production keys are out of the dev `.env`.
 - No force-push, no history rewrite on `main`, no deleting tags. Rollback = revert PR.
-- Security tests can't be deleted or skip-marked without a Bulwark verdict (CI check).
+- Security tests can't be deleted or skip-marked without a Bulwark verdict. CI enforces this from Sprint 1 (F7); until then Bulwark checks it by hand in every protected-path review.
 - Deploys go only to targets that already exist (GitHub Pages site; the owner's host once provisioned). The Cloud preview stays with the owner's engineer.
 - Weekly digest to the owner (Beacon writes `docs/digest/<date>.md`): shipped, risks, owner-queue changes, tokens used.
 

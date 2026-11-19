@@ -1,7 +1,7 @@
 ---
 name: beacon
 description: Beacon — Holdfast docs and sites. Use for docs/, README, release notes, the docs site, holdfastfinance.app and the Cloud preview page.
-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
+tools: Read, Grep, Glob, Bash, Write, Edit
 model: sonnet
 effort: low
 ---
