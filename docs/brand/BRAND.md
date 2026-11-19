@@ -16,7 +16,7 @@ stem and three roots: everything you own, anchored to hardware you control.
 - Glow (dark UI, favicon): the mark in Signal on Hull, with a soft Signal glow.
 - Wordmark: "holdfast", lowercase, Space Grotesk 600.
 
-SVG sources go in `brand/` (created in Phase 0). The PWA icons are generated from them.
+Sources: `brand/logomark.svg`, `brand/app-icon.svg`, `brand/favicon.svg`. Raster exports in `brand/png/`: `org-avatar-500.png` (full-bleed, for the GitHub org avatar), `social-preview-1280x640.png` (repo social preview and site `og:image`), `apple-touch-icon.png`, `favicon-32.png`. The PWA icons (Phase 8.5) are generated from the same SVGs.
 
 ## Color tokens
 

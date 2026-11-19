@@ -1,3 +1,5 @@
+<p align="center"><img src="brand/app-icon.svg" width="96" height="96" alt="holdfast logo"></p>
+
 # holdfast
 
 **Every account. One root. Your server.**
