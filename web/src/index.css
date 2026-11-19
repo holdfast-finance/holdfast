@@ -4,7 +4,8 @@
 
 /*
  * Holdfast brand tokens (docs/brand/BRAND.md, Direction 01).
- * This file is the ONLY place raw color values may appear in web/src.
+ * Raw color values may appear only here and in src/lib/tokens.ts (the source of truth this
+ * file mirrors; src/tokens.node.test.ts checks parity and WCAG contrast).
  *
  * Theme resolution: dark is the hero theme. `color-scheme` picks the branch of every
  * `light-dark()` below. Without JS the system preference wins; with JS the theme store sets
@@ -24,6 +25,18 @@
   --flare: light-dark(#d99a3c, #ffb547);
   --breach: light-dark(#d94f68, #ff5d7a);
 
+  /*
+   * Text in a brand hue. The fills above are for dots, bars, strokes and button backgrounds;
+   * text uses these, tuned to >= 4.5:1 on ground, surface and the 12-15% chip tints.
+   */
+  --signal-text: light-dark(#09745d, #3df5c8);
+  --flare-text: light-dark(#8b5e1b, #ffb547);
+  --breach-text: light-dark(#bf2945, #ff5d7a);
+  --deepwater-text: light-dark(#5b41e0, #8b74ff);
+
+  /* Focus ring: >= 3:1 non-text contrast on ground and surface. Signal in dark. */
+  --focus-ring: light-dark(#0b8a6f, #3df5c8);
+
   /* Fixed brand values (identical in both themes) */
   --abyss-ink: #07080c;
   --hull-ink: #0e1118;
@@ -34,6 +47,12 @@
   --text: light-dark(#0e1118, #e8ecf4);
   --text-muted: light-dark(#566074, #8a93a6);
   --glass: color-mix(in srgb, var(--hull) 70%, transparent);
+  /* Loading skeletons: visible fill + edge in light, quiet raised fill in dark. */
+  --skeleton: light-dark(
+    color-mix(in srgb, #ffffff, #0e1118 8%),
+    color-mix(in srgb, #0e1118, #ffffff 5%)
+  );
+  --skeleton-edge: light-dark(rgb(14 17 24 / 12%), transparent);
 
   /* shadcn semantic mapping */
   --background: var(--abyss);
@@ -53,7 +72,7 @@
   --destructive: var(--breach);
   --border: var(--hairline);
   --input: var(--hairline);
-  --ring: var(--signal);
+  --ring: var(--focus-ring);
   --chart-1: var(--signal);
   --chart-2: var(--deepwater);
   --chart-3: var(--flare);
@@ -66,7 +85,7 @@
   --sidebar-accent: color-mix(in srgb, var(--signal) 10%, var(--hull));
   --sidebar-accent-foreground: var(--text);
   --sidebar-border: var(--hairline);
-  --sidebar-ring: var(--signal);
+  --sidebar-ring: var(--focus-ring);
 
   /* Radius: 10px buttons (rounded-lg), 12px cards (rounded-card), full chips */
   --radius: 0.625rem;
@@ -100,6 +119,13 @@
   --color-hull-raised: var(--hull-raised);
   --color-flare: var(--flare);
   --color-breach: var(--breach);
+  --color-signal-text: var(--signal-text);
+  --color-flare-text: var(--flare-text);
+  --color-breach-text: var(--breach-text);
+  --color-deepwater-text: var(--deepwater-text);
+  --color-focus-ring: var(--focus-ring);
+  --color-skeleton: var(--skeleton);
+  --color-skeleton-edge: var(--skeleton-edge);
   --color-hairline: var(--hairline);
   --color-text: var(--text);
   --color-text-muted: var(--text-muted);
@@ -169,9 +195,18 @@
     @apply font-heading font-semibold tracking-[-0.02em];
   }
 
-  /* Visible focus ring in Signal for every keyboard-focusable element. */
+  /*
+   * Radix Dialog/Sheet locks scroll by setting data-scroll-locked on <body> and injecting a
+   * <style> with the overflow rule. The prod CSP blocks inline styles, so ship the rule here.
+   */
+  body[data-scroll-locked] {
+    overflow: hidden !important;
+    overscroll-behavior: contain;
+  }
+
+  /* Visible focus ring (Signal in dark, a deeper Signal in light) on every focusable element. */
   :focus-visible {
-    outline: 2px solid var(--signal);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
   }
 }

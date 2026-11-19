@@ -22,7 +22,13 @@ describe('brand guardrails', () => {
 
   it('keeps raw hex colors out of components (tokens only)', () => {
     const offenders = walk(SRC)
-      .filter((f) => /\.(tsx?|css)$/.test(f) && !f.endsWith('index.css') && !f.includes('.test.'))
+      .filter(
+        (f) =>
+          /\.(tsx?|css)$/.test(f) &&
+          !f.endsWith('index.css') &&
+          !f.endsWith('lib/tokens.ts') &&
+          !f.includes('.test.'),
+      )
       .filter((f) => /#[0-9a-fA-F]{3,8}\b/.test(readFileSync(f, 'utf8')))
       .map((f) => relative(WEB, f))
     expect(offenders).toEqual([])

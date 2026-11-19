@@ -24,7 +24,7 @@ function SidebarLink({ id }: { id: PageId }) {
       >
         {({ isActive }) => (
           <>
-            <Icon aria-hidden="true" className={cn('size-4', isActive && 'text-signal')} />
+            <Icon aria-hidden="true" className={cn('size-4', isActive && 'text-signal-text')} />
             {page.label}
           </>
         )}

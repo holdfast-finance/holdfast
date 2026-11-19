@@ -26,7 +26,7 @@ function Tab({ id }: { id: PageId }) {
       <NavLink
         to={page.path}
         end={page.path === '/'}
-        className={({ isActive }) => cn(tabClass, isActive && 'text-signal')}
+        className={({ isActive }) => cn(tabClass, isActive && 'text-signal-text')}
       >
         <Icon aria-hidden="true" className="size-5" />
         {page.shortLabel ?? page.label}
@@ -44,7 +44,7 @@ function MoreSheet() {
     <Sheet open={open} onOpenChange={setOpen}>
       <li className="flex flex-1">
         <SheetTrigger asChild>
-          <button type="button" className={cn(tabClass, moreActive && 'text-signal')}>
+          <button type="button" className={cn(tabClass, moreActive && 'text-signal-text')}>
             <Ellipsis aria-hidden="true" className="size-5" />
             More
           </button>
@@ -70,7 +70,7 @@ function MoreSheet() {
                     className={({ isActive }) =>
                       cn(
                         'flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium text-text hover:bg-hull-raised',
-                        isActive && 'bg-sidebar-accent text-signal',
+                        isActive && 'bg-sidebar-accent text-signal-text',
                       )
                     }
                   >

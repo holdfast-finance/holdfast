@@ -43,7 +43,7 @@ const DEMO_BUDGETS: DemoBudget[] = [
 const BAR_TONE = { signal: 'bg-signal', flare: 'bg-flare', deepwater: 'bg-deepwater' } as const
 const TEXT_TONE = {
   signal: 'text-text-muted',
-  flare: 'text-flare',
+  flare: 'text-flare-text',
   deepwater: 'text-text-muted',
 } as const
 
@@ -110,7 +110,7 @@ export function OverviewPage() {
         </ul>
       </header>
 
-      <p className="money text-xs text-deepwater">
+      <p className="text-xs text-deepwater-text">
         Coming in Phase 5. This page shows the layout with demo data only.
       </p>
 
