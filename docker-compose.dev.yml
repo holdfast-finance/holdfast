@@ -1,8 +1,9 @@
 # Dev override: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 # (or `make up` / `./scripts/dev.ps1 up`). Hot reload for api and web; Caddy proxies to Vite.
 #
-# The anonymous volumes keep the image's /app/.venv and the container's node_modules from being
-# hidden by the bind mounts. `make up` passes --renew-anon-volumes so they refresh on each up.
+# The backend image keeps its venv at /opt/venv, so ./backend can mount straight over /app.
+# The anonymous node_modules volume keeps the container's deps from being hidden by ./web;
+# `make up` passes --renew-anon-volumes so it refreshes on each up.
 
 services:
   db:
@@ -25,13 +26,11 @@ services:
     read_only: false
     volumes:
       - ./backend:/app
-      - /app/.venv
 
   worker:
     read_only: false
     volumes:
       - ./backend:/app
-      - /app/.venv
 
   web:
     image: node:24-alpine

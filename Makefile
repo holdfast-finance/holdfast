@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help up up-prod down logs ps test lint fmt migrate seed keys check health ports env-check
+.PHONY: help docs-dir up up-prod down logs ps test lint fmt migrate seed keys check health ports env-check
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -15,12 +15,20 @@ help: ## Show this help
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
 
-up: env-check ## Start the dev stack (hot reload) behind https://localhost
+# The backend image runs as uid 10001; hand it ./data/documents using that same image (as root,
+# no extra image pulled). Host-side reads of stored documents then need sudo, by design.
+BACKEND_UID := 10001
+docs-dir:
 	@mkdir -p data/documents
+	$(COMPOSE) run --rm --no-deps --user 0 --entrypoint chown api -R $(BACKEND_UID):$(BACKEND_UID) /data/documents
+
+up: env-check docs-dir ## Start the dev stack (hot reload) behind https://localhost
 	$(COMPOSE) up -d --build --renew-anon-volumes
 
 up-prod: env-check ## Start the prod stack (DNS-01 cert, binds TAILSCALE_BIND_IP)
 	@mkdir -p data/documents
+	$(COMPOSE_PROD) build api
+	$(COMPOSE_PROD) run --rm --no-deps --user 0 --entrypoint chown api -R $(BACKEND_UID):$(BACKEND_UID) /data/documents
 	$(COMPOSE_PROD) up -d --build
 
 down: ## Stop the stack (keeps volumes)

@@ -24,6 +24,7 @@ Set-Location $Root
 
 $Compose = @('compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml')
 $ComposeProd = @('compose', '-f', 'docker-compose.yml', '-f', 'infra/docker-compose.prod.yml')
+$BackendUid = '10001'  # backend image user; it owns ./data/documents
 $Python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
 
 $Help = [ordered]@{
@@ -48,6 +49,11 @@ function Assert-Env {
     if (-not (Test-Path '.env')) {
         Write-Error "error: .env not found. Run './scripts/dev.ps1 keys' to create it from .env.example."
     }
+}
+
+function Initialize-DocsDir([string[]]$ComposeArgs) {
+    New-Item -ItemType Directory -Force -Path 'data/documents' | Out-Null
+    docker @ComposeArgs run --rm --no-deps --user 0 --entrypoint chown api -R "${BackendUid}:${BackendUid}" /data/documents
 }
 
 function Invoke-In([string]$Dir, [scriptblock]$Block) {
@@ -80,12 +86,13 @@ switch ($Target) {
     }
     'up' {
         Assert-Env
-        New-Item -ItemType Directory -Force -Path 'data/documents' | Out-Null
+        Initialize-DocsDir $Compose
         docker @Compose up -d --build --renew-anon-volumes
     }
     'up-prod' {
         Assert-Env
-        New-Item -ItemType Directory -Force -Path 'data/documents' | Out-Null
+        docker @ComposeProd build api
+        Initialize-DocsDir $ComposeProd
         docker @ComposeProd up -d --build
     }
     'down' { docker @Compose down --remove-orphans }

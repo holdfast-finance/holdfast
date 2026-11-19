@@ -53,11 +53,14 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
+      # Real-service tests skip locally but must run (not skip) when CI is set.
+      CI: "1"
       APP_ENV: dev
       PLAID_ENV: sandbox
       DATABASE_URL: postgresql+psycopg://holdfast:holdfast-ci@localhost:5432/holdfast
       TEST_DATABASE_URL: postgresql+psycopg://holdfast:holdfast-ci@localhost:5432/holdfast
       REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/0
       DOCUMENT_STORE: /tmp/holdfast-documents
     steps:
       - uses: actions/checkout@v4
