@@ -13,8 +13,10 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
+
+MAX_ALLOW_DAYS = 90
 
 
 def load_allowlist(path: Path, scope: str) -> tuple[set[str], list[str]]:
@@ -33,7 +35,10 @@ def load_allowlist(path: Path, scope: str) -> tuple[set[str], list[str]]:
     allowed: set[str] = set()
     errors: list[str] = []
     for e in entries:
-        ident = e.get("id", "?")
+        ident = e.get("id", "").strip()
+        if not ident:
+            errors.append("allowlist entry has an empty id (it would match any advisory without an id)")
+            continue
         try:
             expires = date.fromisoformat(e.get("expires", ""))
         except ValueError:
@@ -41,6 +46,9 @@ def load_allowlist(path: Path, scope: str) -> tuple[set[str], list[str]]:
             continue
         if expires < date.today():
             errors.append(f"allowlist entry {ident} expired on {expires}")
+            continue
+        if expires > date.today() + timedelta(days=MAX_ALLOW_DAYS):
+            errors.append(f"allowlist entry {ident} expires {expires}, more than {MAX_ALLOW_DAYS} days out")
             continue
         if e.get("scope", scope) == scope:
             allowed.add(ident)
@@ -64,7 +72,7 @@ def pnpm_findings(data: dict) -> list[tuple[str, set[str]]]:
     out = []
     for adv in data["advisories"].values():
         if adv.get("severity") in ("high", "critical"):
-            ids = {str(adv.get("github_advisory_id", "")), *map(str, adv.get("cves", []))}
+            ids = {str(adv.get("github_advisory_id", "")), *map(str, adv.get("cves", []))} - {""}
             label = f"{adv.get('module_name')}: {adv.get('title')} [{adv.get('severity')}]"
             out.append((label, ids))
     return out
