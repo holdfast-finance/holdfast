@@ -40,8 +40,17 @@ logs: ## Follow logs (make logs s=api for one service)
 ps: ## List running services
 	$(COMPOSE) ps
 
+# Host-side tests reach the dev stack's loopback-published db/redis. The password is read from
+# .env without echoing it. Pre-set TEST_DATABASE_URL / TEST_REDIS_URL to override.
 test: ## Backend pytest (needs `make up` for the db) + web vitest
-	@if [ -f backend/pyproject.toml ]; then cd backend && uv run pytest -q; else echo "skip backend: no backend/pyproject.toml"; fi
+	@if [ -f backend/pyproject.toml ]; then \
+	  if [ -z "$${TEST_DATABASE_URL:-}" ] && [ -f .env ]; then \
+	    pw=$$(grep -E '^POSTGRES_PASSWORD=' .env | head -1 | cut -d= -f2-); \
+	    export TEST_DATABASE_URL="postgresql+psycopg://holdfast:$${pw}@127.0.0.1:5432/holdfast"; \
+	    export TEST_REDIS_URL="$${TEST_REDIS_URL:-redis://127.0.0.1:56379/0}"; \
+	  fi; \
+	  cd backend && uv run pytest -q; \
+	else echo "skip backend: no backend/pyproject.toml"; fi
 	@if [ -f web/package.json ]; then cd web && pnpm test --run; else echo "skip web: no web/package.json"; fi
 
 lint: ## ruff + ruff format --check + mypy, eslint + tsc

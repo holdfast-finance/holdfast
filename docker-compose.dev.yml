@@ -8,8 +8,16 @@
 services:
   db:
     # Dev only, loopback only: lets host-side `uv run pytest` reach Postgres.
+    # The base `backend` network is internal (no publishing), so dev also joins `frontend`.
+    networks: [backend, frontend]
     ports:
       - "127.0.0.1:5432:5432"
+
+  redis:
+    # Dev only, loopback only: lets host-side `uv run pytest` reach Redis.
+    networks: [backend, frontend]
+    ports:
+      - "127.0.0.1:56379:6379"
 
   api:
     command:

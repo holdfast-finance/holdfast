@@ -3,7 +3,7 @@
 
     docker compose [-f ...] config --format json | python3 scripts/check-compose-ports.py [--dev]
 
-Rules: only `caddy` publishes (plus `db` on 127.0.0.1 with --dev), and never on 0.0.0.0 / :: /
+Rules: only `caddy` publishes (plus `db`/`redis` on 127.0.0.1 with --dev), and never on 0.0.0.0 / :: /
 an empty host IP (which Docker treats as all interfaces).
 """
 
@@ -13,6 +13,7 @@ import json
 import sys
 
 ALLOWED = {"caddy"}
+DEV_LOOPBACK = {"db", "redis"}  # host-side tests only, loopback only
 WILDCARD = {"", "0.0.0.0", "::", "[::]"}
 
 
@@ -28,7 +29,7 @@ def main() -> int:
             print(label)
             if host_ip in WILDCARD:
                 problems.append(f"{label} binds all interfaces")
-            elif name in ALLOWED or (dev and name == "db" and host_ip == "127.0.0.1"):
+            elif name in ALLOWED or (dev and name in DEV_LOOPBACK and host_ip == "127.0.0.1"):
                 continue
             else:
                 problems.append(f"{label} is not allowed to publish")
