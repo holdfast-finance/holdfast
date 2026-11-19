@@ -5,9 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, Request, Response
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db_context import unscoped_session
 from app.security.client_ip import client_ip
 from app.services import sessions
 from app.services.context import RequestContext
@@ -29,9 +27,7 @@ async def get_principal(request: Request) -> Principal:
     token = request.cookies.get(COOKIE_NAME)
     if not token or len(token) > 128:
         raise ApiError("unauthenticated", "Sign in first.")
-    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
-    async with unscoped_session(factory) as s:
-        principal = await sessions.resolve(s, token)
+    principal = await sessions.resolve_token(request.app.state.session_factory, token)
     if principal is None:
         raise ApiError("unauthenticated", "Your session ended. Sign in again.")
     return principal
