@@ -40,7 +40,7 @@ PRs end with `— <Agent>, Holdfast`. One agent per commit; if Keel integrates o
 | `backend/app/integrations/{plaid,simplefin}`, `backend/app/importers/` | Tide | Ledger, Bulwark |
 | `backend/app/domain/`, `backend/app/services/` money paths | Ledger | Bulwark |
 | `backend/app/{api,security,auth}` | Lattice (design) / owner of the feature | Bulwark |
-| `backend/app/models/`, `backend/alembic/` | whoever holds the migration token (one at a time) | Ledger, Bulwark |
+| `backend/app/models/`, `backend/migrations/` | whoever holds the migration token (one at a time) | Ledger, Bulwark |
 | `backend/app/agent/`, redaction | Pilot | Bulwark |
 | `backend/app/tax/` | Tally | Ledger |
 | `backend/app/integrations/crypto/`, `web/src/features/crypto/` | Cipher | Bulwark |

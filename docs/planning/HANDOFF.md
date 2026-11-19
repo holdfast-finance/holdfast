@@ -20,7 +20,7 @@ Keel-maintained status:
 | D1 | Flint | | Keel |
 
 ## Do not take (Claude team)
-F3 OpenAPI types, A1 redaction, F2 job framework, F5 secrets, F6 schema-gap migration, F7, F8b, F9,
+F3 OpenAPI types, A1 redaction, F13 invite-replacement race (found by Anvil, `services/invites.py:67`), F2 job framework, F5 secrets, F6 schema-gap migration, F7, F8b, F9,
 F11, F12, and all of Phase 2. Anything touching a forbidden path in `AGENTS.md`.
 
 ## Migration token

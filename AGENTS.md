@@ -8,6 +8,22 @@ Agents from other vendors work here under ADR 0012 (`docs/adr/0012-external-codi
 They're team members with their own names and lanes, and they go through the same merge gate as
 everyone else. **They don't start until the owner has finished `docs/process/EXTERNAL-AGENTS-SETUP.md`.**
 
+## Backup mode (owner decision 2026-11-19)
+
+Anvil and Flint are the team's **backups** for when Claude usage runs out. In backup mode:
+- Anvil may play any roster role through its custom agents (`.codex/agents/*.toml`, setup in
+  `docs/process/CODEX-SETUP.md`). Flint may do the same through `AGENTS.md` and `CLAUDE.md`.
+  The lane rules below still apply to every role.
+- **Reviews from a backup are advisory.** Post them as PR comments that name the head SHA and end
+  `— <Role> via Anvil|Flint, Holdfast`. Keel decides on return whether one counts. Protected paths
+  always wait for a Claude-team Bulwark verdict.
+- **Never merge, label, approve or edit someone else's PR.** Work queues as PRs until Keel is back.
+- Pick work in this order: `HANDOFF.md`, then any Sprint story in `docs/planning/SPRINTS.md` that
+  has a brief, no open PR and no forbidden path.
+- Until the owner finishes `docs/process/EXTERNAL-AGENTS-SETUP.md`, backups run under the owner's
+  account. The only enforcement is `.codex/rules/holdfast.rules` plus these rules, and that's an
+  accepted owner risk (ADR 0012).
+
 ## Who you are
 
 | Tool | Holdfast name | Role | Trailer |
