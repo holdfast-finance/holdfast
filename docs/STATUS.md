@@ -21,7 +21,11 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 
 Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
-## Owner to-do (only you can do these; PLAN Section 16)
+## Owner to-do
+
+- [ ] Verify `holdfastfinance.app` for GitHub Pages in org settings (takeover protection, docs/ops/domain-email-pages.md)
+- [ ] Require 2FA in the `holdfast-finance` org
+- [ ] Optional: register `runholdfast.com` + `holdfast-finance.com` as redirects (only you can do these; PLAN Section 16)
 
 - [ ] Plaid: sign up, apply for the Trial plan, confirm which products the bundle includes (needed before Phase 2 goes live; sandbox work doesn't need it, but sandbox keys do)
 - [ ] Fill in the 10-Item budget (PLAN 3.2). Confirm the HSA custodian and 401(k) login
@@ -32,5 +36,5 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 - [ ] Pull 3 credit reports from AnnualCreditReport.com (Phase 6)
 - [ ] Last year's return + forms for engine validation (Phase 7)
 - [ ] Backup target (B2 or similar). Store the restic password + Fernet key in a password manager
-- [ ] Create GitHub org **`holdfast-finance`** (free as of 2026-11-18; `holdfast` is taken) and repo `holdfast`, private until the open-source milestone (PLAN 17.6). Optional: also register `holdfastfinance` and `getholdfast` so nobody squats them
-- [ ] Register **`holdfastfinance.app`** (primary) + `runholdfast.com` and `holdfast-finance.com` (301 redirects). Unregistered as of 2026-11-18 (ADR 0002). Cloudflare Registrar sells at cost
+- [x] Create GitHub org **`holdfast-finance`** (free as of 2026-11-18; `holdfast` is taken) and repo `holdfast`, private until the open-source milestone (PLAN 17.6). Optional: also register `holdfastfinance` and `getholdfast` so nobody squats them
+- [x] Register **`holdfastfinance.app`** (primary; DNS, email routing and Pages configured, see docs/ops/domain-email-pages.md) + `runholdfast.com` and `holdfast-finance.com` (301 redirects). Unregistered as of 2026-11-18 (ADR 0002). Cloudflare Registrar sells at cost
