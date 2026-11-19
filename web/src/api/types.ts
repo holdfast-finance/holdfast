@@ -32,20 +32,52 @@ export interface ErrorBody {
   error: { code: string; message: string }
 }
 
-/** Error codes the web client branches on. Anything else is shown by its `message`. */
-export type KnownErrorCode =
-  | 'unauthenticated'
-  | 'reauth_required'
-  | 'forbidden'
-  | 'invalid_setup_token'
-  | 'setup_complete'
-  | 'invalid_credentials'
-  | 'invalid_code'
-  | 'invalid_invite'
-  | 'passkey_verification_failed'
-  | 'last_credential'
-  | 'rate_limited'
-  | 'validation_error'
+/**
+ * Stable error codes the web client branches on (`error.code` in the error body). The auth-api
+ * workstream must emit exactly these strings with these statuses. Anything else is shown to the
+ * user by its `message`, so new codes are safe to add; renaming one of these is a breaking change.
+ */
+export const ERROR_CODES = {
+  /** 401: no session, or it expired or was revoked. The client drops cached data and goes to /login. */
+  unauthenticated: 'unauthenticated',
+  /** 403: the action needs a fresh step-up (reauth_at older than 5 minutes). The client prompts and retries once. */
+  reauthRequired: 'reauth_required',
+  /** 403: signed in, but not allowed (e.g. a member calling an owner-only route). */
+  forbidden: 'forbidden',
+  /** 403: a non-GET `/api/*` request arrived without `X-Holdfast-CSRF: 1`. */
+  csrfFailed: 'csrf_failed',
+  /** 403: `POST /setup` with a wrong or expired setup token. */
+  invalidSetupToken: 'invalid_setup_token',
+  /** 409: `POST /setup` after a household already exists. */
+  setupComplete: 'setup_complete',
+  /** 401: password login with an unknown email, wrong password, or wrong second factor (one code, no oracle). */
+  invalidCredentials: 'invalid_credentials',
+  /** 400: TOTP enable/step-up with a wrong code. */
+  invalidCode: 'invalid_code',
+  /** 404: invite token unknown, used or older than 24h. */
+  invalidInvite: 'invalid_invite',
+  /** 400: WebAuthn registration or assertion failed verification (bad challenge, unknown credential). */
+  passkeyVerificationFailed: 'passkey_verification_failed',
+  /** 409: removing the last passkey while TOTP is off would lock the user out. */
+  lastCredential: 'last_credential',
+  /** 409: e.g. an email that already belongs to a user, or deleting a person who has a user account. */
+  conflict: 'conflict',
+  /** 404: the referenced row does not exist in this household. */
+  notFound: 'not_found',
+  /** 429: login/assertion rate limit or lockout. `message` says when to retry. */
+  rateLimited: 'rate_limited',
+  /** 422: request body failed validation. `message` is human readable. */
+  validationError: 'validation_error',
+} as const
+
+export type KnownErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]
+
+/** Codes the client synthesizes itself (never sent by the API). */
+export const CLIENT_ERROR_CODES = {
+  networkError: 'network_error',
+  serverError: 'server_error',
+  httpError: 'http_error',
+} as const
 
 export interface Household {
   id: string
@@ -191,4 +223,18 @@ export interface AuditPage {
   items: AuditEntry[]
   /** Opaque cursor: pass `before=<next_before>` to load the next (older) page; null at the end. */
   next_before: string | null
+}
+
+// PATCH /api/household (owner)
+export interface HouseholdUpdate {
+  name: string
+}
+
+/**
+ * POST /api/auth/reauth/totp `{code}` → 204. Web addition: the contract says reauth_at is
+ * refreshed by "a passkey/TOTP step-up" but only lists the passkey endpoints. Users who signed in
+ * with password + TOTP and have no passkey on this device need this one.
+ */
+export interface TotpReauthRequest {
+  code: string
 }

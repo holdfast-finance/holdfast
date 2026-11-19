@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 
+import { CLIENT_ERROR_CODES, ERROR_CODES } from '@/api/types'
+
 /*
  * Typed fetch wrapper for the Holdfast API (docs/phases/PHASE-1-contract.md, "API contract").
  *
@@ -59,10 +61,10 @@ async function toApiError(response: Response): Promise<ApiError> {
   }
   const fallback =
     response.status === 401
-      ? 'unauthenticated'
+      ? ERROR_CODES.unauthenticated
       : response.status >= 500
-        ? 'server_error'
-        : 'http_error'
+        ? CLIENT_ERROR_CODES.serverError
+        : CLIENT_ERROR_CODES.httpError
   return new ApiError(
     response.status,
     fallback,
@@ -104,7 +106,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError(0, 'network_error', 'Holdfast could not reach its server.')
+    throw new ApiError(0, CLIENT_ERROR_CODES.networkError, 'Holdfast could not reach its server.')
   }
 
   if (!response.ok) throw await toApiError(response)
@@ -115,8 +117,19 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 
 /** A human message for any error a query or mutation can throw. */
 export function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
+  if (error instanceof ApiError) {
+    if (error.code === ERROR_CODES.csrfFailed) return 'Request blocked. Reload the page and try again.'
+    return error.message
+  }
+  if (error instanceof Error) {
+    // WebAuthn: the user closed the prompt, it timed out, or no passkey matched. The browser
+    // deliberately doesn't say which.
+    if (error.name === 'NotAllowedError' || ('code' in error && error.code === 'ERROR_CEREMONY_ABORTED')) {
+      return 'Passkey prompt closed or timed out. Try again when you are ready.'
+    }
+    if (error.name === 'InvalidStateError') return 'This device already has a passkey here.'
+    return error.message
+  }
   return 'Something went wrong.'
 }
 
