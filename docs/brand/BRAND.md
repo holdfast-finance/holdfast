@@ -45,6 +45,9 @@ Derived (define as CSS variables, not ad hoc):
 | `--text` | `#E8ECF4` | Primary text on dark |
 | `--text-muted` | `#8A93A6` | Labels, captions |
 | `--glass` | Hull @ 70% + 12px backdrop blur + hairline | Glass cards (Dashboard only) |
+| `--input-border` | `#7D869A` dark / `#606879` light | Form-control borders (≥ 3:1 on Abyss, Hull and light surfaces, WCAG 1.4.11). Hairline is for decorative rules only |
+| `--deepwater-ink` | `#FFFFFF` dark / `#07080C` light | Text on a Deepwater fill (`--secondary-foreground`) |
+| `--chart-actual` / `--chart-forecast` | = Signal / = Deepwater | Chart series, so charts re-theme with the brand |
 
 **Light theme** (follows the system setting, per PLAN 11.1): ground `#F7F8FB`, surface `#FFFFFF`,
 text `#0E1118`. Light fills: Signal `#0FB894`, Deepwater `#5B41E0`. Dark is the hero theme:
