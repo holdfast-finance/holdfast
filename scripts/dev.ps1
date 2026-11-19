@@ -36,7 +36,7 @@ $Help = [ordered]@{
     'logs'    = 'Follow logs (dev.ps1 logs api for one service)'
     'ps'      = 'List running services'
     'test'    = 'Backend pytest (needs up for the db) + web vitest'
-    'lint'    = 'ruff + ruff format --check + mypy, eslint + tsc'
+    'lint'    = 'ruff + ruff format --check + mypy + import-linter, eslint + tsc'
     'fmt'     = 'Format backend (ruff) and web (format script, if any)'
     'migrate' = 'alembic upgrade head as holdfast_owner (one-off migrate container)'
     'seed'    = 'Seed Plaid Sandbox data (placeholder until Phase 2)'
@@ -76,7 +76,7 @@ function Invoke-In([string]$Dir, [scriptblock]$Block) {
 
 function Invoke-Lint {
     if (Test-Path 'backend/pyproject.toml') {
-        Invoke-In 'backend' { uv run ruff check .; uv run ruff format --check .; uv run mypy app }
+        Invoke-In 'backend' { uv run ruff check .; uv run ruff format --check .; uv run mypy app; uv run lint-imports }
     } else { Write-Host 'skip backend: no backend/pyproject.toml' }
     if (Test-Path 'web/package.json') {
         Invoke-In 'web' { pnpm lint; pnpm typecheck }

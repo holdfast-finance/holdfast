@@ -30,6 +30,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "pip-audit>=2.7",
+    "import-linter>=2.17",
 ]
 
 [tool.uv]
@@ -78,3 +79,42 @@ markers = [
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"
+
+# Layering (ADR 0011): api (thin) -> services (transactions, auth, audit) -> domain (pure).
+# Run with `make lint-imports` (part of `make lint`).
+[tool.importlinter]
+root_package = "app"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers: api -> services -> domain"
+type = "layers"
+layers = ["app.api", "app.services", "app.domain"]
+
+[[tool.importlinter.contracts]]
+name = "Domain is pure: no I/O, no framework, no persistence"
+type = "forbidden"
+source_modules = ["app.domain"]
+forbidden_modules = [
+    "app.api",
+    "app.services",
+    "app.db",
+    "app.db_context",
+    "app.models",
+    "app.integrations",
+    "app.worker",
+    "app.config",
+    "fastapi",
+    "starlette",
+    "sqlalchemy",
+    "psycopg",
+    "redis",
+    "arq",
+    "httpx",
+]
+
+[[tool.importlinter.contracts]]
+name = "Routers never touch ORM models (writes go through services)"
+type = "forbidden"
+source_modules = ["app.api"]
+forbidden_modules = ["app.models"]
