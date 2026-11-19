@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+screenshots
+playwright-report
+test-results
+.vite
+*.log
+*.local
+.env
+.env.*
+Dockerfile
+.dockerignore

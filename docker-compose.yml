@@ -1,0 +1,223 @@
+# Holdfast: prod-like stack. Dev adds docker-compose.dev.yml on top (see Makefile / scripts/dev.ps1).
+#
+# Networking (CLAUDE.md rule 12): only `caddy` publishes a port, on ${CADDY_BIND} (default
+# 127.0.0.1; in prod use infra/docker-compose.prod.yml, which binds the Tailscale IP).
+# Never publish on 0.0.0.0. db and redis sit on an internal-only network with no egress.
+#
+# Environment: no service gets the whole .env. Compose interpolates the values each service
+# needs from .env; everything else (CF_API_TOKEN, the Postgres admin/owner passwords, bind IPs)
+# stays out of the backend containers.
+#
+# Postgres roles (infra/postgres/init/00-roles.sh): holdfast_admin is the bootstrap superuser,
+# used by the image entrypoint only. holdfast_owner owns the schema and runs migrations through
+# the one-off `migrate` service. api and worker connect as holdfast_app (no superuser, no
+# BYPASSRLS, no DDL).
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+# Everything the backend reads at runtime (app/config.py). Empty values mean "unset".
+x-backend-env: &backend-env
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  APP_ENV: ${APP_ENV:-dev}
+  APP_BASE_URL: ${APP_BASE_URL:-}
+  APP_HOST: ${APP_HOST:-}
+  SESSION_SECRET: ${SESSION_SECRET:-}
+  FERNET_KEY: ${FERNET_KEY:-}
+  DATABASE_URL: ${DATABASE_URL:?set in .env (run make keys)}
+  POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
+  REDIS_URL: ${REDIS_URL:-}
+  DOCUMENT_STORE: ${DOCUMENT_STORE:-}
+  PLAID_ENV: ${PLAID_ENV:-sandbox}
+  PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:-}
+  PLAID_SECRET_SANDBOX: ${PLAID_SECRET_SANDBOX:-}
+  PLAID_SECRET_PRODUCTION: ${PLAID_SECRET_PRODUCTION:-}
+  PLAID_PRODUCTS: ${PLAID_PRODUCTS:-}
+  PLAID_COUNTRY_CODES: ${PLAID_COUNTRY_CODES:-}
+  PLAID_REDIRECT_URI: ${PLAID_REDIRECT_URI:-}
+  PLAID_WEBHOOK_URL: ${PLAID_WEBHOOK_URL:-}
+  PLAID_TX_DAYS_REQUESTED: ${PLAID_TX_DAYS_REQUESTED:-}
+  SIMPLEFIN_ACCESS_URL: ${SIMPLEFIN_ACCESS_URL:-}
+  AI_PROVIDER: ${AI_PROVIDER:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AGENT_MODEL_REVIEW: ${AGENT_MODEL_REVIEW:-}
+  AGENT_MODEL_CHAT: ${AGENT_MODEL_CHAT:-}
+  AGENT_MONTHLY_TOKEN_BUDGET: ${AGENT_MONTHLY_TOKEN_BUDGET:-}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+  OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+  OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  ALERT_EMAIL: ${ALERT_EMAIL:-}
+  NTFY_URL: ${NTFY_URL:-}
+  NTFY_TOPIC: ${NTFY_TOPIC:-}
+  HOUSEHOLD_STATE: ${HOUSEHOLD_STATE:-}
+  HISTORY_START: ${HISTORY_START:-}
+  FEATURE_TAX: ${FEATURE_TAX:-false}
+  FEATURE_CRYPTO_SPEND: ${FEATURE_CRYPTO_SPEND:-false}
+  FEATURE_PUBLIC_SECTOR: ${FEATURE_PUBLIC_SECTOR:-false}
+
+x-backend: &backend
+  <<: *hardening
+  build: ./backend
+  image: holdfast-backend:local
+  environment: *backend-env
+  read_only: true
+  tmpfs:
+    - /tmp
+  volumes:
+    - ./data/documents:/data/documents
+  networks:
+    - backend
+    - frontend
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    <<: *hardening
+    image: postgres:16-alpine
+    # The entrypoint starts as root, chowns the data dir and drops to `postgres` via su-exec.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    environment:
+      POSTGRES_USER: holdfast_admin
+      POSTGRES_DB: holdfast
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (run make keys)}
+      POSTGRES_OWNER_PASSWORD: ${POSTGRES_OWNER_PASSWORD:?set in .env (run make keys)}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?set in .env (run make keys)}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates holdfast_owner / holdfast_app on first init (empty pgdata only).
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    healthcheck:
+      # TCP on purpose: the entrypoint's init-time server listens on the socket only, so this
+      # stays unhealthy until the roles exist and the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U holdfast_admin -d holdfast"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    # The entrypoint chowns /data and drops to `redis` via su-exec.
+    cap_add: [CHOWN, SETGID, SETUID]
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    read_only: true
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    command: ["arq", "app.worker.main.WorkerSettings"]
+
+  # One-off: `make migrate` (docker compose run --rm migrate). The only container that gets the
+  # owner role's credentials. Not started by `up` (profile).
+  migrate:
+    <<: *hardening
+    restart: "no"
+    profiles: [tools]
+    image: holdfast-backend:local
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      APP_ENV: ${APP_ENV:-dev}
+      MIGRATIONS_DATABASE_URL: ${MIGRATIONS_DATABASE_URL:?set in .env (run make keys)}
+      POSTGRES_OWNER_PASSWORD: ${POSTGRES_OWNER_PASSWORD:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    <<: *hardening
+    build: ./web
+    image: holdfast-web:local
+    # The caddy binary carries the cap_net_bind_service file capability; it can't exec without it.
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+      - /config
+    networks:
+      - frontend
+
+  caddy:
+    <<: *hardening
+    image: caddy:2-alpine
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      APP_HOST: ${APP_HOST:-localhost}
+      WEB_UPSTREAM: ${WEB_UPSTREAM:-web:80}
+    ports:
+      - "${CADDY_BIND:-127.0.0.1}:443:443"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - frontend
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+networks:
+  # db + redis only. `internal: true` = no route out of the host.
+  backend:
+    internal: true
+  # caddy <-> api/web. api and worker need egress here (Plaid, AI providers).
+  frontend: {}
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

@@ -32,14 +32,16 @@ Commits: Conventional Commits (`feat(plaid): …`, `fix(import): …`, `docs: �
 
 ## Commands
 
-The stack lands in Phase 0. Until then, most of these don't exist yet.
+First run: `make keys` (creates `.env` with fresh secrets), then `make up && make migrate`.
+The app is at https://localhost (self-signed in dev).
 
 | Task | Linux | Windows (pwsh 7) |
 |---|---|---|
 | Bring the stack up / down | `make up` / `make down` | `./scripts/dev.ps1 up` / `down` |
 | All tests | `make test` | `./scripts/dev.ps1 test` |
 | Lint + types | `make lint` | `./scripts/dev.ps1 lint` |
-| Migrate / seed sandbox | `make migrate` / `make seed` | `./scripts/dev.ps1 migrate` / `seed` |
+| Migrate (one-off `migrate` service, owner role) / seed sandbox | `make migrate` / `make seed` | `./scripts/dev.ps1 migrate` / `seed` |
+| Health through Caddy / port-exposure check | `make health` / `make ports` | `./scripts/dev.ps1 health` / `ports` |
 | Backend tests | `cd backend && uv run pytest -q` | same |
 | Backend lint/types | `cd backend && uv run ruff check . && uv run mypy app` | same |
 | Frontend | `cd web && pnpm dev` / `pnpm test` / `pnpm lint` / `pnpm typecheck` | same |
@@ -67,7 +69,8 @@ Docker Compose for services.
 7. **Every new module gets tests.** Fixtures are synthetic or sanitized. Real statements, credit
    reports, tax forms and exports never go in the repo.
 8. **Migrations go through Alembic only.** No manual schema edits. Every table with household data
-   carries `household_id` and an RLS policy.
+   carries `household_id` and an RLS policy. The app connects as `holdfast_app` (no superuser, no
+   BYPASSRLS), and migrations run as `holdfast_owner` (ADR 0007). Never give the app role DDL.
 9. **No new external service** (API, SaaS, container) without an ADR in `docs/adr/`.
 10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5.
 11. **Crypto:** never accept, store, log or transmit seed phrases or private keys. Only xpubs,

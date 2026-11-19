@@ -1,0 +1,250 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+/*
+ * Holdfast brand tokens (docs/brand/BRAND.md, Direction 01).
+ * Raw color values may appear only here and in src/lib/tokens.ts (the source of truth this
+ * file mirrors; src/tokens.node.test.ts checks parity and WCAG contrast).
+ *
+ * Theme resolution: dark is the hero theme. `color-scheme` picks the branch of every
+ * `light-dark()` below. Without JS the system preference wins; with JS the theme store sets
+ * `data-theme` on <html> ("dark" | "light") from the saved preference or the system setting.
+ */
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root {
+  color-scheme: dark;
+
+  /* Core palette: light-dark(<light theme>, <dark theme>) */
+  --signal: light-dark(#0fb894, #3df5c8);
+  --deepwater: light-dark(#5b41e0, #7b61ff);
+  --abyss: light-dark(#f7f8fb, #07080c);
+  --hull: light-dark(#ffffff, #0e1118);
+  --flare: light-dark(#d99a3c, #ffb547);
+  --breach: light-dark(#d94f68, #ff5d7a);
+
+  /*
+   * Text in a brand hue. The fills above are for dots, bars, strokes and button backgrounds;
+   * text uses these, tuned to >= 4.5:1 on ground, surface and the 12-15% chip tints.
+   */
+  --signal-text: light-dark(#09745d, #3df5c8);
+  --flare-text: light-dark(#8b5e1b, #ffb547);
+  --breach-text: light-dark(#bf2945, #ff5d7a);
+  --deepwater-text: light-dark(#5b41e0, #8b74ff);
+
+  /* Focus ring: >= 3:1 non-text contrast on ground and surface. Signal in dark. */
+  --focus-ring: light-dark(#0b8a6f, #3df5c8);
+
+  /* Fixed brand values (identical in both themes) */
+  --abyss-ink: #07080c;
+  --hull-ink: #0e1118;
+
+  /* Derived */
+  --hull-raised: color-mix(in srgb, var(--hull), light-dark(#0e1118, #ffffff) 4%);
+  --hairline: light-dark(rgb(14 17 24 / 10%), rgb(255 255 255 / 8%));
+  --text: light-dark(#0e1118, #e8ecf4);
+  --text-muted: light-dark(#566074, #8a93a6);
+  --glass: color-mix(in srgb, var(--hull) 70%, transparent);
+  /* Loading skeletons: visible fill + edge in light, quiet raised fill in dark. */
+  --skeleton: light-dark(
+    color-mix(in srgb, #ffffff, #0e1118 8%),
+    color-mix(in srgb, #0e1118, #ffffff 5%)
+  );
+  --skeleton-edge: light-dark(rgb(14 17 24 / 12%), transparent);
+
+  /* shadcn semantic mapping */
+  --background: var(--abyss);
+  --foreground: var(--text);
+  --card: var(--hull);
+  --card-foreground: var(--text);
+  --popover: var(--hull-raised);
+  --popover-foreground: var(--text);
+  --primary: var(--signal);
+  --primary-foreground: var(--abyss-ink);
+  --secondary: var(--deepwater);
+  --secondary-foreground: light-dark(#ffffff, #07080c);
+  --muted: var(--hull-raised);
+  --muted-foreground: var(--text-muted);
+  --accent: var(--hull-raised);
+  --accent-foreground: var(--text);
+  --destructive: var(--breach);
+  --border: var(--hairline);
+  --input: var(--hairline);
+  --ring: var(--focus-ring);
+  --chart-1: var(--signal);
+  --chart-2: var(--deepwater);
+  --chart-3: var(--flare);
+  --chart-4: var(--breach);
+  --chart-5: var(--text-muted);
+  --sidebar: var(--abyss);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--signal);
+  --sidebar-primary-foreground: var(--abyss-ink);
+  --sidebar-accent: color-mix(in srgb, var(--signal) 10%, var(--hull));
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--hairline);
+  --sidebar-ring: var(--focus-ring);
+
+  /* Radius: 10px buttons (rounded-lg), 12px cards (rounded-card), full chips */
+  --radius: 0.625rem;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+@theme inline {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Space Grotesk', var(--font-sans);
+  --font-display: 'Space Grotesk', var(--font-sans);
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Brand colors as Tailwind utilities: bg-signal, text-breach, border-hairline, ... */
+  --color-signal: var(--signal);
+  --color-deepwater: var(--deepwater);
+  --color-abyss: var(--abyss);
+  --color-hull: var(--hull);
+  --color-hull-raised: var(--hull-raised);
+  --color-flare: var(--flare);
+  --color-breach: var(--breach);
+  --color-signal-text: var(--signal-text);
+  --color-flare-text: var(--flare-text);
+  --color-breach-text: var(--breach-text);
+  --color-deepwater-text: var(--deepwater-text);
+  --color-focus-ring: var(--focus-ring);
+  --color-skeleton: var(--skeleton);
+  --color-skeleton-edge: var(--skeleton-edge);
+  --color-hairline: var(--hairline);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-abyss-ink: var(--abyss-ink);
+
+  /* shadcn semantic colors */
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-card: 0.75rem;
+
+  --shadow-glow: 0 0 24px color-mix(in srgb, var(--signal) 35%, transparent);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply bg-background font-sans text-foreground antialiased;
+  }
+
+  body {
+    @apply min-h-dvh bg-background text-foreground;
+  }
+
+  h1,
+  h2,
+  h3 {
+    @apply font-heading font-semibold tracking-[-0.02em];
+  }
+
+  /*
+   * Radix Dialog/Sheet locks scroll by setting data-scroll-locked on <body> and injecting a
+   * <style> with the overflow rule. The prod CSP blocks inline styles, so ship the rule here.
+   */
+  body[data-scroll-locked] {
+    overflow: hidden !important;
+    overscroll-behavior: contain;
+  }
+
+  /* Visible focus ring (Signal in dark, a deeper Signal in light) on every focusable element. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* All money, balances, quantities and codes. */
+  .money {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* Glass card: Dashboard hero and Advisor card only. */
+  .glass-card {
+    background:
+      radial-gradient(
+        120% 90% at 100% 0%,
+        color-mix(in srgb, var(--deepwater) 18%, transparent),
+        transparent 55%
+      ),
+      radial-gradient(
+        90% 70% at 0% 0%,
+        color-mix(in srgb, var(--signal) 8%, transparent),
+        transparent 60%
+      ),
+      var(--glass);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--hairline);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

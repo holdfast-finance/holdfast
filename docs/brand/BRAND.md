@@ -40,9 +40,25 @@ Derived (define as CSS variables, not ad hoc):
 | `--glass` | Hull @ 70% + 12px backdrop blur + hairline | Glass cards (Dashboard only) |
 
 **Light theme** (follows the system setting, per PLAN 11.1): ground `#F7F8FB`, surface `#FFFFFF`,
-text `#0E1118`. Signal darkens to `#0FB894` and Deepwater to `#5B41E0` for AA contrast on white.
-Flare and Breach keep their hue and darken by about 15%. Dark is the hero theme: marketing,
-screenshots and the demo use it.
+text `#0E1118`. Light fills: Signal `#0FB894`, Deepwater `#5B41E0`. Dark is the hero theme:
+marketing, screenshots and the demo use it.
+
+### Fill vs. text tokens (AA rule, Phase 0 review)
+
+Brand hues are **fills**: dots, bars, buttons, chart lines and chip tints. Colored **text** always
+uses the separate `*-text` tokens. Most fills fail 4.5:1 when used as text, especially on white.
+
+| Text token | Light | Dark | Worst measured contrast |
+|---|---|---|---|
+| `--signal-text` | `#09745D` | `#3DF5C8` | 4.83 (light chip) |
+| `--flare-text` | `#8B5E1B` | `#FFB547` | 4.86 (light chip) |
+| `--breach-text` | `#BF2945` | `#FF5D7A` | 4.72 (light chip) |
+| `--deepwater-text` | `#5B41E0` | `#8B74FF` | 4.67 (dark chip) |
+| `--focus-ring` (≥ 3:1) | `#0B8A6F` | `#3DF5C8` | 4.05 |
+
+The source of truth is `web/src/lib/tokens.ts`, and `web/src/index.css` mirrors it. The test
+`web/src/tokens.node.test.ts` fails the build if any pair drops below 4.5:1 (3:1 for the ring).
+Never darken the Signal **fill** to fix text: Abyss text on a Signal button is 7.9:1 or better.
 
 Map tokens into shadcn's CSS variables (`--primary` = signal, `--secondary` = deepwater,
 `--destructive` = breach, `--background` = abyss, `--card` = hull, `--ring` = signal) in
@@ -62,7 +78,7 @@ Self-host all fonts (`@fontsource/*`). The app never calls Google Fonts.
 
 - **Primary button:** Signal fill, Abyss text, soft Signal glow on hover. Example: "Self-host now".
 - **Secondary button:** Hull fill, hairline border, Text. Example: "View demo".
-- **Status chips:** a dot plus a label on a tinted pill. `● Synced` (Signal), `● Relink needed` (Flare), `● Watch-only` (Deepwater), `● Error` (Breach). Never color alone.
+- **Status chips:** a dot (fill token) plus a label (`*-text` token) on a tinted pill. `● Synced` (Signal), `● Relink needed` (Flare), `● Watch-only` (Deepwater), `● Error` (Breach). Never color alone.
 - **Code block:** Abyss fill, hairline border, mono, with the command keyword in Signal (`docker compose up -d holdfast`).
 - **Glass card:** the `--glass` recipe with a subtle Signal→Deepwater radial in one corner. Use it on the Dashboard hero and the Advisor card only.
 - **Charts:** actuals are a Signal line with a soft area fill. Forecasts are a dashed Deepwater P50 with a Deepwater 20% P10–P90 band. Gridlines are hairline. A "Today" marker sits at the actual/forecast join.

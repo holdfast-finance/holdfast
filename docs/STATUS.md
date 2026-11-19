@@ -5,7 +5,7 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 | Phase | Name | Status | Branch | Report |
 |---|---|---|---|---|
 | −1 | Repo foundation + Claude Code setup | PASS (2026-11-18) | `main` | this commit |
-| 0 | Scaffold | NOT STARTED | | |
+| 0 | Scaffold | PASS-WITH-BLOCKED (2026-11-19) | `phase/0-scaffold` | [PHASE-0](phases/PHASE-0.md) |
 | 1 | Auth, household, data model (+ RLS, per-person visibility) | NOT STARTED | | |
 | 2 | Bank connectors: Plaid sandbox + SimpleFIN + Sync Health | NOT STARTED | | |
 | 3 | Historical import (+ competitor exports) | NOT STARTED | | |
@@ -22,6 +22,8 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 ## Owner to-do
+
+- [ ] Phase 0 blocked item: run `./scripts/dev.ps1 keys` and `./scripts/dev.ps1 up` once on a personal Windows machine with PowerShell 7 and Docker Desktop
 
 - [x] Verify `holdfastfinance.app` for GitHub Pages in org settings (takeover protection, docs/ops/domain-email-pages.md)
 - [ ] Require 2FA in the `holdfast-finance` org
