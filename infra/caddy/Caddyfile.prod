@@ -24,7 +24,7 @@
 		X-Frame-Options DENY
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.plaid.com; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.plaid.com; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
 		-Server
 	}
 
