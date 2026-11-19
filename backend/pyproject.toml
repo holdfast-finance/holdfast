@@ -70,3 +70,8 @@ addopts = "-ra --strict-markers"
 markers = [
     "services: needs real Postgres and Redis (TEST_DATABASE_URL / REDIS_URL)",
 ]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
