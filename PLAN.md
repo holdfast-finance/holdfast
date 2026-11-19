@@ -1174,3 +1174,6 @@ FEATURE_PUBLIC_SECTOR=false
 
 ### 20.5 Pricing (only if hosted later)
 Self-host: free forever under AGPL with your own Plaid/SimpleFIN and AI keys. Hosted: about $5–7/month, undercutting the $95–109/yr premium apps, with AI on bring-your-own-key or a metered add-on. Confirm with real Plaid and AI costs (Section 17.5).
+
+### 20.6 Two brands (ADR 0009, 2026-11-18)
+Direction 01 stays the brand for self-host / open source (README, docs, OSS site, default app theme). **Holo** (brand PDF pages 9–12) is the brand for **Holdfast Cloud**, the paid hosted tier (Section 17), and for marketing aimed at less technical people. This amends ADR 0003 and the single-brand language in Section 11. The app ships both as whole themes (`data-brand="signal" | "holo"`, light + dark each), chosen by edition (`VITE_EDITION`) and selectable in Settings → Appearance. Components use semantic tokens only. Work items: (1) theme plumbing + Holo tokens + fonts + AA test for both themes, a small web task right after Phase 1; (2) the Cloud marketing site on Cloudflare Pages, built when the hosted tier is scheduled (17.6). Cloud copy must be truthful for hosting: no "on your server", watch-only crypto, no tax module.

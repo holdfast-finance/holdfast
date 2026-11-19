@@ -32,6 +32,7 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
   1. Check each `worktree-agent-*` branch: `git log phase/1-auth-data-model..<branch>`. Review, run its verification, and merge `--no-ff` into the phase branch. Rerun any workstream that's missing or incomplete, from the contract.
   2. After data-model merges, start **auth-api** (contract "Auth model" + "API contract"): routes, services, sessions, CSRF, rate limits, setup token, audit, plus a Playwright e2e test with a CDP virtual authenticator in `web/e2e/`.
   3. Integrate (`make up && make migrate && make test && make lint && make ports`). Run security-reviewer, money-invariants-reviewer, ui-brand-reviewer and phase-acceptance-checker, write `docs/phases/PHASE-1.md`, update this file, and **stop for owner approval** before merging to main.
+- **Queued after Phase 1 (owner decision 2026-11-18, ADR 0009):** two brands. Holo for Holdfast Cloud + mainstream marketing, Direction 01 for self-host. First task after Phase 1: brand-theme plumbing (`data-brand`, Holo tokens/fonts, AA test for both themes). The Cloud marketing site comes when the hosted tier is scheduled.
 - **Local env:** `.env` exists (includes Plaid sandbox/prod keys, `PLAID_ENV=sandbox`; never print or commit it). The dev stack is compose project `holdfast` on 127.0.0.1:443 / 5432 / 56379. Subagents must use their own containers and ports.
 - **Shell gotchas:** `cp` is interactive (use `command cp -f`), and a bare `ls` can hang.
 

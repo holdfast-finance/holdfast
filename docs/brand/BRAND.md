@@ -2,9 +2,16 @@
 
 > Every account. One root. Your server.
 
-Chosen direction: **Direction 01, Futuristic / Decentralized** (ADR 0003). The source boards are
-in `Holdfast_Brand_Direction.pdf`: pages 1–4 are Direction 01, 5–8 are Direction B (Terminal /
-Brutalist) and 9–12 are Direction C (Holo). B and C are kept for reference. Don't mix them in.
+Two brands, one product (ADR 0003, amended by ADR 0009):
+
+- **Direction 01, Futuristic / Decentralized**: self-host / open source (README, docs, OSS site,
+  default self-host app theme). Most of this file.
+- **Holo** (Direction C): Holdfast Cloud, the paid hosted tier, and its marketing aimed at less
+  technical people. See [Holo brand](#holo-brand-holdfast-cloud) at the end.
+
+The source boards are in `Holdfast_Brand_Direction.pdf`: pages 1–4 are Direction 01, 5–8 are
+Direction B (Terminal / Brutalist, reference only) and 9–12 are Holo. Never mix 01 and Holo on one
+surface. In the app they're whole themes (`data-brand`), and components use only semantic tokens.
 
 ## Logomark
 
@@ -107,3 +114,82 @@ as a claim, or crypto-bro hype.
   Advisor, Settings), the net worth headline in mono, sync chips at top right ("9 of 10 accounts synced",
   "1 relink needed"), a 90-day forecast card, an Advisor card, an Accounts table with status chips, and a
   Budgets card with pace bars.
+
+## Holo brand (Holdfast Cloud)
+
+Light, iridescent, friendly. For the hosted edition and for marketing to people who don't run
+servers. Source: brand PDF pages 9–12. Same logomark geometry, softened (round node, chunky stem).
+
+### Holo color tokens
+
+| Token | Fill | Text token (light) | Role |
+|---|---|---|---|
+| `--indigo` | `#4F46E5` | `--indigo-text` `#4338CA` | Primary buttons ("See the demo"), active nav, links, focus ring, "Watch-only" |
+| `--ink` | `#12131A` | (is text) | Body text, dark buttons, code blocks, dark-mode ground |
+| `--cloud` | `#F7F7FB` | | Page ground (light) |
+| `--grow` | `#059669` | `--grow-text` `#065F46` | Positive, "Synced", under-pace budget |
+| `--heads-up` | `#D97706` | `--heads-up-text` `#92400E` | Warning, "Relink needed", budget pace high |
+| `--alert` | `#DC2626` | `--alert-text` `#B91C1C` | Negative amounts, errors, over budget |
+
+**Holo gradient** (`--holo`): the iridescent cyan → lavender → pink → butter sweep from the board.
+Use it for the secondary pill button ("Get Holdfast"), the Holo hero orb, frosted-card corner
+blooms and the page-edge washes. Never put text on it below 4.5:1 (Ink on Holo passes, white
+doesn't). Never use it inside dense data views.
+
+AA (measured, same rule as Direction 01: hues are fills, colored text uses `*-text`): `--grow` as
+text is only 3.5:1 on Cloud and `--heads-up` is 3.0:1, so they're never text. Text tokens on their
+own 12% chip tint: indigo-text 6.2, grow-text 6.2, heads-up-text 5.9, alert-text 5.1. White on an
+Indigo button is 6.3. Indigo focus ring on Cloud is 5.9.
+
+**Holo dark** (follows the system setting): ground Ink `#12131A`, surface `#1B1C25`. Text tokens:
+indigo `#A5B4FC`, grow `#34D399`, heads-up `#FBBF24`, alert `#F87171` (≥ 5.3:1 on their chips).
+Light is the hero theme for Holo: marketing, screenshots and the Cloud demo use it.
+
+### Holo typography
+
+| Use | Face |
+|---|---|
+| Display & headings | **Sora 700**, wordmark "holdfast." with an Indigo period |
+| Body & UI | **Manrope 400–600** |
+| Money, balances, quantities, code | **DM Mono**, `tabular-nums` always |
+
+Self-hosted via `@fontsource/*`, same as Direction 01.
+
+### Holo UI atoms
+
+- **Primary pill:** Indigo fill, white text ("See the demo", "Model it"). **Secondary pill:** Holo gradient, Ink text ("Get Holdfast"). **Tertiary:** white with a hairline ("Later").
+- **Status chips:** same dot + label + tint pattern as 01: Synced (Grow), Relink needed (Heads-up), Watch-only (Indigo).
+- **Frosted card:** white at ~80% with backdrop blur, 20px radius, a soft shadow, and one Holo bloom in a corner. Dashboard hero, Advisor card and marketing only.
+- **Charts:** actuals are a cyan → indigo → pink gradient line. The forecast is a soft lavender P10–P90 band.
+- **Budget bars:** per-category pastel gradients, with Heads-up when pace ≥ 90% and Alert when over.
+- **Radius:** 20px cards, full pills. Generous whitespace, light washes at the page edges.
+- Accounts table section headers use colored text (Banks / Investments / Crypto) from the `*-text` tokens.
+
+### Holo voice
+
+Warm, plain-English, a little delighted. Celebrate progress, explain jargon, never guilt anyone
+about a latte. Ownership is still the headline. The rules from the main Voice section still apply
+(no fear-selling, no "CPA" claims, no crypto hype). Holo allows an occasional exclamation in
+celebratory moments ("Nice month!"), never in errors or warnings.
+
+- All your money, rooted in one place.
+- Own your finances. Literally.
+- Footer: "Not a bank or a CPA. Your money, your data."
+
+**Truthfulness for Cloud.** The board copy was written for self-hosting. Cloud copy must not say
+"on your server" or show `curl … | sh`. Say what's true: hosted by Holdfast, encrypted, export or
+delete everything any time, open source so you can move to self-hosting. Cloud crypto is watch-only
+(no hardware-wallet signing), and the tax module isn't offered (PLAN 17, 18).
+
+### Holo reference layouts
+
+- **Cloud site hero:** "All your money, rooted in **one place.**" ("one place." in the Holo
+  gradient text with an Ink fallback for AA), subhead, Indigo + Holo pills, the Holo orb with the mark and
+  floating chips ("12 accounts synced", "Cold wallet · watch-only"), then a three-card frosted strip
+  (net worth, next 90 days, advisor). Then a six-card features grid ("Own your finances.
+  Literally."), then a dark Ink CTA panel ("Ready to put down roots?").
+- **Cloud app overview:** greeting header ("Good evening"), search + "Add account" Holo pill, net
+  worth frosted card with category chips, cash forecast card with backtest note, Accounts table
+  grouped by Banks / Investments / Crypto, Budgets card with gradient bars, "Advisor found
+  something" card.
+
