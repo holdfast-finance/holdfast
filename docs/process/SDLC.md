@@ -16,6 +16,7 @@ Backlog (ROADMAP.md) ─► Sprint plan (Keel, per usage window)
    ─► Deploy (pull-based on the owner's host, once it exists)
 ```
 
+- **Agents from other vendors** (Anvil = Codex, Flint = Grok) work under ADR 0012 and `AGENTS.md`, pulling from `docs/planning/HANDOFF.md`. Same gate; only Keel merges.
 - **Unit of work:** one story = one branch `feat|fix|chore/<story-id>-<slug>` = one PR. S or M only; L must be split before it's scheduled.
 - **Phases are milestones**, not long-lived branches. `phase-<n>` is a tag on the green `main` commit after Sounding's acceptance run.
 - **Only Keel merges.** Builders never merge their own PR.

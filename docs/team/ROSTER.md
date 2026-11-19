@@ -20,6 +20,8 @@ Agent definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort
 | **Beacon** | Docs + sites | `docs/`, holdfast-site, holdfast-cloud-site, release notes | sonnet · low | — |
 | **Scout** | Recon | Fast codebase search, inventories, link checks | haiku · low | — |
 | **Gadfly** | Red-team challenger | Attacks plans and designs before they're built | opus · high | Plan challenge |
+| **Anvil** | Builder (OpenAI Codex CLI, ADR 0012) | Well-specified stories from `HANDOFF.md`; no protected paths | owner-configured | — |
+| **Flint** | Builder + researcher (xAI Grok Build, ADR 0012) | Config/data, sourced research, docs from `HANDOFF.md`; no protected paths | owner-configured | — |
 
 ## Attribution
 
