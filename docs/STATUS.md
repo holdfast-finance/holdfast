@@ -5,7 +5,7 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 | Phase | Name | Status | Branch | Report |
 |---|---|---|---|---|
 | −1 | Repo foundation + Claude Code setup | PASS (2026-11-18) | `main` | this commit |
-| 0 | Scaffold | NOT STARTED | | |
+| 0 | Scaffold | IN PROGRESS (2026-11-19) | `phase/0-scaffold` | |
 | 1 | Auth, household, data model (+ RLS, per-person visibility) | NOT STARTED | | |
 | 2 | Bank connectors: Plaid sandbox + SimpleFIN + Sync Health | NOT STARTED | | |
 | 3 | Historical import (+ competitor exports) | NOT STARTED | | |
