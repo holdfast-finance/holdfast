@@ -30,6 +30,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "pip-audit>=2.7",
+    "hypothesis>=6.170.15",
     "import-linter>=2.17",
 ]
 
