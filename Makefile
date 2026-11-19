@@ -79,7 +79,7 @@ test: ## Backend pytest (needs `make up` for the db) + web vitest
 	else echo "skip backend: no backend/pyproject.toml"; fi
 	@if [ -f web/package.json ]; then cd web && pnpm test --run; else echo "skip web: no web/package.json"; fi
 
-lint: ## ruff + ruff format --check + mypy + import-linter, eslint + tsc
+lint: api-types-check ## ruff + mypy + import-linter, OpenAPI drift, eslint + tsc
 	@if [ -f backend/pyproject.toml ]; then cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy app; else echo "skip backend: no backend/pyproject.toml"; fi
 	@$(MAKE) --no-print-directory lint-imports
 	@if [ -f web/package.json ]; then cd web && pnpm lint && pnpm typecheck; else echo "skip web: no web/package.json"; fi
@@ -122,3 +122,18 @@ ports: env-check ## Assert no compose service publishes beyond the rules
 	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
 	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+
+.PHONY: api-types api-types-check
+# Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).
+# This target also diffs the full openapi-typescript output. No workflow edit: Harbor owns CI.
+api-types api-types-check: ## Generate web API types, or fail if schema.d.ts drifted
+	@tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
+	  (cd backend && uv run --locked python -m scripts.dump_openapi) > "$$tmp/schema.json"; \
+	  pnpm --dir web exec openapi-typescript "$$tmp/schema.json" -o "$$tmp/schema.d.ts"; \
+	  { printf '// holdfast-schema-sha256: %s\n' "$$(sha256sum "$$tmp/schema.json" | awk '{print $$1}')"; \
+	    cat "$$tmp/schema.d.ts"; } > "$$tmp/out.d.ts"; \
+	  if [ "$@" = api-types ]; then \
+	    cp "$$tmp/out.d.ts" web/src/api/schema.d.ts; \
+	  else \
+	    diff -u web/src/api/schema.d.ts "$$tmp/out.d.ts"; \
+	  fi
