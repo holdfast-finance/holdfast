@@ -13,6 +13,9 @@ from fastapi import APIRouter, Request
 
 from app.services.errors import ApiError
 
+# Discovery refuses to mount a TEST_ONLY module unless APP_ENV=test and E2E_HOOKS=true (ADR 0011).
+TEST_ONLY = True
+
 router = APIRouter(prefix="/test", tags=["test"], include_in_schema=False)
 
 
