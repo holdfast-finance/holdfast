@@ -20,6 +20,7 @@ Backlog (ROADMAP.md) ─► Sprint plan (Keel, per usage window)
 - **Unit of work:** one story = one branch `feat|fix|chore/<story-id>-<slug>` = one PR. S or M only; L must be split before it's scheduled.
 - **Phases are milestones**, not long-lived branches. `phase-<n>` is a tag on the green `main` commit after Sounding's acceptance run.
 - **Only Keel merges.** Builders never merge their own PR.
+- **Worktrees:** create them with `scripts/wt-new.sh` so the base is fresh; see `docs/process/WORKTREES.md`.
 
 ## 2. Merge gate (all required)
 
