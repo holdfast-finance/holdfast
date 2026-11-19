@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db_context import unscoped_session
 from app.models import AppUser, AuthSession
 from app.security.client_ip import IPAddress
 from app.security.tokens import new_token, token_hash
@@ -79,6 +80,12 @@ async def create(
     )
     await s.flush()
     return token
+
+
+async def resolve_token(factory: async_sessionmaker[AsyncSession], token: str) -> Principal | None:
+    """Resolve a session cookie in its own identity-table (unscoped) session."""
+    async with unscoped_session(factory) as s:
+        return await resolve(s, token)
 
 
 async def resolve(s: AsyncSession, token: str) -> Principal | None:

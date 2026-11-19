@@ -7,7 +7,6 @@ import uuid
 from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import Ctx, CurrentPrincipal, set_session_cookie
-from app.db_context import scoped_session
 from app.schemas.auth import HouseholdOut, InviteAcceptIn, InviteIn, InviteOut, SessionOut
 from app.schemas.household import (
     AuditPage,
@@ -80,5 +79,6 @@ async def audit_page(
     before: str | None = Query(default=None, max_length=128),
 ) -> AuditPage:
     require_owner(principal)
-    async with scoped_session(ctx.factory, principal.household_id, principal.person_id) as s:
-        return await audit.page(s, limit=limit, before=before)
+    return await audit.household_page(
+        ctx.factory, principal.household_id, principal.person_id, limit=limit, before=before
+    )
