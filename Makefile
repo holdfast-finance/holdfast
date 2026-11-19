@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test lint fmt migrate seed keys check health ports env-check
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint fmt migrate seed keys check health ports env-check
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -48,22 +48,32 @@ logs: ## Follow logs (make logs s=api for one service)
 ps: ## List running services
 	$(COMPOSE) ps
 
-# Host-side tests reach the dev stack's loopback-published db/redis: TEST_DATABASE_URL as the
-# runtime role (holdfast_app), TEST_MIGRATIONS_DATABASE_URL as the schema owner (holdfast_owner).
-# Passwords are read from .env without echoing them. Pre-set any TEST_* variable to override.
+# Host-side tests reach the dev stack's loopback-published db/redis, but never its data: they
+# use a separate `holdfast_test` database (the migration test downgrades to base) and Redis db 15
+# (API tests FLUSHDB). TEST_DATABASE_URL is the runtime role (holdfast_app),
+# TEST_MIGRATIONS_DATABASE_URL the schema owner (holdfast_owner). Passwords are read from .env
+# without echoing them. Pre-set any TEST_* variable to override (then no test db is created).
+TEST_DB := holdfast_test
+
+# Create holdfast_test once (idempotent) and apply the same role/grant script as the real db.
+test-db:
+	@$(COMPOSE) exec -T -e POSTGRES_DB=$(TEST_DB) db sh -c 'createdb -U "$$POSTGRES_USER" "$$POSTGRES_DB" 2>/dev/null; /docker-entrypoint-initdb.d/00-roles.sh >/dev/null'
 envval = grep -E '^$(1)=' .env | head -1 | cut -d= -f2-
 test: ## Backend pytest (needs `make up` for the db) + web vitest
 	@if [ -f backend/pyproject.toml ]; then \
 	  if [ -f .env ]; then \
+	    if [ -z "$${TEST_DATABASE_URL:-}$${TEST_MIGRATIONS_DATABASE_URL:-}" ]; then \
+	      $(MAKE) --no-print-directory test-db; \
+	    fi; \
 	    if [ -z "$${TEST_DATABASE_URL:-}" ]; then \
 	      app_pw=$$($(call envval,POSTGRES_APP_PASSWORD)); \
-	      export TEST_DATABASE_URL="postgresql+psycopg://holdfast_app:$${app_pw}@127.0.0.1:5432/holdfast"; \
+	      export TEST_DATABASE_URL="postgresql+psycopg://holdfast_app:$${app_pw}@127.0.0.1:5432/$(TEST_DB)"; \
 	    fi; \
 	    if [ -z "$${TEST_MIGRATIONS_DATABASE_URL:-}" ]; then \
 	      owner_pw=$$($(call envval,POSTGRES_OWNER_PASSWORD)); \
-	      export TEST_MIGRATIONS_DATABASE_URL="postgresql+psycopg://holdfast_owner:$${owner_pw}@127.0.0.1:5432/holdfast"; \
+	      export TEST_MIGRATIONS_DATABASE_URL="postgresql+psycopg://holdfast_owner:$${owner_pw}@127.0.0.1:5432/$(TEST_DB)"; \
 	    fi; \
-	    export TEST_REDIS_URL="$${TEST_REDIS_URL:-redis://127.0.0.1:56379/0}"; \
+	    export TEST_REDIS_URL="$${TEST_REDIS_URL:-redis://127.0.0.1:56379/15}"; \
 	  fi; \
 	  cd backend && uv run pytest -q; \
 	else echo "skip backend: no backend/pyproject.toml"; fi
