@@ -15,15 +15,10 @@ extends = ":workspace"
 glob_scan_max_depth = 5
 
 [permissions.holdfast.filesystem.":workspace_roots"]
+# Only paths that exist, or globs: bwrap can't mount a deny over a missing path (.aws broke startup).
 ".env" = "deny"
-".env.local" = "deny"
-".env.dev" = "deny"
-".env.prod*" = "deny"
-"**/.env" = "deny"
-"**/.env.local" = "deny"
 "data" = "deny"
-"secrets" = "deny"
-"exports" = "deny"
-".aws" = "deny"
+"**/.env" = "deny"
+"**/.env.*" = "deny"
 ".claude" = "read"
 "CLAUDE.md" = "read"
