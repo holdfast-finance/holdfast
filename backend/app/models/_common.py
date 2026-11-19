@@ -45,6 +45,8 @@ Quantity = Annotated[Decimal, mapped_column(Numeric(28, 10))]
 Price = Annotated[Decimal, mapped_column(Numeric(18, 8))]
 # Ratios such as confidence scores and alert thresholds (0.8000). Not money.
 Ratio = Annotated[Decimal, mapped_column(Numeric(5, 4))]
+# Percentage rates such as APR (24.9900 = 24.99%). Not money.
+Rate = Annotated[Decimal, mapped_column(Numeric(7, 4))]
 
 # --------------------------------------------------------------------------- enum values
 FILING_ROLES = ("primary", "spouse", "dependent")
@@ -69,6 +71,35 @@ TAX_SOURCE_TYPES = ("document", "transaction", "manual", "agent")
 CONVERSATION_KINDS = ("chat", "monthly_review", "year_end")
 MESSAGE_ROLES = ("system", "user", "assistant", "tool")
 FINDING_STATUSES = ("open", "accepted", "dismissed", "done")
+FINDING_SEVERITIES = ("info", "low", "medium", "high")
+BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected")
+LIABILITY_KINDS = ("credit", "student", "mortgage", "auto", "personal", "other")
+FILING_STATUSES = ("single", "mfj", "mfs", "hoh", "qss")
+DOCUMENT_PARSE_STATUSES = ("pending", "parsed", "needs_review", "failed")
+DOCUMENT_KINDS = (
+    "statement",
+    "w2",
+    "1099-int",
+    "1099-div",
+    "1099-b",
+    "1099-r",
+    "1099-nec",
+    "1099-misc",
+    "1099-g",
+    "1099-k",
+    "1099-sa",
+    "1098",
+    "1098-e",
+    "1098-t",
+    "5498",
+    "5498-sa",
+    "1095-a",
+    "k-1",
+    "credit_report",
+    "receipt",
+    "export",
+    "other",
+)
 
 
 def check_in(column: str, values: tuple[str, ...], *, nullable: bool = False) -> CheckConstraint:
@@ -89,9 +120,24 @@ def parent_key() -> UniqueConstraint:
 
 
 def child_fk(column: str, parent: str, *, ondelete: str = "CASCADE") -> ForeignKeyConstraint:
-    """Composite FK ``(column, household_id) -> parent(id, household_id)``."""
+    """Composite FK ``(column, household_id) -> parent(id, household_id)``.
+
+    ``ondelete="SET NULL"`` becomes ``SET NULL (column)`` (Postgres 15+): only the reference is
+    cleared, never the child's ``household_id``.
+    """
+    action = f"SET NULL ({column})" if ondelete == "SET NULL" else ondelete
     return ForeignKeyConstraint(
         [column, "household_id"],
         [f"{parent}.id", f"{parent}.household_id"],
-        ondelete=ondelete,
+        ondelete=action,
+    )
+
+
+def check_masked(column: str) -> CheckConstraint:
+    """Reject anything that looks like a full account number: no run of 5+ digits.
+
+    Masks like ``0000`` or ``XXXX-1234`` pass. Named ``ck_<table>_<column>_masked``.
+    """
+    return CheckConstraint(
+        f"{column} IS NULL OR {column} !~ '[0-9]{{5,}}'", name=f"{column}_masked"
     )

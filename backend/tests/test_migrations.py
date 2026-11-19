@@ -32,9 +32,9 @@ def _extensions(database_url: str) -> set[str]:
         engine.dispose()
 
 
-def test_single_head_with_baseline() -> None:
+def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0001_baseline"]
+    assert script.get_heads() == ["0002_core_schema"]
 
 
 @pytest.mark.services
