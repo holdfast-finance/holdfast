@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,31 @@ def write(repo: Path, rel: str, text: str) -> None:
     path = repo / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def workflow_heredocs(text: str) -> list[str]:
+    """Python bodies of ``python3 -I - <<'PY'`` steps in ci.yml."""
+    marker = "python3 -I - <<'PY'"
+    chunks: list[str] = []
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx == -1:
+            return chunks
+        body_start = text.find("\n", idx) + 1
+        end = text.find("\n          PY\n", body_start)
+        if end == -1:
+            raise AssertionError("unclosed heredoc")
+        lines: list[str] = []
+        for line in text[body_start:end].split("\n"):
+            if line == "":
+                lines.append("")
+            else:
+                if not line.startswith("          "):
+                    raise AssertionError(line)
+                lines.append(line[10:])
+        chunks.append("\n".join(lines) + "\n")
+        start = end + 1
 
 
 class PlanTests(unittest.TestCase):
@@ -189,7 +216,14 @@ class PlanTests(unittest.TestCase):
 
     def test_ci_jobs_are_checks_backend_web(self) -> None:
         text = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertLess(text.index("pyproject.toml"), text.index("scripts/ci_plan.py"))
+        self.assertLess(text.index("pyproject.toml"), text.index("python3 -I - <<'PY'"))
+        self.assertNotIn("python3 scripts/ci_plan.py", text)
+        self.assertNotIn("python3 scripts/ci_required_eval.py", text)
+        self.assertNotIn("actions/checkout", text.split("\n  ci-required:", 1)[1])
+        heredocs = workflow_heredocs(text)
+        self.assertEqual(len(heredocs), 2)
+        self.assertEqual(heredocs[0], (ROOT / "scripts" / "ci_plan.py").read_text())
+        self.assertEqual(heredocs[1], (ROOT / "scripts" / "ci_required_eval.py").read_text())
         self.assertIn("needs: [checks, backend, web]", text)
         ids: list[str] = []
         in_jobs = False
@@ -202,6 +236,106 @@ class PlanTests(unittest.TestCase):
             if in_jobs and line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
                 ids.append(line.strip()[:-1])
         self.assertEqual(ids, ["checks", "backend", "web", "ci-required"])
+
+    def test_shadow_modules_do_not_hijack_trusted_gate(self) -> None:
+        """scripts/json.py and scripts/subprocess.py must not decide the gate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-q", "-b", "main")
+            write(repo, "README.md", "docs\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+            write(repo, "backend/app.py", "x = 1\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "backend")
+            head = git(repo, "rev-parse", "HEAD")
+            write(
+                repo, "scripts/subprocess.py",
+                "class SubprocessError(Exception):\n    pass\n"
+                "class CompletedProcess:\n"
+                "    def __init__(self):\n"
+                "        self.returncode = 0\n"
+                "        self.stdout = 'M\\tREADME.md\\n'\n"
+                "        self.stderr = ''\n"
+                "def run(*_a, **_k):\n"
+                "    return CompletedProcess()\n",
+            )
+            write(
+                repo, "scripts/json.py",
+                "class JSONDecodeError(Exception):\n    pass\n"
+                "def loads(*_a, **_k):\n"
+                "    return {'checks': {'result': 'success', 'outputs': {\n"
+                "        'backend': 'false', 'web': 'false',\n"
+                "        'backend_reason': 'paths', 'web_reason': 'paths'}},\n"
+                "        'backend': {'result': 'skipped'}, 'web': {'result': 'skipped'}}\n"
+                "def dumps(*_a, **_k):\n"
+                "    return '{}'\n",
+            )
+            shutil.copy(ROOT / "scripts" / "ci_plan.py", repo / "scripts" / "ci_plan.py")
+            shutil.copy(ROOT / "scripts" / "ci_required_eval.py", repo / "scripts" / "ci_required_eval.py")
+            plan_env = {
+                "PATH": os.environ["PATH"],
+                "HOME": os.environ.get("HOME", ""),
+                "EVENT_NAME": "pull_request",
+                "REF_NAME": "refs/heads/pr",
+                "BEFORE": "",
+                "AFTER": head,
+                "PR_BASE": base,
+                "PR_HEAD": head,
+                "REPO": "example/holdfast",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            heredocs = workflow_heredocs((ROOT / ".github/workflows/ci.yml").read_text())
+            poisoned = subprocess.run(
+                ["python3", "scripts/ci_plan.py"], cwd=repo, env=plan_env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertIn("backend=false", poisoned.stdout, poisoned.stderr)
+            control = subprocess.run(
+                ["python3", "-I", "scripts/ci_plan.py"], cwd=repo, env=plan_env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.assertIn("backend=true", control.stdout)
+            trusted = subprocess.run(
+                ["python3", "-I", "-"], cwd=repo, env=plan_env, input=heredocs[0],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(trusted.returncode, 0, trusted.stderr)
+            self.assertIn("backend=true", trusted.stdout)
+
+            failed = {
+                "checks": {"result": "success", "outputs": {
+                    "backend": "true", "web": "false",
+                    "backend_reason": "run", "web_reason": "paths",
+                }},
+                "backend": {"result": "failure"},
+                "web": {"result": "skipped"},
+            }
+            eval_env = {
+                "PATH": os.environ["PATH"],
+                "HOME": os.environ.get("HOME", ""),
+                "RESULTS": json.dumps(failed),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            poisoned_eval = subprocess.run(
+                ["python3", "scripts/ci_required_eval.py"], cwd=repo, env=eval_env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(poisoned_eval.returncode, 0, poisoned_eval.stderr)
+            control_eval = subprocess.run(
+                ["python3", "-I", "scripts/ci_required_eval.py"], cwd=repo, env=eval_env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(control_eval.returncode, 0)
+            self.assertIn("failure", control_eval.stdout + control_eval.stderr)
+            trusted_eval = subprocess.run(
+                ["python3", "-I", "-"], cwd=repo, env=eval_env, input=heredocs[1],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(trusted_eval.returncode, 0)
+            self.assertIn("failure", trusted_eval.stdout + trusted_eval.stderr)
 
 
 if __name__ == "__main__":

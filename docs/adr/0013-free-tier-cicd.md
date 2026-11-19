@@ -41,10 +41,12 @@
    - e2e (F12) runs on merges to `main` that touch `web/`, `backend/` or `infra/`, and never on a cron.
    - Track it: `make ci-minutes` totals billed minutes for the month from the runs API
      (`gh api repos/{repo}/actions/runs/{id}/timing`). Keel logs it in each standup.
-4. **When the quota runs out**, the gate moves to Keel's machine as `make ci-local`. It runs the same
-   steps (`make lint`, `make test`, `make lint-imports`, Alembic head check, gitleaks on the PR range,
-   compose config, `check-protected-paths.sh` against the PR diff). Keel posts the output as a PR comment
-   naming the head SHA, and merges only on a clean result. SDLC §2 already allows this.
+4. **When the quota runs out**, the gate moves to Keel's machine as `make ci-local`. The trusted
+   script runs the same checks as CI (ruff, mypy, pytest, web lint/typecheck/test, lint-imports,
+   one Alembic head, gitleaks on the PR range, compose config, `check-protected-paths.sh` on the
+   PR diff). It does not run the pull request's Makefile, and it does not read or symlink the
+   operator `.env`; throwaway keys are written into the temp worktree only. Keel posts the output
+   as a PR comment naming the head SHA, and merges only on a clean result. SDLC §2 already allows this.
 5. **Later options (owner decisions, no cost):**
    - **Making the repo public** removes both limits: rulesets become available and Actions minutes are
      unlimited for public repos. It's an AGPL project going open source anyway. The cost is publishing

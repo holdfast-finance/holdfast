@@ -77,6 +77,20 @@ def _merged() -> dict:
     }
 
 
+def _job(name: str, conclusion: str, started: str, workflow: str | None = None) -> dict:
+    if workflow is None:
+        workflow = (
+            ".github/workflows/ci.yml" if name == "ci-required"
+            else ".github/workflows/review-gate.yml"
+        )
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "started_at": started,
+        "workflow": workflow,
+    }
+
+
 class MainGuardTests(unittest.TestCase):
     def test_commit_with_no_pr_opens_issue(self) -> None:
         gh = FakeGH(_ahead([AFTER]), pulls={AFTER: []}, runs={})
@@ -91,9 +105,9 @@ class MainGuardTests(unittest.TestCase):
     def test_red_ci_required_opens_issue(self) -> None:
         runs = {
             HEAD: [
-                {"name": "ci-required", "conclusion": "success", "started_at": "2026-11-19T00:00:00Z"},
-                {"name": "ci-required", "conclusion": "failure", "started_at": "2026-11-19T01:00:00Z"},
-                {"name": "review-gate", "conclusion": "success", "started_at": "2026-11-19T01:00:00Z"},
+                _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+                _job("ci-required", "failure", "2026-11-19T01:00:00Z"),
+                _job("review-gate", "success", "2026-11-19T01:00:00Z"),
             ]
         }
         gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
@@ -126,9 +140,9 @@ class MainGuardTests(unittest.TestCase):
     def test_clean_push_passes(self) -> None:
         runs = {
             HEAD: [
-                {"name": "ci-required", "conclusion": "failure", "started_at": "2026-11-19T00:00:00Z"},
-                {"name": "ci-required", "conclusion": "success", "started_at": "2026-11-19T02:00:00Z"},
-                {"name": "review-gate", "conclusion": "success", "started_at": "2026-11-19T02:00:00Z"},
+                _job("ci-required", "failure", "2026-11-19T00:00:00Z"),
+                _job("ci-required", "success", "2026-11-19T02:00:00Z"),
+                _job("review-gate", "success", "2026-11-19T02:00:00Z"),
             ]
         }
         gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
@@ -136,6 +150,70 @@ class MainGuardTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(gh.issues, [])
         self.assertIn("ok", out)
+
+    def test_newer_same_name_from_another_workflow_is_ignored(self) -> None:
+        runs = {
+            HEAD: [
+                _job("ci-required", "failure", "2026-11-19T00:00:00Z"),
+                _job(
+                    "ci-required", "success", "2026-11-19T03:00:00Z",
+                    ".github/workflows/fork-ci.yml",
+                ),
+                _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+                _job(
+                    "review-gate", "failure", "2026-11-19T04:00:00Z",
+                    ".github/workflows/evil.yml",
+                ),
+            ]
+        }
+        chosen = main_guard.latest_run(runs[HEAD], "ci-required")
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["conclusion"], "failure")
+        self.assertEqual(chosen["workflow"], ".github/workflows/ci.yml")
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        body = gh.issues[0][1]
+        self.assertIn("ci-required", body)
+        self.assertIn("failure", body)
+        self.assertNotIn("fork-ci.yml", body)
+
+    def test_check_runs_jq_keeps_workflow_path(self) -> None:
+        seen: list[list[str]] = []
+
+        def runner(cmd: list[str], input_text: str | None = None) -> tuple[int, str, str]:
+            seen.append(cmd)
+            joined = " ".join(cmd)
+            if "actions/runs?" in joined:
+                return 0, (
+                    '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
+                    '"created_at": "2026-11-19T00:00:00Z", "name": "CI", "conclusion": "failure"}\n'
+                    '{"id": 10, "path": ".github/workflows/fork.yml", "event": "pull_request", '
+                    '"created_at": "2026-11-19T03:00:00Z", "name": "Fork", "conclusion": "success"}\n'
+                ), ""
+            if "/runs/9/jobs" in joined:
+                return 0, (
+                    '{"name": "ci-required", "conclusion": "failure", '
+                    '"started_at": "2026-11-19T00:00:00Z", "completed_at": "2026-11-19T00:01:00Z"}\n'
+                ), ""
+            if "/runs/10/jobs" in joined:
+                return 0, (
+                    '{"name": "ci-required", "conclusion": "success", '
+                    '"started_at": "2026-11-19T03:00:00Z", "completed_at": "2026-11-19T03:01:00Z"}\n'
+                ), ""
+            return 1, "", "unexpected"
+
+        rows = main_guard.GhApi(runner).check_runs("o/r", "abc")
+        jq = " ".join(part for cmd in seen for part in cmd if part.startswith("."))
+        self.assertIn("path", jq)
+        self.assertIn("name", jq)
+        self.assertNotIn("rulesets", jq)
+        chosen = main_guard.latest_run(rows, "ci-required")
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["conclusion"], "failure")
+        self.assertEqual(chosen["workflow"], ".github/workflows/ci.yml")
 
     def test_pulls_command_does_not_call_rulesets(self) -> None:
         seen: list[list[str]] = []

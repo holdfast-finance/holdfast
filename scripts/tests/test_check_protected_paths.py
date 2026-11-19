@@ -68,7 +68,9 @@ class GateCase(unittest.TestCase):
                     ".gitleaksignore", "backend/pyproject.toml", "backend/tests/conftest.py",
                     "conftest.py", "docker-compose.yml", "scripts/check-protected-paths.sh",
                     "scripts/main_guard.py", "scripts/ci_plan.py", "scripts/ci_local.py",
-                    "scripts/ci_minutes.py", "scripts/ci_required_eval.py"]:
+                    "scripts/ci_minutes.py", "scripts/ci_required_eval.py",
+                    "scripts/check-compose-ports.py", "scripts/gen-keys.py",
+                    "infra/docker-compose.prod.yml", "infra/docker-compose.yml"]:
             with self.subTest(rel=rel):
                 self.blocked(lambda r, rel=rel: write(r, rel, "x\n"), f"protected path touched: {rel}")
 

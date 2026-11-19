@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Run the merge gate locally against a PR head (ADR 0013).
 
-Fetches ``pull/<n>/head`` into a temporary worktree, symlinks the main
-checkout's ``.env`` the way ``wt-new.sh`` does, and never reads or prints
-that file. Compose config uses a throwaway env and project name
-``holdfast-ci-local`` so it does not attach to the dev stack.
+Fetches ``pull/<n>/head`` into a temporary worktree and runs the same
+commands CI runs. Those commands are fixed in this file: the pull
+request's Makefile is never executed. Throwaway keys are written into
+the worktree with the trusted ``gen-keys.py`` before any pull-request
+code runs. The operator ``.env`` is not read and is not symlinked.
+Compose uses project name ``holdfast-ci-local`` so it does not attach
+to the dev stack.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ GITLEAKS_IMAGE = (
     "c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
 )
 COMPOSE_PROJECT = "holdfast-ci-local"
-ASIDE = ".env.ci-local-aside"
 
 Runner = Callable[[list[str], Path, Mapping[str, str] | None], "CmdResult"]
 
@@ -88,29 +90,41 @@ def build_summary(head: str, base: str, rows: list[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def link_env(src: Path | None, dest: Path) -> None:
-    """Symlink ``src`` to ``dest``. Does not open either file."""
-    if dest.exists() or dest.is_symlink():
-        return
-    if src is None:
-        return
-    dest.symlink_to(src)
+def install_throwaway_env(worktree: Path) -> bool:
+    """Write a mode-0600 ``.env`` with the trusted key generator.
 
-
-def move_env_aside(worktree: Path) -> bool:
-    env_path = worktree / ".env"
-    if not (env_path.is_symlink() or env_path.exists()):
+    Does not follow a symlink. A symlinked ``.env.example`` is refused
+    so this never opens the operator env. Runs before any pull-request
+    command.
+    """
+    example = worktree / ".env.example"
+    target = worktree / ".env"
+    if example.is_symlink() or not example.is_file():
+        print("ci-local: .env.example missing or a symlink; refusing", file=sys.stderr)
         return False
-    os.rename(env_path, worktree / ASIDE)
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.exists():
+        print("ci-local: .env is not a file; refusing", file=sys.stderr)
+        return False
+    script = Path(__file__).resolve().parent / "gen-keys.py"
+    result = default_run(
+        [
+            "python3", "-I", str(script),
+            "--write", "--force",
+            "--example", str(example),
+            "--output", str(target),
+        ],
+        worktree,
+        None,
+    )
+    if result.returncode != 0 or target.is_symlink() or not target.is_file():
+        print("ci-local: throwaway .env was not created", file=sys.stderr)
+        return False
+    if (target.stat().st_mode & 0o777) != 0o600:
+        print("ci-local: throwaway .env mode is not 0600", file=sys.stderr)
+        return False
     return True
-
-
-def restore_env(worktree: Path, stashed: bool) -> None:
-    env_path = worktree / ".env"
-    if env_path.is_symlink() or env_path.exists():
-        env_path.unlink()
-    if stashed:
-        os.rename(worktree / ASIDE, env_path)
 
 
 def git_common(cwd: Path) -> Path:
@@ -137,41 +151,45 @@ def run_steps(
     script: Path,
     environ: Mapping[str, str] | None = None,
 ) -> list[tuple[str, str]]:
-    base_env = dict(environ or os.environ)
+    """Fixed CI commands. Never invokes ``make`` or a file from the pull request's scripts."""
+    base_env = dict(environ) if environ is not None else dict(os.environ)
     rows: list[tuple[str, str]] = []
+    backend = worktree / "backend"
+    web = worktree / "web"
 
     def record(name: str, ok: bool) -> None:
         rows.append((name, "pass" if ok else "fail"))
 
-    record("lint", _passed(run(["make", "lint"], worktree, None)))
-    record("test-locked", _passed(run(["make", "test-locked"], worktree, None)))
-    record("lint-imports", _passed(run(["make", "lint-imports"], worktree, None)))
-    alembic = run(["uv", "run", "alembic", "heads"], worktree / "backend", None)
+    def passed(cmd: list[str], cwd: Path, env: Mapping[str, str] | None = None) -> bool:
+        return _passed(run(cmd, cwd, env))
+
+    ruff_ok = passed(["uv", "run", "ruff", "check", "."], backend)
+    ruff_ok = ruff_ok and passed(["uv", "run", "ruff", "format", "--check", "."], backend)
+    record("ruff", ruff_ok)
+    record("mypy", passed(["uv", "run", "mypy", "app"], backend))
+    record("pytest", passed(["uv", "run", "pytest", "-q"], backend))
+    record("web-lint", passed(["pnpm", "lint"], web))
+    record("web-typecheck", passed(["pnpm", "typecheck"], web))
+    record("web-test", passed(["pnpm", "test", "--run"], web))
+    record("lint-imports", passed(["uv", "run", "lint-imports"], backend))
+    alembic = run(["uv", "run", "alembic", "heads"], backend, None)
     record("alembic-head", _passed(alembic) and one_head(alembic.stdout))
     leaks = gitleaks_cmd(worktree, base, head, git_common(worktree))
-    record("gitleaks", _passed(run(leaks, worktree, None)))
+    record("gitleaks", passed(leaks, worktree))
 
-    stashed = move_env_aside(worktree)
     compose_ok = True
-    try:
-        keys = run([sys.executable, "scripts/gen-keys.py", "--write"], worktree, None)
-        if not _passed(keys):
+    env = compose_env(base_env)
+    for cmd in compose_cmds():
+        if not passed(cmd, worktree, env):
             compose_ok = False
-        else:
-            env = compose_env(base_env)
-            for cmd in compose_cmds():
-                if not _passed(run(cmd, worktree, env)):
-                    compose_ok = False
-                    break
-    finally:
-        restore_env(worktree, stashed)
+            break
     record("compose-config", compose_ok)
 
     gate_env = dict(base_env)
     gate_env["BASE_SHA"] = base
     gate_env["HEAD_SHA"] = head
     gate_env["LABELS"] = labels
-    record("protected-paths", _passed(run(["bash", str(script)], worktree, gate_env)))
+    record("protected-paths", passed(["bash", str(script)], worktree, gate_env))
     return rows
 
 
@@ -189,21 +207,6 @@ def default_run(cmd: list[str], cwd: Path, env: Mapping[str, str] | None) -> Cmd
     if proc.stderr:
         sys.stderr.write(proc.stderr)
     return CmdResult(proc.returncode, proc.stdout, proc.stderr)
-
-
-def main_checkout_env(start: Path) -> Path | None:
-    proc = subprocess.run(
-        ["git", "-C", str(start), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    candidate = Path(proc.stdout.strip()).parent / ".env"
-    if candidate.is_symlink() or candidate.exists():
-        return candidate
-    return None
 
 
 def resolve_pr(pr: str, repo: str) -> tuple[str, str]:
@@ -273,13 +276,14 @@ def repo_slug(start: Path) -> str:
     return proc.stdout.strip()
 
 
-def execute(pr: str, repo_root: Path | None = None) -> int:
+def execute(pr: str, repo_root: Path | None = None, run: Runner | None = None) -> int:
     root = repo_root or Path.cwd()
     slug = repo_slug(root)
     base, head = resolve_pr(pr, slug)
     fetch_pr(root, pr, base, head)
     labels = load_labels(slug, pr)
     script = Path(__file__).resolve().parent / "check-protected-paths.sh"
+    runner = run or default_run
     tmp = Path(tempfile.mkdtemp(prefix="holdfast-ci-local-"))
     added = subprocess.run(
         ["git", "-C", str(root), "worktree", "add", "--detach", str(tmp), head],
@@ -291,10 +295,12 @@ def execute(pr: str, repo_root: Path | None = None) -> int:
         print(added.stderr, file=sys.stderr)
         raise SystemExit("ci-local: could not add a worktree")
     try:
-        link_env(main_checkout_env(root), tmp / ".env")
-        rows = run_steps(
-            worktree=tmp, base=base, head=head, labels=labels, run=default_run, script=script,
-        )
+        if not install_throwaway_env(tmp):
+            rows = [("throwaway-env", "fail")]
+        else:
+            rows = run_steps(
+                worktree=tmp, base=base, head=head, labels=labels, run=runner, script=script,
+            )
     finally:
         subprocess.run(
             ["git", "-C", str(root), "worktree", "remove", "--force", str(tmp)],

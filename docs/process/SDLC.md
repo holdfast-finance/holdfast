@@ -38,7 +38,7 @@ Protected-path sign-off is a separate Bulwark verdict that names the head SHA (`
 
 `main` is not ruleset-locked. The repo is private on GitHub Free, which has no rulesets or branch protection (ADR 0013). Keel is the only merger and uses `gh pr merge --squash --match-head-commit <sha>` after `ci-required` and `review-gate` are green on that SHA. The `main-guard` workflow detects anything else, including a force-push, fails, and opens a `main-guard` issue. It does not revert. `scripts/protect-main.sh` stays in the repo unused until the repo is public or a plan is paid for.
 
-Actions for this private repo are capped at 2,000 minutes a month. `make ci-minutes` and `./scripts/dev.ps1 ci-minutes` print the UTC month's billed total as `used/2000`. When the quota is exhausted, Keel runs `make ci-local PR=<n>`, pastes the summary (it names the head SHA), and merges only if that run is clean (ADR 0013).
+Actions for this private repo are capped at 2,000 minutes a month. `make ci-minutes` and `./scripts/dev.ps1 ci-minutes` print the UTC month's billed total as `used/2000`. When the quota is exhausted, Keel runs `make ci-local PR=<n>` (trusted commands and a throwaway `.env` in a temp worktree; not the PR Makefile and not the operator `.env`), pastes the summary (it names the head SHA), and merges only if that run is clean (ADR 0013).
 
 ## 3. Autonomy guardrails
 

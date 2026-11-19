@@ -29,8 +29,10 @@ jobs:
           """Detect a bad push to main (ADR 0013). Read the GitHub API only.
 
           A push is acceptable when every new commit is the merge commit of exactly
-          one merged PR and that PR's head has green ``ci-required`` and
-          ``review-gate`` check runs. A non-ancestor ``before`` (force-push) fails.
+          one merged PR and that PR's head has green ``ci-required`` (from
+          ``.github/workflows/ci.yml``) and ``review-gate`` (from
+          ``.github/workflows/review-gate.yml``) runs. A later same-named job from
+          any other workflow is ignored. A non-ancestor ``before`` (force-push) fails.
           On failure the caller opens a ``main-guard`` issue. This module does not
           change git history and does not run code from the pushed commits.
           """
@@ -44,6 +46,11 @@ jobs:
           from typing import Any, Callable, Protocol
 
           CHECK_NAMES = ("ci-required", "review-gate")
+          # Job name is not enough: a fork pull_request workflow can publish the same name.
+          CHECK_WORKFLOWS = {
+              "ci-required": ".github/workflows/ci.yml",
+              "review-gate": ".github/workflows/review-gate.yml",
+          }
           LABEL = "main-guard"
           Runner = Callable[..., tuple[int, str, str]]
 
@@ -128,14 +135,39 @@ jobs:
                   )
 
               def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
-                  path = f"repos/{repo}/commits/{sha}/check-runs?per_page=100"
-                  return self._lines(
+                  """Jobs for ``sha``, each tagged with its workflow file path.
+
+                  The path comes from the workflow run, not the job name. ``latest_run``
+                  then keeps only ``ci.yml`` and ``review-gate.yml``.
+                  """
+                  runs_path = f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100"
+                  workflow_runs = self._lines(
                       [
-                          "gh", "api", "--paginate", path,
+                          "gh", "api", "--paginate", runs_path,
                           "--jq",
-                          ".check_runs[] | {name, conclusion, started_at, completed_at}",
+                          ".workflow_runs[] | {id, path, event, created_at, name, conclusion}",
                       ]
                   )
+                  rows: list[dict[str, Any]] = []
+                  for run in workflow_runs:
+                      run_id = run.get("id")
+                      path = run.get("path")
+                      if isinstance(run_id, str) and run_id.isdigit():
+                          run_id = int(run_id)
+                      if not isinstance(run_id, int) or not isinstance(path, str) or not path:
+                          continue
+                      jobs_path = f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
+                      jobs = self._lines(
+                          [
+                              "gh", "api", "--paginate", jobs_path,
+                              "--jq",
+                              ".jobs[] | {name, conclusion, started_at, completed_at}",
+                          ]
+                      )
+                      for job in jobs:
+                          job["workflow"] = path
+                          rows.append(job)
+                  return rows
 
               def ensure_label(self, repo: str) -> None:
                   code, _out, _err = self._runner(["gh", "api", f"repos/{repo}/labels/{LABEL}"])
@@ -199,8 +231,30 @@ jobs:
               return f"force-push: compare status {status} (before is not an ancestor of after)"
 
 
+          def workflow_path(run: dict[str, Any]) -> str:
+              """Workflow file from the run. ``workflow`` is what we store; ``path`` is the API field."""
+              raw = run.get("workflow")
+              if not isinstance(raw, str) or not raw.strip():
+                  raw = run.get("path")
+              if not isinstance(raw, str):
+                  return ""
+              text = raw.strip().replace("\\", "/")
+              if text.startswith("./"):
+                  text = text[2:]
+              return text
+
+
+          def workflow_matches(name: str, run: dict[str, Any]) -> bool:
+              wanted = CHECK_WORKFLOWS.get(name)
+              if wanted is None:
+                  return False
+              path = workflow_path(run)
+              return path == wanted or path.endswith("/" + wanted)
+
+
           def latest_run(runs: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-              matching = [run for run in runs if run.get("name") == name]
+              """Latest run of this job from its own workflow file, not the latest same-named job."""
+              matching = [run for run in runs if run.get("name") == name and workflow_matches(name, run)]
               if not matching:
                   return None
               return max(matching, key=lambda run: str(run.get("started_at") or run.get("completed_at") or ""))
