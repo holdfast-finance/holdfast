@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
 from redis.asyncio import Redis
 
+import app.api as api_pkg
 from app import __version__
-from app.api import errors, routes_auth, routes_health, routes_household, routes_setup
+from app.api import errors
 from app.config import Settings, get_settings
 from app.db import CONNECT_TIMEOUT_SECONDS, create_engine, create_session_factory
 from app.logging import configure_logging, get_logger
@@ -23,6 +26,10 @@ from app.security.csrf import CSRFMiddleware
 from app.services.setup import SETUP_TTL_SECONDS, issue_setup_token, setup_state
 
 API_PREFIX = "/api"
+ROUTE_MODULE_PREFIX = "routes_"
+# Route modules that exist only for automated e2e stacks. They are skipped *before import* unless
+# e2e_hooks_enabled(), so their code never loads in dev or prod.
+TEST_ONLY_ROUTE_MODULES = frozenset({"routes_testing"})
 SETUP_RETRY_SECONDS = 5.0
 
 log = get_logger(__name__)
@@ -31,6 +38,32 @@ log = get_logger(__name__)
 def e2e_hooks_enabled(settings: Settings) -> bool:
     """``/api/test/*`` needs both APP_ENV=test and E2E_HOOKS=true (never in dev or prod)."""
     return settings.app_env == "test" and settings.e2e_hooks
+
+
+def discover_route_modules(settings: Settings) -> list[str]:
+    """Names of ``app/api/routes_*.py`` modules to mount, sorted for a stable OpenAPI order.
+
+    A new router is a new module exposing ``router``; main.py is never edited (ADR 0011).
+    """
+    names = sorted(
+        info.name
+        for info in pkgutil.iter_modules(api_pkg.__path__)
+        if info.name.startswith(ROUTE_MODULE_PREFIX) and not info.ispkg
+    )
+    if not e2e_hooks_enabled(settings):
+        names = [n for n in names if n not in TEST_ONLY_ROUTE_MODULES]
+    return names
+
+
+def build_api_router(settings: Settings) -> APIRouter:
+    api = APIRouter(prefix=API_PREFIX)
+    for name in discover_route_modules(settings):
+        module = importlib.import_module(f"{api_pkg.__name__}.{name}")
+        router = getattr(module, "router", None)
+        if not isinstance(router, APIRouter):
+            raise RuntimeError(f"app.api.{name} must expose `router: APIRouter`")
+        api.include_router(router)
+    return api
 
 
 def create_redis(settings: Settings) -> Redis:
@@ -120,14 +153,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Added last = outermost: oversized bodies are refused before anything else reads them.
     app.add_middleware(BodySizeLimitMiddleware, prefix=API_PREFIX)
 
-    api = APIRouter(prefix=API_PREFIX)
-    api.include_router(routes_health.router)
-    api.include_router(routes_setup.router)
-    api.include_router(routes_auth.router)
-    api.include_router(routes_household.router)
-    if e2e_hooks_enabled(settings):
-        from app.api import routes_testing
-
-        api.include_router(routes_testing.router)
-    app.include_router(api)
+    app.include_router(build_api_router(settings))
     return app
