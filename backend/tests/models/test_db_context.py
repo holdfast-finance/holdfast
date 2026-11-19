@@ -103,7 +103,7 @@ async def test_atomic_first_run_setup(
         person = Person(household_id=hid, display_name="Alex Example", filing_role="primary")
         s.add(person)
         await s.flush()
-        s.add(AppUser(person_id=person.id, email=email, role="owner"))
+        s.add(AppUser(household_id=hid, person_id=person.id, email=email, role="owner"))
         s.add(AuditLog(household_id=hid, action="setup.complete", detail={"step": "household"}))
     async with unscoped_session(factory) as s:
         user = (await s.execute(select(AppUser).where(AppUser.email == email))).scalar_one()

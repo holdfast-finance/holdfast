@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from ipaddress import IPv4Address, IPv6Address
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, ForeignKeyConstraint, text
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,15 +19,29 @@ from app.models._common import USER_ROLES, UUIDPK, CreatedAt, check_in
 
 
 class AppUser(Base):
-    """A login. ``email`` is stored lower-cased (CHECK) so the plain UNIQUE is case-insensitive."""
+    """A login. ``email`` is stored lower-cased (CHECK) so the plain UNIQUE is case-insensitive.
+
+    ``household_id`` (migration 0003) is how login finds the tenant: ``person`` has RLS, so an
+    unscoped session can't read ``person.household_id``. The composite FK keeps it equal to the
+    person's household whenever ``person_id`` is set.
+    """
 
     __tablename__ = "app_user"
     __table_args__ = (
         check_in("role", USER_ROLES),
         CheckConstraint("email = lower(email)", name="email_lowercase"),
+        ForeignKeyConstraint(
+            ["person_id", "household_id"],
+            ["person.id", "person.household_id"],
+            name="fk_app_user_person_household",
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[UUIDPK]
+    household_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("household.id", ondelete="CASCADE"), index=True
+    )
     person_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("person.id", ondelete="CASCADE"), unique=True
     )
