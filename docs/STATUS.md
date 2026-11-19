@@ -5,8 +5,8 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 | Phase | Name | Status | Branch | Report |
 |---|---|---|---|---|
 | −1 | Repo foundation + Claude Code setup | PASS (2026-11-18) | `main` | this commit |
-| 0 | Scaffold | PASS-WITH-BLOCKED (2026-11-19) | `phase/0-scaffold` | [PHASE-0](phases/PHASE-0.md) |
-| 1 | Auth, household, data model (+ RLS, per-person visibility) | NOT STARTED | | |
+| 0 | Scaffold | PASS-WITH-BLOCKED (2026-11-19), merged `phase-0` | `phase/0-scaffold` | [PHASE-0](phases/PHASE-0.md) |
+| 1 | Auth, household, data model (+ RLS, per-person visibility) | PASS (2026-11-19), merged `phase-1` | `phase/1-auth-data-model` | [PHASE-1](phases/PHASE-1.md) |
 | 2 | Bank connectors: Plaid sandbox + SimpleFIN + Sync Health | NOT STARTED | | |
 | 3 | Historical import (+ competitor exports) | NOT STARTED | | |
 | 4 | Categorization, transfers, recurring | NOT STARTED | | |
@@ -20,6 +20,15 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 | 10c | Bitcoin self-custody wallet | NOT STARTED | | |
 
 Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
+
+## Resume here (checkpoint 2026-11-19)
+
+- **Phase 1 is done:** PASS, merged to `main` and tagged `phase-1`. The report is `docs/phases/PHASE-1.md`. The next phase waits for the owner's go.
+- **Before Phase 2 starts:** brand-theme plumbing (below), and security lows 1–2 from the Phase 1 report (argon2 queue holding a DB connection; confirm real client IPs reach Caddy).
+- **Queued after Phase 1 (owner decision 2026-11-18, ADR 0009):** two brands. Holo for Holdfast Cloud + mainstream marketing, Direction 01 for self-host. First task after Phase 1: brand-theme plumbing (`data-brand`, Holo tokens/fonts, AA test for both themes). The Cloud marketing site comes when the hosted tier is scheduled.
+- **Carry into Phase 2 (money review):** dedupe Plaid against imported rows by `(account_id, posted_date, amount)` (Plaid wins); the import fingerprint hash includes a same-day ordinal; handle pending→posted via `transaction.pending_external_id`; save `tx_cursor` only after its batch commits; upsert on `(account_id, external_id)` and handle `removed`; parse Plaid JSON with `parse_float=Decimal`; negate Plaid signs once in `integrations/plaid/`, with a sign test per product; API amounts are strings, with an OpenAPI test; never sum across currencies; splits are written through one domain service; transfer pairing is service-enforced (2 legs, opposite signs, different accounts); metrics use `COALESCE(splits, parent)` and exclude `is_transfer`.
+- **Local env:** `.env` exists (includes Plaid sandbox/prod keys, `PLAID_ENV=sandbox`; never print or commit it). The dev stack is compose project `holdfast` on 127.0.0.1:443 / 5432 / 56379. Subagents must use their own containers and ports.
+- **Shell gotchas:** `cp` is interactive (use `command cp -f`), and a bare `ls` can hang.
 
 ## Owner to-do
 

@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { PAGES } from '@/app/nav'
 import { mockViewport } from '@/test/matchMedia'
-import { renderApp } from '@/test/render'
+import { renderSignedIn as renderApp } from '@/test/render'
 
 describe('AppShell layout', () => {
   it('shows the bottom tab bar and no sidebar at 375px', async () => {
@@ -58,7 +58,7 @@ describe('AppShell layout', () => {
     expect(within(sidebar).getByRole('link', { name: 'holdfast home' })).toBeInTheDocument()
   })
 
-  it.each(Object.values(PAGES).filter((p) => p.id !== 'overview'))(
+  it.each(Object.values(PAGES).filter((p) => p.id !== 'overview' && p.id !== 'settings'))(
     'routes $path to a placeholder for Phase $phase',
     async (page) => {
       mockViewport(1440)

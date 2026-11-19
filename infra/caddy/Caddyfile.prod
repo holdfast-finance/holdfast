@@ -28,8 +28,15 @@
 		-Server
 	}
 
+	# Cap request bodies (the API enforces the same 1 MiB limit as defense in depth).
+	# X-Forwarded-For is overwritten with the real peer, never appended to a client-sent value.
 	handle /api/* {
-		reverse_proxy api:8000
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	# The `web` service serves the built SPA (with fallback) from /srv; see web/Caddyfile.

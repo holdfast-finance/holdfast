@@ -83,6 +83,8 @@ function Invoke-Lint {
     } else { Write-Host 'skip web: no web/package.json' }
 }
 
+# Tests use a separate holdfast_test database and Redis db 15, never the dev stack's data
+# (the migration test downgrades to base; API tests FLUSHDB).
 # Host-side tests reach the dev stack's loopback-published db/redis: TEST_DATABASE_URL as the
 # runtime role (holdfast_app), TEST_MIGRATIONS_DATABASE_URL as the schema owner (holdfast_owner).
 # Pre-set any TEST_* variable to override. Variables this sets are removed afterwards.
@@ -91,17 +93,21 @@ function Invoke-Test {
         $set = @()
         if (Test-Path '.env') {
             if (-not $env:TEST_DATABASE_URL) {
-                $env:TEST_DATABASE_URL = "postgresql+psycopg://holdfast_app:$(Get-EnvValue 'POSTGRES_APP_PASSWORD')@127.0.0.1:5432/holdfast"
+                $env:TEST_DATABASE_URL = "postgresql+psycopg://holdfast_app:$(Get-EnvValue 'POSTGRES_APP_PASSWORD')@127.0.0.1:5432/holdfast_test"
                 $set += 'TEST_DATABASE_URL'
             }
             if (-not $env:TEST_MIGRATIONS_DATABASE_URL) {
-                $env:TEST_MIGRATIONS_DATABASE_URL = "postgresql+psycopg://holdfast_owner:$(Get-EnvValue 'POSTGRES_OWNER_PASSWORD')@127.0.0.1:5432/holdfast"
+                $env:TEST_MIGRATIONS_DATABASE_URL = "postgresql+psycopg://holdfast_owner:$(Get-EnvValue 'POSTGRES_OWNER_PASSWORD')@127.0.0.1:5432/holdfast_test"
                 $set += 'TEST_MIGRATIONS_DATABASE_URL'
             }
             if (-not $env:TEST_REDIS_URL) {
-                $env:TEST_REDIS_URL = 'redis://127.0.0.1:56379/0'
+                $env:TEST_REDIS_URL = 'redis://127.0.0.1:56379/15'
                 $set += 'TEST_REDIS_URL'
             }
+        }
+        if ($set -contains 'TEST_DATABASE_URL' -and $set -contains 'TEST_MIGRATIONS_DATABASE_URL') {
+            # Create holdfast_test once (idempotent) with the same role/grant script as the real db.
+            docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -e POSTGRES_DB=holdfast_test db sh -c 'createdb -U "$POSTGRES_USER" "$POSTGRES_DB" 2>/dev/null; /docker-entrypoint-initdb.d/00-roles.sh >/dev/null'
         }
         try { Invoke-In 'backend' { uv run pytest -q } }
         finally { foreach ($name in $set) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue } }

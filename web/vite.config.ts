@@ -1,10 +1,10 @@
 /// <reference types="vitest/config" />
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 
 // In Docker the edge Caddy serves the app and routes /api/* to api:8000 on the same origin.
 // Outside Docker, `pnpm dev` proxies /api to a locally running backend instead.
@@ -41,8 +41,27 @@ const cacheDir = inContainer ? '/tmp/vite-cache' : undefined
 // @font-face src would be blocked. Other small assets keep Vite's default 4 KiB rule.
 const FONT_FILE = /\.(woff2?|ttf|otf|eot)(\?.*)?$/i
 
+// Dev-only: serve MSW's worker script for `VITE_MOCK_API=1 pnpm dev`. It is deliberately not in
+// public/, so `vite build` never copies it into dist/ (prod ships no mock code at all).
+const MSW_WORKER = fileURLToPath(
+  new URL('./node_modules/msw/lib/mockServiceWorker.js', import.meta.url),
+)
+function mockServiceWorker(): Plugin {
+  return {
+    name: 'holdfast-msw-dev-worker',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/mockServiceWorker.js', (_req, res) => {
+        res.setHeader('Content-Type', 'text/javascript')
+        res.setHeader('Service-Worker-Allowed', '/')
+        res.end(readFileSync(MSW_WORKER))
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), mockServiceWorker()],
   cacheDir,
   build: {
     assetsInlineLimit: (filePath) => (FONT_FILE.test(filePath) ? false : undefined),

@@ -37,3 +37,9 @@ Manage with: `cf email-routing rules list-account -z holdfastfinance.app`, `cf e
 
 ## Owner to-do (UI-only steps)
 1. Org settings: require 2FA for members (https://github.com/organizations/holdfast-finance/settings/security).
+
+## Holdfast Cloud preview: `cloud.holdfastfinance.app`
+- Added 2026-11-18 on owner request (ADR 0009, Holo brand). Public, `noindex` (meta, `X-Robots-Tag`, robots.txt) until launch.
+- Assets-only Cloudflare Worker `holdfast-cloud-site` with a Workers custom domain (Cloudflare manages the DNS record and cert). `workers.dev` and preview URLs are disabled.
+- Source: separate local repo `~/Documents/CODE/holdfast-cloud-site` (static HTML, self-hosted OFL fonts, strict CSP/HSTS in `_headers`, no cookies or analytics). Its README has the deploy command.
+- Cloudflare Workers is a new external service for marketing only (hard rule 9). It's covered by ADR 0009 and PLAN 19's "Cloudflare Pages for commercial use" note. Nothing in the product depends on it.

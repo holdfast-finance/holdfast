@@ -14,15 +14,26 @@ import { initTheme } from '@/stores/theme'
 
 initTheme()
 
-const router = createBrowserRouter(routes)
+async function enableMocking(): Promise<void> {
+  // `import.meta.env.DEV` is a build-time `false` in production, so this branch and the msw
+  // chunk are dropped from the bundle entirely. VITE_MOCK_API=1 only works under `pnpm dev`.
+  if (import.meta.env.DEV && import.meta.env.VITE_MOCK_API === '1') {
+    const { startMockApi } = await import('./mocks/browser')
+    await startMockApi()
+  }
+}
 
 const container = document.getElementById('root')
 if (!container) throw new Error('Missing #root element')
+const root = container
 
-createRoot(container).render(
-  <StrictMode>
-    <Providers>
-      <RouterProvider router={router} />
-    </Providers>
-  </StrictMode>,
-)
+void enableMocking().then(() => {
+  const router = createBrowserRouter(routes)
+  createRoot(root).render(
+    <StrictMode>
+      <Providers>
+        <RouterProvider router={router} />
+      </Providers>
+    </StrictMode>,
+  )
+})

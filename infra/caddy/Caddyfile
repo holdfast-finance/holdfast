@@ -28,8 +28,15 @@
 	@notdocs not path /api/docs /api/docs/* /api/redoc
 	header @notdocs Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com wss://{$APP_HOST:localhost}; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
 
+	# Cap request bodies (the API enforces the same 1 MiB limit as defense in depth).
+	# X-Forwarded-For is overwritten with the real peer, never appended to a client-sent value.
 	handle /api/* {
-		reverse_proxy api:8000
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	handle {

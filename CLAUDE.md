@@ -93,10 +93,11 @@ Docker Compose for services.
   TanStack Query for server state, Zustand for UI state, react-hook-form + zod for forms.
 - **UI:** shadcn/ui is the base. Magic UI / Aceternity live only in `web/src/components/magic/`
   and appear only on Dashboard/login, never in dense data views. Mobile-first: test at 375px,
-  touch targets ≥ 44px. All money renders in JetBrains Mono with tabular figures. Use brand tokens
-  from `docs/brand/BRAND.md`, never ad-hoc hex values.
-- **Copy voice:** builder-to-builder, short, confident, a little cypherpunk. Talk about ownership.
-  Never fear-sell.
+  touch targets ≥ 44px. All money renders in the theme's mono (JetBrains Mono / DM Mono) with tabular figures. Use
+  semantic brand tokens from `docs/brand/BRAND.md`, never ad-hoc hex values or brand-hue class
+  names. Two brands (ADR 0009): Direction 01 for self-host, Holo for Holdfast Cloud.
+- **Copy voice:** self-host surfaces are builder-to-builder, short, confident, a little cypherpunk.
+  Cloud surfaces are warm and plain-English (BRAND.md, Holo). Both talk about ownership. Never fear-sell.
 
 ## Claude Code setup in this repo
 
