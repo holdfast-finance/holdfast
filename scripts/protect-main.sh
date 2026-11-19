@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Apply the `main` repository ruleset (run once by Keel after F7 merges; needs repo admin via `gh`).
-# Required: ci-required (strict/up to date), linear history, no force push, no deletion, PR required.
+# Required: ci-required and review-gate (strict/up to date), linear history, no force push, no deletion, PR required.
 set -euo pipefail
 
 repo="${1:-holdfast-finance/holdfast}"
@@ -27,7 +27,8 @@ body=$(
         "allowed_merge_methods": ["squash"] } },
     { "type": "required_status_checks", "parameters": {
         "strict_required_status_checks_policy": true,
-        "required_status_checks": [ { "context": "ci-required", "integration_id": 15368 } ] } }
+        "required_status_checks": [ { "context": "ci-required", "integration_id": 15368 },
+                                    { "context": "review-gate", "integration_id": 15368 } ] } }
   ]
 }
 JSON

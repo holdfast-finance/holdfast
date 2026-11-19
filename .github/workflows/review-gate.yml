@@ -1,0 +1,76 @@
+name: review-gate
+
+# Runs from the BASE branch (pull_request_target), so a PR cannot edit or delete its own gate.
+# SECURITY: never check out the PR ref into the working dir and never run PR scripts here.
+# The PR head is fetched only as git objects, read by `git diff` / `git show` in the base script.
+# This workflow only takes effect once it exists on main (it is new in F7), so it first runs after merge.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # A new push invalidates a Bulwark sign-off. The gate job needs this one and also treats
+  # `synchronize` as unapproved, so a stale label can never carry over to a new head.
+  revoke-approval:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Remove bulwark-approved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/bulwark-approved" || echo "label not present"
+
+  # Required status check name: `review-gate` (scripts/protect-main.sh).
+  review-gate:
+    needs: revoke-approval
+    # Run even when revoke-approval is skipped (non-synchronize events), but not if it failed.
+    if: always() && (needs.revoke-approval.result == 'success' || needs.revoke-approval.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Default ref for pull_request_target is the base branch: trusted code only.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch PR head as data (no checkout)
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin "refs/pull/$PR/head"
+          [ "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] || { echo "::error::PR head moved; this run is stale"; exit 1; }
+      - name: Check protected paths and test removals (base-branch script)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Labels are read live, never from the event payload. A push is always unapproved.
+          if [ "$ACTION" = "synchronize" ]; then
+            LABELS=""
+          else
+            LABELS=$(gh api "repos/$REPO/issues/$PR/labels" --paginate --jq '.[].name' | paste -sd, -)
+          fi
+          export LABELS
+          bash scripts/check-protected-paths.sh
