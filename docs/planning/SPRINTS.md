@@ -36,12 +36,27 @@ Process notes from W1:
 - F9 WIP commit was made with `--no-verify` at checkpoint (Keel); gitleaks run manually on it: no leaks. Don't repeat.
 - Measured runs (subagent tokens reported by harness): memos 51–75k; builds 63–110k; reviews 52–62k. Recalibrate S ≈ 60–110k.
 
+### Checkpoint 2026-11-19 08:30 — weekly usage limit hit on all accounts
+
+| Story | PR · head | State | Next step |
+|---|---|---|---|
+| F1 layering | #4 merged | DONE | — |
+| F10 brand theme | #6 merged | DONE (Prism APPROVE-WITH-NOTES). Squash subject landed as "wip(...)" by mistake | F10b: 5 Prism notes (Watch-only Lavender vs Indigo, token parity tests, first-paint `data-brand` in index.html, Money.tsx comment, setHouseholdBrand TODO) |
+| F8 worktrees | #7 merged | DONE (Bulwark APPROVE-WITH-NOTES) | F8b: `--resume` must not `-B` reset, `git check-ref-format`, lock path under XDG_RUNTIME_DIR, pwsh lock waits |
+| F7 merge gate | #3 · aa07c9b | Round 3 fixes pushed (quoted paths, fetch auth, `edited`, digests). Bulwark re-review of 8598ea8..aa07c9b dispatched, may not have finished | Bulwark verdict → `bulwark-approved` → merge → `protect-main.sh` (needs paid plan, owner queue) |
+| F9 security lows | #9 · a8b0675 | Bulwark APPROVE on 8deb121 with low+nit; both fixed in a8b0675. Delta re-review dispatched, may not have finished | Bulwark delta verdict → merge |
+| Anvil/Flint onboarding | #8 · 49e024e | Bulwark BLOCK on 4621ba4; reworked to machine user + fork (owner choice). Re-review died on the limit | Bulwark re-review → merge. Owner runs docs/process/EXTERNAL-AGENTS-SETUP.md |
+| F3 OpenAPI types | `feat/F3-openapi-types` (wt-new) | Lattice started, died on the limit; work may be partial in its worktree | Resume Lattice in that worktree |
+
+Notes: Codex ran its own setup in the main checkout (uncommitted `AGENTS.md` edit, `.codex/`, `.agents/`). Untouched by Keel; reconcile with #8 (which owns AGENTS.md) next window, and read `.codex/hooks/patch.py` before committing any of it.
+
 ## Sprint 2 (W2) — Phase 1.5, wave 2 (planned)
 F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migration (schema run) · F11 trunk-model skills + PR template · F12 e2e in CI · Phase 1.5 acceptance (Sounding) · tag `phase-1.5`.
 
 ## Standups
 
 ```
+W1b · done: F1 (#4), F10 (#6), F8 (#7) · doing: F7, F9 reviews; #8 re-review; F3 · blocked: weekly limit (all accounts) · tokens: limit
 W1 · done: F4 (#2) · doing: — (stopped by owner) · blocked: none · open: #3 F7, #4 F1, WIP F9/F10 · tokens: ~1.3M subagent this window
 W0 · done: Phase 1 merged + tagged; round table (7 memos + challenge); roadmap, SDLC, routing, roster, agent defs · doing: — · blocked: none · tokens: ~0.6M output this session
 ```
