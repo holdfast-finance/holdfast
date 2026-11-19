@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "phase/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # hashFiles() isn't allowed in job-level `if`, so detect which parts of the repo exist first.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.d.outputs.backend }}
+      web: ${{ steps.d.outputs.web }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        run: |
+          echo "backend=$([ -f backend/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "web=$([ -f web/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: detect
+    if: needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: holdfast
+          POSTGRES_PASSWORD: holdfast-ci
+          POSTGRES_DB: holdfast
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U holdfast -d holdfast"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Real-service tests skip locally but must run (not skip) when CI is set.
+      CI: "1"
+      APP_ENV: dev
+      PLAID_ENV: sandbox
+      DATABASE_URL: postgresql+psycopg://holdfast:holdfast-ci@localhost:5432/holdfast
+      TEST_DATABASE_URL: postgresql+psycopg://holdfast:holdfast-ci@localhost:5432/holdfast
+      REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/0
+      DOCUMENT_STORE: /tmp/holdfast-documents
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Throwaway secrets
+        run: |
+          fernet=$(python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+          session=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+          echo "::add-mask::$fernet"
+          echo "::add-mask::$session"
+          { echo "FERNET_KEY=$fernet"; echo "SESSION_SECRET=$session"; } >> "$GITHUB_ENV"
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy app
+      - run: uv run pytest -q
+      - name: Alembic upgrade / downgrade / upgrade
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+      - name: pip-audit (informational)
+        continue-on-error: true
+        run: |
+          uv export --frozen --no-hashes --no-emit-project --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --progress-spinner off 2>&1 | tee "$RUNNER_TEMP/pip-audit.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pip-audit
+          path: ${{ runner.temp }}/pip-audit.txt
+          if-no-files-found: ignore
+
+  web:
+    needs: detect
+    if: needs.detect.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version comes from "packageManager" in web/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test --run
+      - run: pnpm build
+      - name: pnpm audit (informational)
+        continue-on-error: true
+        run: pnpm audit --audit-level high
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # CLI image instead of gitleaks-action, which needs a paid license on organization repos.
+      - name: gitleaks (full history)
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1
+          git --no-banner --redact -v /repo
+
+  compose:
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway .env
+        run: python3 scripts/gen-keys.py --write
+      - name: docker compose config
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
+            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config -q
+      - name: No ports beyond the rules (CLAUDE.md rule 12)
+        run: |
+          docker compose config --format json | python3 scripts/check-compose-ports.py
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config --format json \
+            | python3 scripts/check-compose-ports.py --dev
+      - name: Validate Caddyfiles
+        run: |
+          docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          # Prod image bundles Caddyfile.prod; the DNS provider only checks the token's format.
+          docker build -t holdfast-caddy:ci -f infra/caddy/Dockerfile.prod infra/caddy
+          docker run --rm -e APP_HOST=holdfast.example.com -e WEB_UPSTREAM=web:80 \
+            -e CF_API_TOKEN="$(python3 -c 'print("x" * 40)')" \
+            holdfast-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: docker compose build
+        if: needs.detect.outputs.backend == 'true' && needs.detect.outputs.web == 'true'
+        run: docker compose build
+      - name: Remove throwaway .env
+        if: always()
+        run: rm -f .env

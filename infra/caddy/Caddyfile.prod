@@ -1,0 +1,39 @@
+# Holdfast edge proxy: prod template (PLAN 12.1). Used by infra/docker-compose.prod.yml with the
+# image from infra/caddy/Dockerfile.prod (Caddy + caddy-dns/cloudflare).
+#
+# Reachability: Caddy runs in a container, so the host-side bind to the Tailscale IP happens at the
+# port publish (`${TAILSCALE_BIND_IP}:443:443` in infra/docker-compose.prod.yml). A `bind` directive
+# here would name an address the container's network namespace doesn't have, so it is omitted.
+# If you run Caddy on the host (or with network_mode: host), add:  bind {$TAILSCALE_BIND_IP}
+#
+# TLS: real Let's Encrypt cert via the DNS-01 challenge. No inbound port 80, nothing public.
+# CF_API_TOKEN needs only Zone:DNS:Edit on the zone that holds APP_HOST.
+{
+	admin localhost:2019
+	auto_https disable_redirects
+}
+
+{$APP_HOST} {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.plaid.com; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# The `web` service serves the built SPA (with fallback) from /srv; see web/Caddyfile.
+	handle {
+		reverse_proxy {$WEB_UPSTREAM:web:80}
+	}
+}

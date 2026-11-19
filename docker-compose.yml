@@ -1,0 +1,136 @@
+# Holdfast: prod-like stack. Dev adds docker-compose.dev.yml on top (see Makefile / scripts/dev.ps1).
+#
+# Networking (CLAUDE.md rule 12): only `caddy` publishes a port, on ${CADDY_BIND} (default
+# 127.0.0.1; in prod use infra/docker-compose.prod.yml, which binds the Tailscale IP).
+# Never publish on 0.0.0.0. db and redis sit on an internal-only network with no egress.
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+
+x-backend: &backend
+  <<: *hardening
+  build: ./backend
+  image: holdfast-backend:local
+  env_file: .env
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+  read_only: true
+  tmpfs:
+    - /tmp
+  volumes:
+    - ./data/documents:/data/documents
+  networks:
+    - backend
+    - frontend
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    <<: *hardening
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: holdfast
+      POSTGRES_DB: holdfast
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (run make keys)}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U holdfast -d holdfast"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    read_only: true
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    command: ["arq", "app.worker.main.WorkerSettings"]
+
+  web:
+    <<: *hardening
+    build: ./web
+    image: holdfast-web:local
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+      - /config
+    networks:
+      - frontend
+
+  caddy:
+    <<: *hardening
+    image: caddy:2-alpine
+    environment:
+      APP_HOST: ${APP_HOST:-localhost}
+      WEB_UPSTREAM: ${WEB_UPSTREAM:-web:80}
+    ports:
+      - "${CADDY_BIND:-127.0.0.1}:443:443"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - frontend
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+networks:
+  # db + redis only. `internal: true` = no route out of the host.
+  backend:
+    internal: true
+  # caddy <-> api/web. api and worker need egress here (Plaid, AI providers).
+  frontend: {}
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,21 @@
+# Prod override: docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml up -d --build
+# (`make up-prod` / `./scripts/dev.ps1 up-prod`). Paths are relative to the repo root (first -f).
+#
+# Caddy gets the DNS-01-capable image and Caddyfile.prod, and publishes 443 on the Tailscale IP
+# only (PLAN 12.1, CLAUDE.md rule 12). `!override` replaces the base ports list instead of merging.
+
+services:
+  caddy:
+    image: holdfast-caddy:local
+    build:
+      context: ./infra/caddy
+      dockerfile: Dockerfile.prod
+    environment:
+      APP_HOST: ${APP_HOST:?set APP_HOST in .env (e.g. money.example.com)}
+      CF_API_TOKEN: ${CF_API_TOKEN:?set CF_API_TOKEN in .env (Zone:DNS:Edit)}
+    ports: !override
+      - "${TAILSCALE_BIND_IP:?set TAILSCALE_BIND_IP in .env}:443:443"
+    volumes: !override
+      - ./infra/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
