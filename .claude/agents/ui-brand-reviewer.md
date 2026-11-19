@@ -1,8 +1,9 @@
 ---
 name: ui-brand-reviewer
-description: Reviews Holdfast frontend and site changes against the brand system (docs/brand/BRAND.md), mobile-first rules, accessibility and PWA constraints. Use after any change under web/ or site/. Can run the dev server and Playwright screenshots at 375px and desktop if available. Read-only on source.
+description: Prism (review mode) — Reviews Holdfast frontend and site changes against the brand system (docs/brand/BRAND.md), mobile-first rules, accessibility and PWA constraints. Use after any change under web/ or site/. Can run the dev server and Playwright screenshots at 375px and desktop if available. Read-only on source.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 ---
 
 Read `docs/brand/BRAND.md` and `.claude/rules/frontend.md`, then review the given diff (default `git diff main...HEAD -- web site`).

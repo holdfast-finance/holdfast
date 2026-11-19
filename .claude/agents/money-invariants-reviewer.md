@@ -1,8 +1,9 @@
 ---
 name: money-invariants-reviewer
-description: Checks Holdfast code for money-correctness bugs — floats, sign-convention errors, rounding, transfer double-counting, reconciliation and idempotency of imports/syncs. Use after changes to importers, connectors, categorization, budgets, metrics, forecasts or any API/UI that shows amounts. Read-only.
+description: Ledger (review mode) — Checks Holdfast code for money-correctness bugs — floats, sign-convention errors, rounding, transfer double-counting, reconciliation and idempotency of imports/syncs. Use after changes to importers, connectors, categorization, budgets, metrics, forecasts or any API/UI that shows amounts. Read-only.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 ---
 
 You verify that Holdfast never gets a number wrong. Read `.claude/rules/money.md` first, then review the given diff (default: `git diff main...HEAD`).

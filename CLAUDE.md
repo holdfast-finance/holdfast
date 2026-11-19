@@ -14,21 +14,29 @@ an optional year-round tax module, and a private AI advisor that runs on the mod
 
 ## Roles
 
-Claude Code is the **project engineer**, with full authority on technical decisions. Record any
-non-obvious decision as an ADR. The owner reviews at the end of each phase. Only Claude agents work in
-this repo for now. If another vendor joins, add `AGENTS.md` lanes first.
+Holdfast is built by a named agent team (`docs/team/ROSTER.md`). **Keel** (the main session) is the
+project manager with full authority on technical decisions; Lattice is the architect; lane agents build;
+Bulwark, Sounding and the lane reviewers gate. Record any non-obvious decision as an ADR.
+**Full autonomy (owner decision 2026-11-19):** agents plan, build, review, merge, push and release.
+The owner is not a gate; they get a weekly digest and the owner queue in `docs/STATUS.md`.
 
-## Workflow (phase-gated)
+## Workflow (trunk-based, agent-gated)
 
-1. Start a phase with the `phase-kickoff` skill. It reads the PLAN sections, branches and plans the work.
-2. Work on branch `phase/<n>-<slug>` (e.g. `phase/0-scaffold`). Small, focused commits.
-3. Finish with the `phase-review` skill. It runs every acceptance criterion, writes
-   `docs/phases/PHASE-<n>.md` with real command output, and updates `docs/STATUS.md`.
-4. **Stop and report at the end of every phase.** Don't start the next phase until the owner says go.
-5. Merge to `main` with `--no-ff` after the owner approves. Tag `phase-<n>`.
+The full process is `docs/process/SDLC.md`; model choice and token rules are `docs/process/MODEL-ROUTING.md`;
+the plan is `docs/planning/ROADMAP.md` and the sprint log `docs/planning/SPRINTS.md`.
 
-Commits: Conventional Commits (`feat(plaid): …`, `fix(import): …`, `docs: …`, `chore: …`,
-`test: …`). Explain *why* in the body. No remote is configured yet. Don't add one or push without the owner.
+1. Keel plans one sprint per usage window, writes a brief per story, and assigns agent + model.
+2. One story (or one same-module epic slice) = one short-lived branch off `origin/main` = one PR.
+3. A PR merges only through the gate: `ci-required`, one Alembic head, RLS lint, audits, e2e where relevant,
+   and SHA-bound reviewer sign-offs by path. **Only Keel merges** (squash).
+4. Phases are milestones: Sounding runs acceptance, writes `docs/phases/PHASE-<n>.md`, Keel tags `phase-<n>`.
+   No owner stop; escalate only owner-queue items (money, accounts, real data, legal).
+5. Estimates are in usage windows, runs and tokens, never human days.
+
+Commits: Conventional Commits (`feat(plaid): …`, `fix(import): …`, `docs: …`, `chore: …`, `test: …`).
+Explain *why* in the body. **Attribution:** end every commit with
+`Co-Authored-By: <Agent> (Holdfast) <agents@holdfastfinance.app>` and PRs with `— <Agent>, Holdfast`.
+Never credit a model vendor. Remote: `holdfast-finance/holdfast` (private). Never force-push or rewrite `main`.
 
 ## Commands
 
@@ -101,10 +109,11 @@ Docker Compose for services.
 
 ## Claude Code setup in this repo
 
-- **Subagents** (`.claude/agents/`): `security-reviewer`, `money-invariants-reviewer`,
-  `tax-config-verifier`, `crypto-custody-auditor`, `ui-brand-reviewer`, `phase-acceptance-checker`.
-  Run the relevant reviewer before every phase-review. Run `security-reviewer` on anything touching
-  auth, tokens, Plaid, the agent or crypto.
+- **Subagents** (`.claude/agents/`, roster in `docs/team/ROSTER.md`): builders `lattice`, `tide`,
+  `ledger`, `prism`, `harbor`, `pilot`, `beacon`, `scout`, `gadfly`; gates `security-reviewer` (Bulwark),
+  `money-invariants-reviewer`, `tax-config-verifier` (Tally), `crypto-custody-auditor` (Cipher),
+  `ui-brand-reviewer`, `phase-acceptance-checker` (Sounding). Frontmatter sets each agent's model and effort.
+  Run Bulwark on anything touching auth, tokens, Plaid, the agent, crypto or a protected path.
 - **Skills** (`.claude/skills/`): `phase-kickoff`, `phase-review`, `adr`, `tax-year-config`,
   `bank-profile`, `new-migration`.
 - **Hooks** (`.claude/hooks/`): `guard-secrets.sh` blocks writes that contain real-looking
