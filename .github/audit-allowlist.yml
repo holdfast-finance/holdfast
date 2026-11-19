@@ -1,0 +1,9 @@
+# Accepted dependency advisories. Every entry MUST carry an `expires` date (YYYY-MM-DD, max ~90 days out);
+# scripts/audit_gate.py fails CI once a date passes, and fails on entries without one.
+# Adding or extending an entry touches .github/, so it needs a Bulwark verdict (label bulwark-approved).
+#
+# - id: GHSA-xxxx-xxxx-xxxx   # or CVE / PYSEC id; aliases in the audit output also match
+#   scope: pip                # pip | pnpm
+#   expires: 2027-01-31
+#   reason: why it is not exploitable here, and the fix we are waiting on
+allow: []
