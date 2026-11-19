@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app import __version__
 from app.logging import get_logger
 
-CHECK_TIMEOUT_SECONDS = 2.0
+CHECK_TIMEOUT_SECONDS = 2.0  # money-lint: allow probe timeout seconds, not money
 
 CheckState = Literal["ok", "error"]
 
