@@ -95,4 +95,9 @@ health: ## GET /api/health through Caddy
 ports: env-check ## Assert no compose service publishes beyond the rules
 	$(COMPOSE) config --format json | python3 scripts/check-compose-ports.py --dev
 	docker compose -f docker-compose.yml config --format json | python3 scripts/check-compose-ports.py
-	$(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+	@# Prod needs TAILSCALE_BIND_IP/CF_API_TOKEN; use .env values if set, else CI-style dummies.
+	@tip=$$(grep -E '^TAILSCALE_BIND_IP=.+' .env | cut -d= -f2- || true); \
+	 cft=$$(grep -qE '^CF_API_TOKEN=.+' .env && echo set || true); \
+	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
+	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
+	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod

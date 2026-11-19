@@ -154,6 +154,16 @@ switch ($Target) {
         Assert-Env
         docker @Compose config --format json | & $Python scripts/check-compose-ports.py --dev
         docker compose -f docker-compose.yml config --format json | & $Python scripts/check-compose-ports.py
-        docker @ComposeProd config --format json | & $Python scripts/check-compose-ports.py --prod
+        # Prod needs TAILSCALE_BIND_IP/CF_API_TOKEN: use .env values if set, else CI-style dummies.
+        $envText = Get-Content .env -Raw
+        $saved = @{ TAILSCALE_BIND_IP = $env:TAILSCALE_BIND_IP; CF_API_TOKEN = $env:CF_API_TOKEN }
+        try {
+            if ($envText -notmatch '(?m)^TAILSCALE_BIND_IP=.+') { $env:TAILSCALE_BIND_IP = '100.64.0.1' }
+            if ($envText -notmatch '(?m)^CF_API_TOKEN=.+') { $env:CF_API_TOKEN = 'x' * 40 }
+            docker @ComposeProd config --format json | & $Python scripts/check-compose-ports.py --prod
+        } finally {
+            $env:TAILSCALE_BIND_IP = $saved.TAILSCALE_BIND_IP
+            $env:CF_API_TOKEN = $saved.CF_API_TOKEN
+        }
     }
 }
