@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from app.main import announce_setup_token
@@ -147,12 +148,13 @@ async def test_test_hook_serves_token_only_in_test_env(
 
 
 async def test_test_hook_absent_outside_test_env(settings: object) -> None:
+    """Needs APP_ENV=test *and* E2E_HOOKS=true; either one alone is not enough."""
     from app.config import Settings
     from app.main import create_app
 
     assert isinstance(settings, Settings)
-    for env in ("dev", "prod"):
-        application = create_app(settings.model_copy(update={"app_env": env}))
+    for env, hooks in (("dev", True), ("prod", True), ("test", False)):
+        application = create_app(settings.model_copy(update={"app_env": env, "e2e_hooks": hooks}))
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=application), base_url="https://localhost"
         ) as c:
@@ -161,3 +163,18 @@ async def test_test_hook_absent_outside_test_env(settings: object) -> None:
             assert r.json()["error"]["code"] == "not_found"
         await application.state.redis.aclose()
         await application.state.engine.dispose()
+
+
+def test_test_mode_logs_a_startup_warning(
+    settings: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import main
+    from app.config import Settings
+
+    assert isinstance(settings, Settings)
+    seen: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(main.log, "warning", lambda event, **kw: seen.append((event, kw)))
+    for env in ("test", "dev"):
+        application = main.create_app(settings.model_copy(update={"app_env": env}))
+        assert application is not None
+    assert [event for event, _ in seen] == ["api.test_mode"]
