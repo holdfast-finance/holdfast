@@ -81,14 +81,14 @@ describe('<Money>', () => {
     render(<Money amount="1234.50" />)
     const el = screen.getByText('$1,234.50')
     expect(el).toHaveClass('money')
-    expect(el).not.toHaveClass('text-breach-text')
+    expect(el).not.toHaveClass('text-destructive-text')
     expect(el).not.toHaveAttribute('data-negative')
   })
 
   it('renders "-0.10" as negative in Breach', () => {
     render(<Money amount="-0.10" />)
     const el = screen.getByText('-$0.10')
-    expect(el).toHaveClass('money', 'text-breach-text')
+    expect(el).toHaveClass('money', 'text-destructive-text')
     expect(el).toHaveAttribute('data-negative', 'true')
   })
 })

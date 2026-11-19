@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 
 /**
  * The holdfast mark: one asset node, one stem, three roots. Same geometry as
- * brand/logomark.svg; drawn in currentColor so it takes a token class (text-signal).
+ * brand/logomark.svg; drawn in currentColor so it takes a token class (text-primary).
  */
 export function Logomark({ className, title }: { className?: string; title?: string }) {
   return (

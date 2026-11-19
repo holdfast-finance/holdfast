@@ -7,6 +7,7 @@ import {
   ABYSS_INK,
   CHIP_TINT,
   contrast,
+  DEEPWATER_INK,
   FILL,
   FOCUS_RING,
   GROUND,
@@ -31,6 +32,7 @@ describe('index.css mirrors src/lib/tokens.ts', () => {
     ['abyss', GROUND.abyss] as const,
     ['hull', GROUND.hull] as const,
     ['focus-ring', FOCUS_RING] as const,
+    ['deepwater-ink', DEEPWATER_INK] as const,
   ])('--%s', (name, pair) => {
     expect(declares(name, pair)).toBe(true)
   })
@@ -74,6 +76,12 @@ describe('WCAG AA contrast', () => {
 
   it.each(THEMES)('%s primary button: Abyss ink on the Signal fill >= 4.5', (theme) => {
     expect(contrast(hexToRgb(ABYSS_INK), hexToRgb(FILL.signal[theme]))).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it.each(THEMES)('%s secondary button: Deepwater ink on the Deepwater fill >= 4.5', (theme) => {
+    expect(
+      contrast(hexToRgb(DEEPWATER_INK[theme]), hexToRgb(FILL.deepwater[theme])),
+    ).toBeGreaterThanOrEqual(4.5)
   })
 })
 

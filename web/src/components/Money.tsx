@@ -12,7 +12,7 @@ export function Money({ amount, className, ...options }: MoneyProps) {
   const { text, negative } = formatMoney(amount, options)
   return (
     <span
-      className={cn('money', negative && 'text-breach-text', className)}
+      className={cn('money', negative && 'text-destructive-text', className)}
       data-negative={negative ? 'true' : undefined}
     >
       {text}

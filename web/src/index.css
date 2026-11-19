@@ -34,6 +34,9 @@
   --breach-text: light-dark(#bf2945, #ff5d7a);
   --deepwater-text: light-dark(#5b41e0, #8b74ff);
 
+  /* Ink on a Deepwater fill (secondary button/badge text): >= 4.5:1 in both themes. */
+  --deepwater-ink: light-dark(#ffffff, #07080c);
+
   /* Focus ring: >= 3:1 non-text contrast on ground and surface. Signal in dark. */
   --focus-ring: light-dark(#0b8a6f, #3df5c8);
 
@@ -66,7 +69,7 @@
   --primary: var(--signal);
   --primary-foreground: var(--abyss-ink);
   --secondary: var(--deepwater);
-  --secondary-foreground: light-dark(#ffffff, #07080c);
+  --secondary-foreground: var(--deepwater-ink);
   --muted: var(--hull-raised);
   --muted-foreground: var(--text-muted);
   --accent: var(--hull-raised);
@@ -84,7 +87,7 @@
   --sidebar-foreground: var(--text);
   --sidebar-primary: var(--signal);
   --sidebar-primary-foreground: var(--abyss-ink);
-  --sidebar-accent: color-mix(in srgb, var(--signal) 10%, var(--hull));
+  --sidebar-accent: color-mix(in srgb, var(--primary) 10%, var(--card));
   --sidebar-accent-foreground: var(--text);
   --sidebar-border: var(--hairline);
   --sidebar-ring: var(--focus-ring);
@@ -101,6 +104,9 @@
   --warning: var(--flare);
   --warning-text: var(--flare-text);
   --qr-ink: var(--abyss-ink);
+  /* Charts (BRAND.md UI atoms): actuals are a Signal line, forecasts a Deepwater P50 + band. */
+  --chart-actual: var(--signal);
+  --chart-forecast: var(--deepwater);
 
   /* Radius: 10px buttons (rounded-lg), 12px cards (rounded-card), full chips */
   --radius: 0.625rem;
@@ -126,25 +132,12 @@
   --font-display: 'Space Grotesk', var(--font-sans);
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
-  /* Brand colors as Tailwind utilities: bg-signal, text-breach, border-hairline, ... */
-  --color-signal: var(--signal);
-  --color-deepwater: var(--deepwater);
-  --color-abyss: var(--abyss);
-  --color-hull: var(--hull);
-  --color-hull-raised: var(--hull-raised);
-  --color-flare: var(--flare);
-  --color-breach: var(--breach);
-  --color-signal-text: var(--signal-text);
-  --color-flare-text: var(--flare-text);
-  --color-breach-text: var(--breach-text);
-  --color-deepwater-text: var(--deepwater-text);
-  --color-focus-ring: var(--focus-ring);
+  /*
+   * Only semantic colors become Tailwind utilities (ADR 0009). The brand palette above stays
+   * CSS-only so components can't reach for `bg-signal` and a brand theme stays a token swap.
+   */
   --color-skeleton: var(--skeleton);
   --color-skeleton-edge: var(--skeleton-edge);
-  --color-hairline: var(--hairline);
-  --color-text: var(--text);
-  --color-text-muted: var(--text-muted);
-  --color-abyss-ink: var(--abyss-ink);
 
   /* shadcn semantic colors */
   --color-sidebar-ring: var(--sidebar-ring);
@@ -185,6 +178,8 @@
   --color-success-text: var(--success-text);
   --color-warning: var(--warning);
   --color-warning-text: var(--warning-text);
+  --color-chart-actual: var(--chart-actual);
+  --color-chart-forecast: var(--chart-forecast);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
@@ -195,7 +190,7 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   --radius-card: 0.75rem;
 
-  --shadow-glow: 0 0 24px color-mix(in srgb, var(--signal) 35%, transparent);
+  --shadow-glow: 0 0 24px color-mix(in srgb, var(--primary) 35%, transparent);
 }
 
 @layer base {
@@ -228,7 +223,7 @@
 
   /* Visible focus ring (Signal in dark, a deeper Signal in light) on every focusable element. */
   :focus-visible {
-    outline: 2px solid var(--focus-ring);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
 }
@@ -246,17 +241,17 @@
     background:
       radial-gradient(
         120% 90% at 100% 0%,
-        color-mix(in srgb, var(--deepwater) 18%, transparent),
+        color-mix(in srgb, var(--secondary) 18%, transparent),
         transparent 55%
       ),
       radial-gradient(
         90% 70% at 0% 0%,
-        color-mix(in srgb, var(--signal) 8%, transparent),
+        color-mix(in srgb, var(--primary) 8%, transparent),
         transparent 60%
       ),
       var(--glass);
     backdrop-filter: blur(12px);
-    border: 1px solid var(--hairline);
+    border: 1px solid var(--border);
   }
 }
 

@@ -12,7 +12,7 @@ function SkipLink() {
   return (
     <a
       href="#main"
-      className="sr-only rounded-lg bg-signal px-4 py-3 text-abyss-ink focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50"
+      className="sr-only rounded-lg bg-primary px-4 py-3 text-primary-foreground focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50"
     >
       Skip to content
     </a>
@@ -31,7 +31,9 @@ export function AppShell() {
           <main id="main" tabIndex={-1} className="flex-1 px-8 py-8 outline-none lg:px-10">
             <Outlet />
           </main>
-          <footer className="px-8 pb-6 text-xs text-text-muted lg:px-10">{FOOTER_LINE}</footer>
+          <footer className="px-8 pb-6 text-xs text-muted-foreground lg:px-10">
+            {FOOTER_LINE}
+          </footer>
         </div>
       </div>
     )
@@ -40,16 +42,16 @@ export function AppShell() {
   return (
     <div className="flex min-h-dvh flex-col" data-layout="mobile">
       <SkipLink />
-      <header className="sticky top-0 z-30 flex min-h-14 items-center justify-between gap-3 border-b border-hairline bg-abyss/90 px-4 backdrop-blur">
+      <header className="sticky top-0 z-30 flex min-h-14 items-center justify-between gap-3 border-b border-border bg-background/90 px-4 backdrop-blur">
         <Link to="/" aria-label="holdfast home" className="flex min-h-11 items-center gap-2">
-          <Logomark className="size-6 text-signal" />
+          <Logomark className="size-6 text-primary" />
           <Wordmark />
         </Link>
         <ApiStatusIndicator />
       </header>
       <main id="main" tabIndex={-1} className="flex-1 px-4 pt-5 pb-28 outline-none">
         <Outlet />
-        <p className="mt-10 text-xs text-text-muted">{FOOTER_LINE}</p>
+        <p className="mt-10 text-xs text-muted-foreground">{FOOTER_LINE}</p>
       </main>
       <BottomNav />
     </div>

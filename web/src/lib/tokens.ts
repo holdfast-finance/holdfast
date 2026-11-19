@@ -3,8 +3,9 @@
  *
  * This is the single source of truth for the raw hex values. `src/index.css` mirrors them in
  * `light-dark(<light>, <dark>)` pairs, and `src/tokens.node.test.ts` fails if the two drift or
- * if any text pairing drops below WCAG AA. Components never import hex from here: they use the
- * Tailwind tokens (`bg-signal`, `text-signal-text`, ...).
+ * if any text pairing drops below WCAG AA. Components never import hex from here, and never name a
+ * brand hue: they use the semantic Tailwind tokens (`bg-primary`, `text-success-text`, ...)
+ * that index.css maps onto these values (ADR 0009).
  *
  * Fills vs text: the brand hues (`signal`, `flare`, `breach`, `deepwater`) are for fills, dots,
  * bars, chart strokes and button backgrounds. Text in those hues uses the `*-text` tokens, which
@@ -45,6 +46,9 @@ export const FOCUS_RING: ThemePair = { light: '#0b8a6f', dark: '#3df5c8' }
 
 /** Ink that sits on a Signal fill (primary button text). */
 export const ABYSS_INK: Hex = '#07080c'
+
+/** Ink that sits on a Deepwater fill (`--secondary-foreground`: secondary button/badge text). */
+export const DEEPWATER_INK: ThemePair = { light: '#ffffff', dark: '#07080c' }
 
 /** Chip tint opacity per hue (StatusChip `bg-<hue>/<n>`). */
 export const CHIP_TINT: Record<keyof typeof FILL, number> = {

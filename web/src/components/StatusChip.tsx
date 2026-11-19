@@ -3,14 +3,14 @@ import { cn } from '@/lib/utils'
 export type SyncStatus = 'synced' | 'relink' | 'watch-only' | 'error'
 
 const STATUS: Record<SyncStatus, { label: string; tone: string; dot: string }> = {
-  synced: { label: 'Synced', tone: 'bg-signal/12 text-signal-text', dot: 'bg-signal' },
-  relink: { label: 'Relink needed', tone: 'bg-flare/12 text-flare-text', dot: 'bg-flare' },
+  synced: { label: 'Synced', tone: 'bg-success/12 text-success-text', dot: 'bg-success' },
+  relink: { label: 'Relink needed', tone: 'bg-warning/12 text-warning-text', dot: 'bg-warning' },
   'watch-only': {
     label: 'Watch-only',
-    tone: 'bg-deepwater/15 text-deepwater-text',
-    dot: 'bg-deepwater',
+    tone: 'bg-secondary/15 text-secondary-text',
+    dot: 'bg-secondary',
   },
-  error: { label: 'Error', tone: 'bg-breach/12 text-breach-text', dot: 'bg-breach' },
+  error: { label: 'Error', tone: 'bg-destructive/12 text-destructive-text', dot: 'bg-destructive' },
 }
 
 export interface StatusChipProps {

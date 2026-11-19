@@ -4,10 +4,10 @@ import { describe, expect, it } from 'vitest'
 import { StatusChip, type SyncStatus } from '@/components/StatusChip'
 
 const CASES: [SyncStatus, string, string][] = [
-  ['synced', 'Synced', 'signal'],
-  ['relink', 'Relink needed', 'flare'],
-  ['watch-only', 'Watch-only', 'deepwater'],
-  ['error', 'Error', 'breach'],
+  ['synced', 'Synced', 'success'],
+  ['relink', 'Relink needed', 'warning'],
+  ['watch-only', 'Watch-only', 'secondary'],
+  ['error', 'Error', 'destructive'],
 ]
 
 describe('<StatusChip>', () => {
@@ -24,6 +24,6 @@ describe('<StatusChip>', () => {
   it('accepts a custom label but keeps the dot', () => {
     const { container } = render(<StatusChip status="synced" label="9 of 10 accounts synced" />)
     expect(screen.getByText('9 of 10 accounts synced')).toBeInTheDocument()
-    expect(container.querySelector('.bg-signal')).not.toBeNull()
+    expect(container.querySelector('.bg-success')).not.toBeNull()
   })
 })

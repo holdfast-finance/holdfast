@@ -16,7 +16,7 @@ import {
 import { cn } from '@/lib/utils'
 
 const tabClass =
-  'flex min-h-14 min-w-11 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 text-[11px] font-medium text-text-muted transition-colors'
+  'flex min-h-14 min-w-11 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 text-[11px] font-medium text-muted-foreground transition-colors'
 
 function Tab({ id }: { id: PageId }) {
   const page = PAGES[id]
@@ -26,7 +26,7 @@ function Tab({ id }: { id: PageId }) {
       <NavLink
         to={page.path}
         end={page.path === '/'}
-        className={({ isActive }) => cn(tabClass, isActive && 'text-signal-text')}
+        className={({ isActive }) => cn(tabClass, isActive && 'text-primary-text')}
       >
         <Icon aria-hidden="true" className="size-5" />
         {page.shortLabel ?? page.label}
@@ -44,7 +44,7 @@ function MoreSheet() {
     <Sheet open={open} onOpenChange={setOpen}>
       <li className="flex flex-1">
         <SheetTrigger asChild>
-          <button type="button" className={cn(tabClass, moreActive && 'text-signal-text')}>
+          <button type="button" className={cn(tabClass, moreActive && 'text-primary-text')}>
             <Ellipsis aria-hidden="true" className="size-5" />
             More
           </button>
@@ -69,8 +69,8 @@ function MoreSheet() {
                     }}
                     className={({ isActive }) =>
                       cn(
-                        'flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium text-text hover:bg-hull-raised',
-                        isActive && 'bg-sidebar-accent text-signal-text',
+                        'flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium text-foreground hover:bg-accent',
+                        isActive && 'bg-sidebar-accent text-primary-text',
                       )
                     }
                   >
@@ -82,7 +82,7 @@ function MoreSheet() {
             })}
           </ul>
         </nav>
-        <div className="flex items-center justify-between gap-2 border-t border-hairline px-5 pt-4">
+        <div className="flex items-center justify-between gap-2 border-t border-border px-5 pt-4">
           <ApiStatusIndicator />
           <ThemeToggle />
         </div>
@@ -96,7 +96,7 @@ export function BottomNav() {
     <nav
       aria-label="Main"
       data-testid="mobile-tabbar"
-      className="fixed inset-x-0 bottom-0 z-40 border-t border-hairline bg-hull/95 pb-[env(safe-area-inset-bottom)] backdrop-blur"
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur"
     >
       <ul className="mx-auto flex max-w-lg items-stretch gap-1 px-2 py-1">
         {MOBILE_TABS.map((id) => (
