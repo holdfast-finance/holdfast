@@ -1,0 +1,97 @@
+"""Settings: safe defaults, contract coverage, and secrets that never leak through repr."""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from app.config import Settings
+from tests.conftest import CONTRACT_ENV_VARS, make_settings
+
+
+def test_defaults_boot_with_empty_environment(clean_env: pytest.MonkeyPatch) -> None:
+    s = make_settings()
+    assert s.app_env == "dev"
+    assert s.plaid_env == "sandbox"
+    assert s.feature_tax is False
+    assert s.feature_crypto_spend is False
+    assert s.feature_public_sector is False
+    assert s.ai_provider == "anthropic"
+    assert s.plaid_country_codes == ["US"]
+    assert s.plaid_tx_days_requested == 730
+    assert s.sqlalchemy_url.host == "db"
+    assert s.redis_url.get_secret_value() == "redis://redis:6379/0"
+    # Optional integrations are absent, not crashing.
+    assert s.plaid_client_id is None
+    assert s.anthropic_api_key is None
+    assert s.fernet_key is None
+    # No personal assumptions baked in.
+    assert s.household_state is None
+    assert s.history_start is None
+
+
+def test_every_contract_variable_is_a_setting() -> None:
+    fields = {name.upper() for name in Settings.model_fields}
+    assert set(CONTRACT_ENV_VARS) <= fields
+
+
+def test_plaid_env_rejects_unknown_values(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("PLAID_ENV", "development")
+    with pytest.raises(ValidationError):
+        make_settings()
+
+
+def test_empty_env_values_mean_unset(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("PLAID_ENV", "")
+    clean_env.setenv("PLAID_WEBHOOK_URL", "")
+    s = make_settings()
+    assert s.plaid_env == "sandbox"
+    assert s.plaid_webhook_url is None
+
+
+def test_csv_lists_and_flags_parse_from_env(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("PLAID_PRODUCTS", "transactions, auth ,balance")
+    clean_env.setenv("PLAID_COUNTRY_CODES", "US,CA")
+    clean_env.setenv("FEATURE_TAX", "true")
+    clean_env.setenv("APP_ENV", "prod")
+    s = make_settings()
+    assert s.plaid_products == ["transactions", "auth", "balance"]
+    assert s.plaid_country_codes == ["US", "CA"]
+    assert s.feature_tax is True
+    assert s.is_prod
+
+
+def test_secrets_are_secretstr_and_not_in_repr(clean_env: pytest.MonkeyPatch) -> None:
+    secrets = {
+        "SESSION_SECRET": "session-value-123",
+        "FERNET_KEY": "fernet-value-456",
+        "PLAID_SECRET_SANDBOX": "plaid-sandbox-789",
+        "PLAID_SECRET_PRODUCTION": "plaid-prod-000",
+        "ANTHROPIC_API_KEY": "anthropic-key-abc",
+        "OPENAI_COMPAT_API_KEY": "compat-key-def",
+        "SMTP_PASS": "smtp-pass-ghi",
+        "CF_API_TOKEN": "cf-token-jkl",
+        "POSTGRES_PASSWORD": "pg-pass-mno",
+        "SIMPLEFIN_ACCESS_URL": "https://user:sf-pass-pqr@simplefin.example/x",
+        "DATABASE_URL": "postgresql+psycopg://holdfast:db-pass-stu@db:5432/holdfast",
+    }
+    for name, value in secrets.items():
+        clean_env.setenv(name, value)
+    s = make_settings()
+    rendered = repr(s) + str(s) + s.model_dump_json()
+    for name, value in secrets.items():
+        assert isinstance(getattr(s, name.lower()), SecretStr), name
+        assert value not in rendered, name
+
+
+def test_postgres_password_fills_url_without_password(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("POSTGRES_PASSWORD", "pw-from-env")
+    url = make_settings().sqlalchemy_url
+    assert url.password == "pw-from-env"
+    assert "pw-from-env" not in str(url)  # SQLAlchemy masks it when stringified
+
+
+def test_explicit_url_password_wins(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("POSTGRES_PASSWORD", "ignored")
+    clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast:explicit@db:5432/holdfast")
+    assert make_settings().sqlalchemy_url.password == "explicit"
