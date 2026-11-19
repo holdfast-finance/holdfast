@@ -8,8 +8,9 @@ const TOKEN_LINE = /HOLDFAST FIRST-RUN SETUP TOKEN: (\S+) ===/g
 const DEFAULT_TOKEN_CMD = 'docker compose logs --no-log-prefix api'
 
 /**
- * The first-run setup token, from (in order): SETUP_TOKEN, the APP_ENV=test hook, or the API log.
- * The hook route only exists when the API runs with APP_ENV=test; dev and prod answer 404.
+ * The first-run setup token, from (in order): SETUP_TOKEN, the test hook, or the API log.
+ * The hook route only exists when the API runs with APP_ENV=test *and* E2E_HOOKS=true; anything
+ * else (dev, prod, or test without E2E_HOOKS) answers 404.
  */
 export async function readSetupToken(request: APIRequestContext): Promise<string> {
   const fromEnv = process.env.SETUP_TOKEN?.trim()
@@ -30,7 +31,8 @@ export async function readSetupToken(request: APIRequestContext): Promise<string
   const last = matches.at(-1)?.[1]
   if (!last) {
     throw new Error(
-      'No setup token: set SETUP_TOKEN, run the API with APP_ENV=test, or restart the API so it ' +
+      'No setup token: set SETUP_TOKEN, run the API with APP_ENV=test and E2E_HOOKS=true, or ' +
+        'restart the API so it ' +
         'prints a fresh one (`docker compose restart api`).',
     )
   }
