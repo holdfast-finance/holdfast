@@ -2,6 +2,7 @@ import { Outlet, Link } from 'react-router'
 
 import { Logomark, Wordmark } from '@/components/brand/Logomark'
 import { ApiStatusIndicator } from '@/components/layout/ApiStatusIndicator'
+import { MissingPasskeyBanner } from '@/components/layout/MissingPasskeyBanner'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { BottomNav } from '@/components/mobile/BottomNav'
 import { useIsDesktop } from '@/hooks/useBreakpoint'
@@ -29,6 +30,7 @@ export function AppShell() {
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <main id="main" tabIndex={-1} className="flex-1 px-8 py-8 outline-none lg:px-10">
+            <MissingPasskeyBanner />
             <Outlet />
           </main>
           <footer className="px-8 pb-6 text-xs text-muted-foreground lg:px-10">
@@ -50,6 +52,7 @@ export function AppShell() {
         <ApiStatusIndicator />
       </header>
       <main id="main" tabIndex={-1} className="flex-1 px-4 pt-5 pb-28 outline-none">
+        <MissingPasskeyBanner />
         <Outlet />
         <p className="mt-10 text-xs text-muted-foreground">{FOOTER_LINE}</p>
       </main>

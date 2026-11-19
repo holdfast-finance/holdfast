@@ -38,6 +38,7 @@ afterEach(() => {
   resetDb()
   useReauthStore.setState({ pending: null })
   window.localStorage.clear()
+  window.sessionStorage.clear()
   mockViewport(375)
 })
 
