@@ -1,0 +1,60 @@
+# Dev override: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# (or `make up` / `./scripts/dev.ps1 up`). Hot reload for api and web; Caddy proxies to Vite.
+#
+# The anonymous volumes keep the image's /app/.venv and the container's node_modules from being
+# hidden by the bind mounts. `make up` passes --renew-anon-volumes so they refresh on each up.
+
+services:
+  db:
+    # Dev only, loopback only: lets host-side `uv run pytest` reach Postgres.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  api:
+    command:
+      - uvicorn
+      - app.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    read_only: false
+    volumes:
+      - ./backend:/app
+      - /app/.venv
+
+  worker:
+    read_only: false
+    volumes:
+      - ./backend:/app
+      - /app/.venv
+
+  web:
+    image: node:24-alpine
+    build: !reset null
+    working_dir: /app
+    environment:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      npm_config_store_dir: /pnpm-store
+      CI: "true"
+    command:
+      - sh
+      - -c
+      - corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 5173
+    read_only: false
+    tmpfs: !reset []
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - pnpm_store:/pnpm-store
+
+  caddy:
+    environment:
+      WEB_UPSTREAM: web:5173
+
+volumes:
+  pnpm_store:

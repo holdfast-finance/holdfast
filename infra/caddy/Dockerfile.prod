@@ -1,0 +1,7 @@
+# Prod edge Caddy with the Cloudflare DNS provider, for DNS-01 certs (PLAN 12.1).
+FROM caddy:2-builder AS builder
+RUN xcaddy build --with github.com/caddy-dns/cloudflare
+
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+COPY Caddyfile.prod /etc/caddy/Caddyfile
