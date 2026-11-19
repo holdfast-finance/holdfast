@@ -13,10 +13,10 @@ case ",${LABELS:-}," in *,bulwark-approved,*) approved=true ;; esac
 problems=()
 range="$base...$head"
 
-protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|\.gitleaks\.toml$|\.gitleaksignore$|backend/pyproject\.toml$|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/(caddy|postgres)/|scripts/(check-protected-paths\.sh|audit_gate\.py|protect-main\.sh)$|scripts/tests/|(.*/)?conftest\.py$)'
-while IFS= read -r f; do
+protected_re='^(\.github/|\.claude/|CLAUDE\.md$|\.githooks/|\.gitleaks\.toml$|\.gitleaksignore$|backend/pyproject\.toml$|web/(package\.json|vitest\.config\.[^/]*|playwright\.config\.[^/]*)$|backend/app/security/|backend/app/agent/guardrails\.py$|docker-compose[^/]*\.yml$|infra/(caddy|postgres)/|scripts/(check-protected-paths\.sh|audit_gate\.py|protect-main\.sh)$|scripts/tests/|(.*/)?conftest\.py$)'
+while IFS= read -r -d '' f; do
   [ -n "$f" ] && problems+=("protected path touched: $f")
-done < <(git diff --no-renames --name-only "$range" | grep -E "$protected_re" || true)
+done < <(git -c core.quotePath=false diff -z --no-renames --name-only "$range" | grep -zE "$protected_re" || true)
 
 # Added lines (no file headers) of a diff over the given pathspecs.
 added() { git diff --no-renames -U0 --diff-filter=AM "$range" -- "$@" | grep -E '^\+[^+]' || true; }
@@ -30,20 +30,20 @@ net_removed() {
 }
 
 # RLS migrations: any added/modified migration that mentions RLS or policies.
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -z "$f" ] && continue
   if git show "$head:$f" 2>/dev/null | grep -qiE 'row level security|create policy|alter policy|drop policy|force row'; then
     problems+=("RLS migration touched: $f")
   fi
-done < <(git diff --no-renames --name-only --diff-filter=AM "$range" -- backend/migrations/versions)
+done < <(git -c core.quotePath=false diff -z --no-renames --name-only --diff-filter=AM "$range" -- backend/migrations/versions)
 
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] && problems+=("test deleted: $f")
-done < <(git diff --no-renames --name-only --diff-filter=D "$range" -- backend/tests)
+done < <(git -c core.quotePath=false diff -z --no-renames --name-only --diff-filter=D "$range" -- backend/tests)
 
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] && problems+=("migration deleted: $f")
-done < <(git diff --no-renames --name-only --diff-filter=D "$range" -- backend/migrations/versions)
+done < <(git -c core.quotePath=false diff -z --no-renames --name-only --diff-filter=D "$range" -- backend/migrations/versions)
 
 weakened=$(added backend/migrations/versions | grep -iE 'alter policy|drop policy|disable row level security|no force row' || true)
 [ -n "$weakened" ] && problems+=("RLS weakened in migration diff: $(echo "$weakened" | head -3 | tr '\n' ' ')")

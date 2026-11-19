@@ -70,6 +70,12 @@ class GateCase(unittest.TestCase):
             with self.subTest(rel=rel):
                 self.blocked(lambda r, rel=rel: write(r, rel, "x\n"), f"protected path touched: {rel}")
 
+    def test_quoted_path_bypass(self) -> None:
+        for rel in [".github/workflows/caf\u00e9.yml", 'infra/postgres/a"b.sh', "web/vitest.config.ts",
+                    "web/playwright.config.ts", "web/package.json"]:
+            with self.subTest(rel=rel):
+                self.blocked(lambda r, rel=rel: write(r, rel, "x\n"), f"protected path touched: {rel}")
+
     def test_migration_privilege_patterns(self) -> None:
         for pat in ["ALTER ROLE holdfast_app BYPASSRLS", "GRANT ALL ON t TO holdfast_app",
                     "CREATE FUNCTION f() SECURITY DEFINER"]:
