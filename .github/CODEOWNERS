@@ -1,0 +1,18 @@
+# Informational only. No owner lines are active: the org has no teams, agents cannot be mapped to
+# GitHub accounts, and the merge gate is `ci-required` + the `bulwark-approved` label
+# (scripts/check-protected-paths.sh). When a team exists, add `<path> @holdfast-finance/<team>` lines.
+#
+# Lanes mirror docs/team/ROSTER.md (primary -> reviewers):
+#   backend/app/integrations/{plaid,simplefin}, backend/app/importers/   Tide -> Ledger, Bulwark
+#   backend/app/domain/, backend/app/services/                          Ledger -> Bulwark
+#   backend/app/{api,security,auth}                                     Lattice / feature owner -> Bulwark
+#   backend/app/models/, backend/migrations/                            migration-token holder -> Ledger, Bulwark
+#   backend/app/agent/                                                  Pilot -> Bulwark
+#   backend/app/tax/                                                    Tally -> Ledger
+#   backend/app/integrations/crypto/, web/src/features/crypto/          Cipher -> Bulwark
+#   web/                                                                Prism -> Prism (brand), Sounding
+#   .github/, infra/, docker-compose*.yml, Makefile, scripts/           Harbor -> Bulwark
+#   docs/                                                               Beacon -> Keel
+#
+# Protected (always a separate Bulwark verdict): .github/ .claude/ CLAUDE.md .githooks/
+#   backend/app/security/ RLS migrations backend/app/agent/guardrails.py docker-compose*.yml infra/caddy/
