@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import importlib.machinery
 import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,9 +28,12 @@ from app.services.setup import SETUP_TTL_SECONDS, issue_setup_token, setup_state
 
 API_PREFIX = "/api"
 ROUTE_MODULE_PREFIX = "routes_"
-# Route modules that exist only for automated e2e stacks. They are skipped *before import* unless
-# e2e_hooks_enabled(), so their code never loads in dev or prod.
-TEST_ONLY_ROUTE_MODULES = frozenset({"routes_testing"})
+# Test-only route modules (ADR 0011). Two independent signals, both fail closed:
+# - a name starting ``routes_test`` is skipped *before import* unless e2e hooks are enabled, so
+#   its code never loads in dev or prod, and it must declare ``TEST_ONLY = True``;
+# - any route module declaring ``TEST_ONLY = True`` refuses to mount without e2e hooks, and the
+#   app fails at startup rather than serving it.
+TEST_ROUTE_PREFIX = "routes_test"
 SETUP_RETRY_SECONDS = 5.0
 
 log = get_logger(__name__)
@@ -40,25 +44,47 @@ def e2e_hooks_enabled(settings: Settings) -> bool:
     return settings.app_env == "test" and settings.e2e_hooks
 
 
+def _has_source(finder: object, name: str) -> bool:
+    """True only for a module backed by a real ``.py`` file (no sourceless .pyc, .so, .pyd)."""
+    find_spec = getattr(finder, "find_spec", None)
+    spec = find_spec(name) if find_spec is not None else None
+    return (
+        spec is not None
+        and isinstance(spec.loader, importlib.machinery.SourceFileLoader)
+        and isinstance(spec.origin, str)
+        and spec.origin.endswith(".py")
+    )
+
+
 def discover_route_modules(settings: Settings) -> list[str]:
     """Names of ``app/api/routes_*.py`` modules to mount, sorted for a stable OpenAPI order.
 
     A new router is a new module exposing ``router``; main.py is never edited (ADR 0011).
     """
-    names = sorted(
+    hooks = e2e_hooks_enabled(settings)
+    return sorted(
         info.name
         for info in pkgutil.iter_modules(api_pkg.__path__)
-        if info.name.startswith(ROUTE_MODULE_PREFIX) and not info.ispkg
+        if info.name.startswith(ROUTE_MODULE_PREFIX)
+        and not info.ispkg
+        and (hooks or not info.name.startswith(TEST_ROUTE_PREFIX))
+        and _has_source(info.module_finder, info.name)
     )
-    if not e2e_hooks_enabled(settings):
-        names = [n for n in names if n not in TEST_ONLY_ROUTE_MODULES]
-    return names
 
 
 def build_api_router(settings: Settings) -> APIRouter:
+    hooks = e2e_hooks_enabled(settings)
     api = APIRouter(prefix=API_PREFIX)
     for name in discover_route_modules(settings):
         module = importlib.import_module(f"{api_pkg.__name__}.{name}")
+        test_only = getattr(module, "TEST_ONLY", False) is True
+        if name.startswith(TEST_ROUTE_PREFIX) and not test_only:
+            raise RuntimeError(f"app.api.{name} is a test route module; declare TEST_ONLY = True")
+        if test_only and not hooks:
+            raise RuntimeError(
+                f"app.api.{name} is TEST_ONLY but APP_ENV=test and E2E_HOOKS=true are not both "
+                "set; refusing to start"
+            )
         router = getattr(module, "router", None)
         if not isinstance(router, APIRouter):
             raise RuntimeError(f"app.api.{name} must expose `router: APIRouter`")
