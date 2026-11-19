@@ -9,7 +9,7 @@ Two brands, one product (ADR 0003, amended by ADR 0009):
 - **Holo** (Direction C): Holdfast Cloud, the paid hosted tier, and its marketing aimed at less
   technical people. See [Holo brand](#holo-brand-holdfast-cloud) at the end.
 
-The source boards are in `Holdfast_Brand_Direction.pdf`: pages 1–4 are Direction 01, 5–8 are
+The source boards are in `Holdfast_Brand_Direction.pdf` and, as a self-contained interactive bundle with each direction's brand board, landing page and app dashboard (fonts embedded, OFL), `Holdfast_Brand_Direction.html`. In the PDF: pages 1–4 are Direction 01, 5–8 are
 Direction B (Terminal / Brutalist, reference only) and 9–12 are Holo. Never mix 01 and Holo on one
 surface. In the app they're whole themes (`data-brand`), and components use only semantic tokens.
 
