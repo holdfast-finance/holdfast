@@ -55,6 +55,7 @@ The app is at https://localhost (self-signed in dev).
 | Frontend | `cd web && pnpm dev` / `pnpm test` / `pnpm lint` / `pnpm typecheck` | same |
 | New migration | `cd backend && uv run alembic revision --autogenerate -m "<msg>"` | same |
 | Secret scan | `gitleaks git --staged` (runs in `.githooks/pre-commit`) | same |
+| API types | `make api-types` (drift: `make api-types-check`, part of `make lint`) | pytest `tests/test_openapi_export.py` also checks the schema hash |
 
 Tooling: Python **3.12** via `uv` (system Python is 3.14, so don't use it). Node 24 + **pnpm**.
 Docker Compose for services.
