@@ -1,6 +1,7 @@
 """Shared fixtures and the outbound network guard.
 
-Service-backed tests read ``TEST_DATABASE_URL`` and ``TEST_REDIS_URL`` (falling back to
+Service-backed tests read ``TEST_DATABASE_URL`` (the runtime app role),
+``TEST_MIGRATIONS_DATABASE_URL`` (the schema owner role) and ``TEST_REDIS_URL`` (falling back to
 ``REDIS_URL``). Locally they skip with a reason when the services are unreachable. When ``CI``
 is set, an unreachable service is a hard failure instead, so these tests always run in CI.
 """
@@ -29,7 +30,10 @@ CONTRACT_ENV_VARS = (
     "SESSION_SECRET",
     "FERNET_KEY",
     "DATABASE_URL",
+    "MIGRATIONS_DATABASE_URL",
     "POSTGRES_PASSWORD",
+    "POSTGRES_APP_PASSWORD",
+    "POSTGRES_OWNER_PASSWORD",
     "REDIS_URL",
     "DOCUMENT_STORE",
     "PLAID_ENV",
@@ -71,6 +75,10 @@ def env_database_url() -> str | None:
     return os.environ.get("TEST_DATABASE_URL")
 
 
+def env_migrations_database_url() -> str | None:
+    return os.environ.get("TEST_MIGRATIONS_DATABASE_URL")
+
+
 def env_redis_url() -> str | None:
     return os.environ.get("TEST_REDIS_URL") or os.environ.get("REDIS_URL")
 
@@ -84,7 +92,7 @@ class NetworkBlockedError(RuntimeError):
 
 def _allowed_hosts() -> set[str]:
     hosts = set(LOCAL_HOSTS)
-    for url in (env_database_url(), env_redis_url()):
+    for url in (env_database_url(), env_migrations_database_url(), env_redis_url()):
         if url and (host := urlsplit(url).hostname):
             hosts.add(host)
     return hosts
@@ -203,6 +211,17 @@ def database_url() -> str:
     assert url is not None
     if not _reachable(url, 5432):
         _unavailable("Postgres at TEST_DATABASE_URL is unreachable")
+    return url
+
+
+@pytest.fixture
+def migrations_database_url() -> str:
+    url = env_migrations_database_url()
+    if not url:
+        _unavailable("TEST_MIGRATIONS_DATABASE_URL is not set; it names the schema owner role")
+    assert url is not None
+    if not _reachable(url, 5432):
+        _unavailable("Postgres at TEST_MIGRATIONS_DATABASE_URL is unreachable")
     return url
 
 

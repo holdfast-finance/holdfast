@@ -2,7 +2,7 @@
 # Prod uses Caddyfile.prod (DNS-01 + Tailscale bind) via infra/docker-compose.prod.yml.
 #
 # The dev CSP adds 'unsafe-inline' (Vite's React-refresh preamble and injected <style> tags) and
-# ws:/wss: (Vite HMR). The prod CSP in Caddyfile.prod has neither.
+# wss://{$APP_HOST} (Vite HMR through this proxy). The prod CSP in Caddyfile.prod has neither.
 {
 	admin localhost:2019
 	auto_https disable_redirects
@@ -26,7 +26,7 @@
 	header @docs Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://fastapi.tiangolo.com; connect-src 'self'"
 
 	@notdocs not path /api/docs /api/docs/* /api/redoc
-	header @notdocs Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com ws: wss:"
+	header @notdocs Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src https://cdn.plaid.com; connect-src 'self' https://*.plaid.com wss://{$APP_HOST:localhost}; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
 
 	handle /api/* {
 		reverse_proxy api:8000

@@ -72,6 +72,9 @@ def test_secrets_are_secretstr_and_not_in_repr(clean_env: pytest.MonkeyPatch) ->
         "SMTP_PASS": "smtp-pass-ghi",
         "CF_API_TOKEN": "cf-token-jkl",
         "POSTGRES_PASSWORD": "pg-pass-mno",
+        "POSTGRES_APP_PASSWORD": "pg-app-pass-vwx",
+        "POSTGRES_OWNER_PASSWORD": "pg-owner-pass-abc",
+        "MIGRATIONS_DATABASE_URL": "postgresql+psycopg://holdfast_owner:own-pass@db:5432/holdfast",
         "SIMPLEFIN_ACCESS_URL": "https://user:sf-pass-pqr@simplefin.example/x",
         "DATABASE_URL": "postgresql+psycopg://holdfast:db-pass-stu@db:5432/holdfast",
     }
@@ -84,14 +87,34 @@ def test_secrets_are_secretstr_and_not_in_repr(clean_env: pytest.MonkeyPatch) ->
         assert value not in rendered, name
 
 
-def test_postgres_password_fills_url_without_password(clean_env: pytest.MonkeyPatch) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "pw-from-env")
+def test_app_password_fills_runtime_url(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("POSTGRES_APP_PASSWORD", "pw-from-env")
+    clean_env.setenv("POSTGRES_PASSWORD", "admin-must-not-be-used")
     url = make_settings().sqlalchemy_url
+    assert url.username == "holdfast_app"
     assert url.password == "pw-from-env"
     assert "pw-from-env" not in str(url)  # SQLAlchemy masks it when stringified
 
 
 def test_explicit_url_password_wins(clean_env: pytest.MonkeyPatch) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "ignored")
-    clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast:explicit@db:5432/holdfast")
+    clean_env.setenv("POSTGRES_APP_PASSWORD", "ignored")
+    clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast_app:explicit@db:5432/holdfast")
     assert make_settings().sqlalchemy_url.password == "explicit"
+
+
+def test_migrations_url_uses_owner_role_and_password(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast_app@db:5432/holdfast")
+    clean_env.setenv(
+        "MIGRATIONS_DATABASE_URL", "postgresql+psycopg://holdfast_owner@db:5432/holdfast"
+    )
+    clean_env.setenv("POSTGRES_APP_PASSWORD", "app-pw")
+    clean_env.setenv("POSTGRES_OWNER_PASSWORD", "owner-pw")
+    s = make_settings()
+    assert (s.sqlalchemy_url.username, s.sqlalchemy_url.password) == ("holdfast_app", "app-pw")
+    mig = s.migrations_sqlalchemy_url
+    assert (mig.username, mig.password) == ("holdfast_owner", "owner-pw")
+
+
+def test_migrations_url_falls_back_to_database_url(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast_app:explicit@db:5432/holdfast")
+    assert make_settings().migrations_sqlalchemy_url.username == "holdfast_app"

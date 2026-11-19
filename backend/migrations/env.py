@@ -1,7 +1,8 @@
 """Alembic environment (async, psycopg 3).
 
-The URL comes from ``Settings`` (DATABASE_URL + POSTGRES_PASSWORD). Tests may pass a URL through
-``config.attributes["database_url"]`` instead.
+Migrations run as the schema owner: the URL comes from ``Settings.migrations_sqlalchemy_url``
+(MIGRATIONS_DATABASE_URL + POSTGRES_OWNER_PASSWORD, falling back to DATABASE_URL). Tests may pass a
+URL through ``config.attributes["database_url"]`` instead.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ def _url() -> URL:
     override = config.attributes.get("database_url")
     if override is not None:
         return make_url(override)
-    return get_settings().sqlalchemy_url
+    return get_settings().migrations_sqlalchemy_url
 
 
 def run_migrations_offline() -> None:

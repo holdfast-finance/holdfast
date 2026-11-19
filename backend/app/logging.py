@@ -78,9 +78,35 @@ class RedactionFilter(logging.Filter):
             record.args = None
         if isinstance(record.msg, str):
             record.msg = redact_text(record.msg)
+        # Tracebacks quote exception messages (and source lines), which can carry DSNs or
+        # tokens. Pre-render and redact exc_text so stdlib formatters use the masked copy;
+        # the structlog pipeline masks its own rendering in redact_exception_processor.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = _TRACEBACK_FORMATTER.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = redact_text(record.exc_text)
+        if record.stack_info:
+            record.stack_info = redact_text(record.stack_info)
         for attr in set(vars(record)) - self._STANDARD:
             setattr(record, attr, redact(getattr(record, attr), attr))
         return True
+
+
+_TRACEBACK_FORMATTER = logging.Formatter()
+
+# Keys structlog renders tracebacks / stacks into (format_exc_info, StackInfoRenderer).
+_RENDERED_TRACE_KEYS = ("exception", "stack")
+
+
+def redact_exception_processor(
+    _logger: Any, _method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Mask credentials in rendered tracebacks. Must run after ``format_exc_info``."""
+    for key in _RENDERED_TRACE_KEYS:
+        value = event_dict.get(key)
+        if isinstance(value, str):
+            event_dict[key] = redact_text(value)
+    return event_dict
 
 
 def _drop_color_message(
@@ -110,6 +136,7 @@ def configure_logging(level: str | int = "INFO", *, json: bool = True) -> None:
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.processors.format_exc_info,
+            redact_exception_processor,
             renderer,
         ],
     )
