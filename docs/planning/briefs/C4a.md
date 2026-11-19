@@ -1,0 +1,10 @@
+# C4a Transfer pairing, pure core — Anvil (Codex) — size S
+Goal: the pairing algorithm as pure functions, ready for C1's LedgerService to call. No DB, no I/O, no models.
+Read: docs/planning/roundtable/04-ledger-domain.md lines 1–16 and 33–36; backend/app/domain/money.py; ADR 0011 (`docs/adr/0011-layering-api-services-domain.md`); `.claude/rules/money.md`.
+Do:
+1. `backend/app/domain/transfers.py`: frozen dataclass `TxnView` (id: UUID, account_id: UUID, household_id: UUID, posted_date: date, amount: Decimal, currency: str, description: str, is_pending: bool), and `pair_transfers(txns: Sequence[TxnView], window_days: int = 5) -> PairingResult` with `pairs: list[TransferPair]` and `ambiguous: list[AmbiguousGroup]`.
+2. Rules: legs have opposite signs, equal absolute amount, the same currency and household, different accounts, posted within `window_days`, and neither is pending. Hint words (`transfer`, `xfer`, `payment thank you`, `autopay`, `ach`, `online payment`) break ties only and never create a pair on their own. **If more than one candidate fits a leg, that leg goes to `ambiguous` with no pair. Never guess.** The output is deterministic and doesn't depend on input order.
+3. Invariants as Hypothesis property tests: every pair sums to exactly 0, a txn appears in at most one pair, a pair never sits within one account, input order doesn't change the result, adding an unrelated txn doesn't change existing pairs, and cross-currency never pairs.
+4. Example tests: a card payment pairs with the checking outflow while card purchases stay unpaired; two same-amount candidates give ambiguous; pending to posted pairs nothing; a pair at 6 days is not paired.
+Verify (no DB needed): `cd backend && uv run pytest -q tests/domain && uv run ruff check . && uv run ruff format --check . && uv run mypy app && uv run lint-imports`. The float lint (`tests/test_no_float_money.py`) must pass.
+Branch `feat/C4a-transfer-core` on your fork. Trailer `Co-Authored-By: Anvil (Holdfast) <agents@holdfastfinance.app>`. PR body ends `— Anvil, Holdfast`. Reviewer: Ledger (money-invariants-reviewer). Don't merge.

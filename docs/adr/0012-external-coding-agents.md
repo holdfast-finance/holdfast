@@ -1,6 +1,6 @@
 # 0012. Coding agents from other vendors (Codex as Anvil, Grok as Flint)
 
-- Status: Accepted
+- Status: Accepted (agents start once the owner setup is done)
 - Date: 2026-11-19
 - Deciders: Keel; owner request ("prepare Codex and Grok to work while you're gone")
 
@@ -15,22 +15,30 @@ recorded here. `AGENTS.md` already said a new agent's lane has to be defined bef
 ## Decision
 1. Codex works as **Anvil** and Grok works as **Flint**. They get lanes, briefs and a trailer like
    any other team member. They are never credited by vendor or model name.
-2. **Same gate, no merge rights.** They push branches and open PRs. Only Keel merges, after
-   `ci-required` and SHA-bound reviews from the Claude-team gates (Bulwark, Ledger, Tally, Prism,
-   Sounding) by path. Cross-vendor review is a feature here: the builder and the gate are different models.
-3. **Narrow lanes.** They're forbidden from protected paths, migrations (unless they hold the
-   token), live Plaid, secrets and anything on the owner queue (`AGENTS.md`).
-4. **Pull-based coordination** through `docs/planning/HANDOFF.md`. Pushing the story branch is the
-   claim. One story per agent at a time, each in its own worktree off a fresh `origin/main`.
-5. **Data exposure:** only the repo goes to these vendors, and it's going open source under
-   AGPL-3.0 anyway. `.env`, `data/` and `secrets/` are never read (guard hooks don't cover these
-   tools, so the rule is in `AGENTS.md`, and the owner should configure each CLI's sandbox or deny
-   list to match). No real financial data exists in the repo (hard rule 7).
+2. **Their own identity, no write access.** They run as a separate OS user (`holdfast-agents`) in
+   its own clone, signed in to GitHub as a machine user with the **Read** role. They push only to the
+   machine user's fork and open PRs from there. They can't push to `main`, merge, add labels
+   (including `bulwark-approved`) or change settings, whatever their instructions say. This holds even
+   while rulesets are unavailable on the free plan. Owner steps: `docs/process/EXTERNAL-AGENTS-SETUP.md`.
+3. **Same gate.** Only Keel merges, after `ci-required`, `review-gate` and SHA-bound reviews from the
+   Claude-team gates (Bulwark, Ledger, Tally, Prism, Sounding) by path. Cross-vendor review is a
+   feature here: the builder and the gate are different models.
+4. **Narrow lanes** (`AGENTS.md`). Agent/CI config, build and ops files, tooling config, every
+   trust boundary (auth, CSRF, agent and redaction, integrations, crypto), migrations, and ADR/process
+   docs are out of bounds. Their first stories are pure domain cores (transfers, recurring), sourced
+   tax config and user docs.
+5. **Pull-based coordination** through `docs/planning/HANDOFF.md`. An open draft PR is the claim.
+6. **Data exposure:** each vendor receives whatever its agent reads or runs: repo files, command
+   output, test logs, and anything else readable by `holdfast-agents`. The OS user separation keeps
+   the owner's `.env`, SSH keys and `gh` token out of that set. The agents' own `.env` is a throwaway
+   from `make keys`. The repo holds no real financial data (hard rule 7) and is going open source
+   under AGPL-3.0.
 
 ## Consequences
 - More throughput when Claude windows are exhausted, at the cost of review load on Keel's next window.
 - The Claude hooks (`guard-secrets.sh`, `format.sh`) don't run for Anvil or Flint. The pre-commit
-  gitleaks hook and CI still do. Formatting drift gets caught by `ruff format --check` and `pnpm lint`.
+  gitleaks hook, CI and `review-gate` still do.
+- Agents can't run DB-backed tests locally (no docker group). CI is the source of truth for their PRs.
 - The owner pays for and configures each CLI. Usage isn't counted in the sprint token log.
 - If either agent breaks a lane rule, Keel closes its PRs and removes its column from `HANDOFF.md`.
-- Revisit when F7 rulesets land, so that the GitHub-side protections are verified for every author.
+- Codex's own config (`.codex/`, `.agents/`) is a protected path and changes only through Keel and Bulwark.

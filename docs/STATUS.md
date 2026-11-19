@@ -35,6 +35,8 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 ## Owner to-do
 
+- [ ] Set up Anvil (Codex) and Flint (Grok): machine user + fork + separate OS user, `docs/process/EXTERNAL-AGENTS-SETUP.md` (ADR 0012). They don't start until this is done
+- [ ] Rulesets on `main` (F7 `scripts/protect-main.sh`) need GitHub Team on a private repo, or a public repo. Until then `main` is protected only by process
 - [ ] **First:** move the production Plaid keys out of the dev `.env` (keep only sandbox keys). Agents build Phase 2 fixture-first until then
 - [ ] Read the weekly digest (`docs/digest/`) when convenient. Changes to `.github/`, `.claude/` and `CLAUDE.md` are listed there for veto
 
