@@ -10,7 +10,12 @@ Every household-scoped table has RLS keyed on two transaction-local settings:
 
 Background jobs that must write to every account in a household, whoever owns it (bank sync,
 imports), pass ``household_wide=True``. That widens person visibility only; the household boundary
-still holds. Request handlers never set it.
+still holds. Request handlers never set it (``tests/models/test_household_wide_guard.py`` fails
+if ``household_wide=True`` appears under ``app/api/``).
+
+Per-person rules (ADR 0008): a person *reads* accounts by visibility but *writes* only their own
+or joint accounts and those accounts' details. Agent output with a ``person_id`` is visible only
+to that person. The app role can't delete a household.
 
 Identity tables (``app_user``, ``webauthn_credential``, ``auth_session``, ``totp_recovery_code``)
 have no RLS because login happens before any household is known. Use ``unscoped_session`` for

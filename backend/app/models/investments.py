@@ -21,6 +21,7 @@ from app.models._common import (
     Quantity,
     Rate,
     check_in,
+    check_non_negative,
     child_fk,
 )
 
@@ -40,7 +41,11 @@ class Security(Base):
 
 
 class Holding(Base):
-    """Position per account, security and day. Detail table (hidden from summary_only)."""
+    """Position per account, security and day. Detail table (hidden from summary_only).
+
+    ``quantity`` is positive for a long position (negative only for a short). ``cost_basis`` and
+    ``value`` are totals for the position in account currency, positive for a long position.
+    """
 
     __tablename__ = "holding"
     __table_args__ = (
@@ -62,11 +67,22 @@ class Holding(Base):
 
 
 class InvestmentTxn(Base):
-    """Buys, sells, dividends, contributions, fees. Detail table (hidden from summary_only)."""
+    """Buys, sells, dividends, contributions, fees. Detail table (hidden from summary_only).
+
+    Sign convention (same as ``transaction``: cash out of the account is negative):
+
+    - ``amount``: cash effect on the account. Buy negative (outflow), sell positive, dividend /
+      interest positive, fee negative. Plaid reports buys as positive, so negate on ingest.
+    - ``quantity``: change in units held. Buy positive, sell negative.
+    - ``price``: per unit, non-negative (CHECK).
+    - ``fees``: a non-negative magnitude (CHECK ``>= 0``), already included in ``amount``.
+    """
 
     __tablename__ = "investment_txn"
     __table_args__ = (
         check_in("type", INVESTMENT_TXN_TYPES),
+        check_non_negative("fees"),
+        check_non_negative("price"),
         child_fk("account_id", "account"),
         UniqueConstraint("account_id", "external_id"),
     )
@@ -82,19 +98,34 @@ class InvestmentTxn(Base):
     security_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("security.id", ondelete="SET NULL"), index=True
     )
-    quantity: Mapped[Quantity | None]
-    price: Mapped[Price | None]
-    amount: Mapped[Money]
-    fees: Mapped[Money | None]
+    quantity: Mapped[Quantity | None] = mapped_column(
+        comment="Change in units held: buy positive, sell negative."
+    )
+    price: Mapped[Price | None] = mapped_column(comment="Per-unit price, non-negative.")
+    amount: Mapped[Money] = mapped_column(
+        comment="Cash effect: buy negative (outflow), sell/dividend positive. Plaid negated."
+    )
+    fees: Mapped[Money | None] = mapped_column(
+        comment="Fees as a non-negative magnitude, already included in amount."
+    )
     created_at: Mapped[CreatedAt]
 
 
 class Liability(Base):
-    """Loan / card terms, one row per account. Detail table (hidden from summary_only)."""
+    """Loan / card terms, one row per account. Detail table (hidden from summary_only).
+
+    Amounts here are as the lender states them: ``statement_balance`` is positive = owed
+    (negative only for a credit balance), ``min_payment`` and ``original_principal`` are
+    non-negative magnitudes. This differs on purpose from ``balance_snapshot.current``, which
+    is negative for debt. ``apr`` is a **percent** (24.9900 = 24.99%), unlike Ratio fractions.
+    """
 
     __tablename__ = "liability"
     __table_args__ = (
         check_in("kind", LIABILITY_KINDS),
+        check_non_negative("apr"),
+        check_non_negative("min_payment"),
+        check_non_negative("original_principal"),
         ForeignKeyConstraint(
             ["account_id", "household_id"],
             ["account.id", "account.household_id"],
@@ -105,10 +136,14 @@ class Liability(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     household_id: Mapped[HouseholdId]
     kind: Mapped[str]
-    apr: Mapped[Rate | None]  # percent, e.g. 24.9900
-    min_payment: Mapped[Money | None]
+    apr: Mapped[Rate | None] = mapped_column(
+        comment="Annual percentage rate as a percent: 24.9900 = 24.99% (not a fraction)."
+    )
+    min_payment: Mapped[Money | None] = mapped_column(comment="Non-negative magnitude.")
     next_due_date: Mapped[date | None]
-    statement_balance: Mapped[Money | None]
-    original_principal: Mapped[Money | None]
+    statement_balance: Mapped[Money | None] = mapped_column(
+        comment="As stated by the lender: positive = owed, negative = credit balance."
+    )
+    original_principal: Mapped[Money | None] = mapped_column(comment="Non-negative magnitude.")
     payoff_date: Mapped[date | None]
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

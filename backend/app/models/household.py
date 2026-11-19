@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, func
+from sqlalchemy import CheckConstraint, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -13,9 +13,14 @@ from app.models._common import FILING_ROLES, UUIDPK, CreatedAt, HouseholdId, che
 
 
 class Household(Base):
-    """The tenant. RLS: ``id = app_household_id()``. Created only via ``create_household()``."""
+    """The tenant. RLS: ``id = app_household_id()``. Created only via ``create_household()``.
+
+    The app role may read and rename its household but not insert or delete it. Deleting a
+    household (and everything under it) will be an owner / SECURITY DEFINER path (ADR 0008).
+    """
 
     __tablename__ = "household"
+    __table_args__ = (CheckConstraint("length(name) BETWEEN 1 AND 200", name="name_length"),)
 
     id: Mapped[UUIDPK]
     name: Mapped[str]
@@ -24,7 +29,11 @@ class Household(Base):
 
 class Person(Base):
     __tablename__ = "person"
-    __table_args__ = (check_in("filing_role", FILING_ROLES), parent_key())
+    __table_args__ = (
+        check_in("filing_role", FILING_ROLES),
+        CheckConstraint("length(display_name) BETWEEN 1 AND 200", name="display_name_length"),
+        parent_key(),
+    )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]

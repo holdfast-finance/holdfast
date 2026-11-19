@@ -18,6 +18,8 @@ from app.models._common import (
     Money,
     Ratio,
     check_in,
+    check_non_negative,
+    check_ratio,
     child_fk,
     parent_key,
 )
@@ -43,8 +45,13 @@ class Budget(Base):
 
 
 class BudgetLine(Base):
+    """``amount`` is the planned spend (or saving) for the period as a non-negative magnitude,
+    whatever the category kind. ``alert_pct`` is a fraction (0.8000 = alert at 80%)."""
+
     __tablename__ = "budget_line"
     __table_args__ = (
+        check_non_negative("amount"),
+        check_ratio("alert_pct"),
         child_fk("budget_id", "budget"),
         child_fk("category_id", "category"),
         UniqueConstraint("budget_id", "category_id"),
@@ -54,5 +61,7 @@ class BudgetLine(Base):
     household_id: Mapped[HouseholdId]
     budget_id: Mapped[uuid.UUID]  # indexed by the unique constraint
     category_id: Mapped[uuid.UUID] = mapped_column(index=True)
-    amount: Mapped[Money]
-    alert_pct: Mapped[Ratio] = mapped_column(server_default=text("0.8"))
+    amount: Mapped[Money] = mapped_column(comment="Planned amount, non-negative magnitude.")
+    alert_pct: Mapped[Ratio] = mapped_column(
+        server_default=text("0.8"), comment="Fraction in [0, 1]: 0.8000 alerts at 80%."
+    )

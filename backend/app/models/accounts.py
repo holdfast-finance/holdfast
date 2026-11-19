@@ -31,6 +31,7 @@ from app.models._common import (
     Money,
     check_in,
     check_masked,
+    check_non_negative,
     child_fk,
     parent_key,
 )
@@ -87,7 +88,12 @@ class BankConnection(Base):
 class Account(Base):
     """An account. ``owner_person_id`` NULL means joint. ``visibility`` is enforced by RLS.
 
-    ``mask`` holds the last few digits only. Full account numbers are never stored.
+    Reading follows ``visibility`` (PLAN 20.3). Writing is narrower (ADR 0008): only the owner,
+    anyone for a joint account, or a household-wide job may insert, update or delete it, and a
+    trigger rejects changes to ``visibility`` / ``owner_person_id`` by anyone else. A shared or
+    summary_only account is read-only to the other people in the household.
+
+    ``mask`` holds at most four digits. Full account numbers are never stored.
     """
 
     __tablename__ = "account"
@@ -129,10 +135,22 @@ class Account(Base):
 
 
 class BalanceSnapshot(Base):
-    """Daily balance per account. Visible to anyone who can see the account (summary_only too)."""
+    """Daily balance per account. Visible to anyone who can see the account (summary_only too).
+
+    Sign convention (as an asset from the household's point of view):
+
+    - ``current``: positive for assets (depository, investment); **negative = owed** for credit
+      and loan accounts. Plaid reports liabilities as positive, so negate on ingest.
+    - ``available``: what can be spent or drawn right now, as reported (positive; for a card
+      that's remaining credit). NULL when the institution doesn't say.
+    - ``limit_amt``: the credit limit as a positive magnitude (CHECK ``>= 0``).
+
+    Written only by the account's owner, for joint accounts, or by household-wide jobs.
+    """
 
     __tablename__ = "balance_snapshot"
     __table_args__ = (
+        check_non_negative("limit_amt"),
         ForeignKeyConstraint(
             ["account_id", "household_id"],
             ["account.id", "account.household_id"],
@@ -144,7 +162,11 @@ class BalanceSnapshot(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     as_of_date: Mapped[date] = mapped_column(primary_key=True)
     household_id: Mapped[HouseholdId]
-    current: Mapped[Money | None]
-    available: Mapped[Money | None]
-    limit_amt: Mapped[Money | None]
+    current: Mapped[Money | None] = mapped_column(
+        comment="Assets positive; credit/loan negative = owed (Plaid negated on ingest)."
+    )
+    available: Mapped[Money | None] = mapped_column(
+        comment="Spendable / drawable now, as reported (positive; remaining credit for cards)."
+    )
+    limit_amt: Mapped[Money | None] = mapped_column(comment="Credit limit, positive magnitude.")
     created_at: Mapped[CreatedAt]

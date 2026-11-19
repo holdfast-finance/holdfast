@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Index, UniqueConstraint, func, text
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -63,7 +63,21 @@ class Rule(Base):
 class Transaction(Base):
     """A transaction. ``amount``: outflow negative, inflow positive (Plaid is negated on ingest).
 
-    Detail table: hidden from people who only have ``summary_only`` access to the account.
+    Detail table: hidden from people who only have ``summary_only`` access to the account, and
+    writable only by the account's owner, for joint accounts, or by household-wide jobs. Moving a
+    row to another account (``account_id``) needs write access to both.
+
+    **Transfers.** ``transfer_group_id`` requires ``is_transfer`` (CHECK). A group is exactly two
+    legs with opposite-sign amounts on different accounts of the same household; the sync and
+    matching services enforce that in Phase 2 (one-legged transfers to an unlinked account are
+    legitimate: ``is_transfer`` with no group).
+
+    **Pending to posted.** ``pending_external_id`` is Plaid's ``pending_transaction_id`` on a
+    posted transaction: the ``external_id`` of the pending row it replaces. Phase 2 sync uses it
+    to retire the pending row instead of double-counting it.
+
+    **Splits.** If a transaction has splits, they sum exactly to ``amount`` (deferred constraint
+    trigger, checked at commit). Changing ``amount`` re-runs the check.
     """
 
     __tablename__ = "transaction"
@@ -73,6 +87,7 @@ class Transaction(Base):
         child_fk("account_id", "account"),
         child_fk("category_id", "category", ondelete="SET NULL"),
         child_fk("receipt_document_id", "document", ondelete="SET NULL"),
+        CheckConstraint("transfer_group_id IS NULL OR is_transfer", name="transfer_group"),
         # Scoped per account (not global) so a duplicate can't reveal another household's data.
         UniqueConstraint("account_id", "external_id"),
         UniqueConstraint("account_id", "import_fingerprint"),
@@ -96,7 +111,9 @@ class Transaction(Base):
     import_fingerprint: Mapped[str | None]
     posted_date: Mapped[date]
     authorized_date: Mapped[date | None]
-    amount: Mapped[Money]
+    amount: Mapped[Money] = mapped_column(
+        comment="Outflow negative, inflow positive. Plaid amounts are negated on ingest."
+    )
     description_raw: Mapped[str]
     merchant_name: Mapped[str | None]
     plaid_pfc_primary: Mapped[str | None]
@@ -110,12 +127,24 @@ class Transaction(Base):
     tax_tag: Mapped[str | None]
     notes: Mapped[str | None]
     receipt_document_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    pending_external_id: Mapped[str | None] = mapped_column(
+        index=True,
+        comment="Plaid pending_transaction_id: external_id of the pending row replaced.",
+    )
     source: Mapped[str]
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 
 class TransactionSplit(Base):
+    """One part of a split transaction.
+
+    Invariant (deferred constraint trigger ``transaction_split_balance``, checked at commit):
+    a transaction's splits sum **exactly** to its ``amount``, and every split has the same sign
+    as the parent (no zero or opposite-sign parts). So write all of a transaction's splits in one
+    database transaction. Visibility and write access follow the parent transaction.
+    """
+
     __tablename__ = "transaction_split"
     __table_args__ = (
         child_fk("transaction_id", "transaction"),
@@ -126,6 +155,8 @@ class TransactionSplit(Base):
     household_id: Mapped[HouseholdId]
     transaction_id: Mapped[uuid.UUID] = mapped_column(index=True)
     category_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
-    amount: Mapped[Money]
+    amount: Mapped[Money] = mapped_column(
+        comment="Same sign as the parent; a transaction's splits sum to its amount."
+    )
     tax_tag: Mapped[str | None]
     note: Mapped[str | None]

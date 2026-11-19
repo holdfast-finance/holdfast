@@ -19,6 +19,7 @@ from app.models._common import (
     Money,
     check_in,
     check_masked,
+    check_non_negative,
     child_fk,
     parent_key,
 )
@@ -44,11 +45,18 @@ class CreditReport(Base):
 
 
 class Tradeline(Base):
-    """One account on a credit report. ``account_number_masked`` rejects full numbers."""
+    """One account on a credit report. ``account_number_masked`` rejects full numbers.
+
+    ``credit_limit``, ``balance`` and ``high_balance`` are non-negative magnitudes exactly as the
+    bureau reports them (a balance is an amount owed, not a signed household balance).
+    """
 
     __tablename__ = "tradeline"
     __table_args__ = (
         check_masked("account_number_masked"),
+        check_non_negative("credit_limit"),
+        check_non_negative("balance"),
+        check_non_negative("high_balance"),
         child_fk("credit_report_id", "credit_report"),
     )
 
@@ -59,9 +67,13 @@ class Tradeline(Base):
     account_type: Mapped[str | None]
     opened: Mapped[dt.date | None]
     status: Mapped[str | None]
-    credit_limit: Mapped[Money | None]
-    balance: Mapped[Money | None]
-    high_balance: Mapped[Money | None]
+    credit_limit: Mapped[Money | None] = mapped_column(comment="As reported, non-negative.")
+    balance: Mapped[Money | None] = mapped_column(
+        comment="Amount owed as reported by the bureau, non-negative magnitude."
+    )
+    high_balance: Mapped[Money | None] = mapped_column(
+        comment="Highest balance as reported, non-negative magnitude."
+    )
     payment_history: Mapped[dict[str, Any] | None]
     account_number_masked: Mapped[str | None]
 
