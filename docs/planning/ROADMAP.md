@@ -19,7 +19,7 @@ Every other lane is **preemptible**: it runs only when the critical-path queue i
 
 | Sprint | Windows | Milestone | Exit criteria | Est. output tokens |
 |---|---|---|---|---|
-| S1–S2 | W1–W2 | **Phase 1.5 Foundations + Gate** | Merge gate live in CI + rulesets; layering ADR, job framework, OpenAPI types, money primitives, secrets resolver, schema-gap migration, brand plumbing | ~1.5M |
+| S1–S2 | W1–W2 | **Phase 1.5 Foundations + Gate** | Merge gate live in CI (free tier, ADR 0013); layering ADR, job framework, OpenAPI types, money primitives, secrets resolver, schema-gap migration, brand plumbing | ~1.5M |
 | S3–S5 | W3–W5 | **Phase 2a: Plaid sandbox + ingest** | Sandbox Items sync from fixtures + sandbox; idempotent replay; relink flow; slot guard; Sync Health API + page | ~2.0M |
 | S6–S7 | W6–W7 | **Phase 3: CSV/OFX/competitor import** | Re-import gives zero duplicates; overlap with Plaid dedupes; reconcile ±$0.01 or `needs_review`; review UI | ~1.3M |
 | S8–S10 | W8–W10 | **Phase 4: categorize, transfers, recurring** | Synthetic holdout: ≥90% coverage at ≥95% precision; transfers excluded from spend; planted bills recovered ≥95% | ~1.8M |
@@ -39,7 +39,7 @@ Format: `ID title — size — owner/model — acceptance — depends`. Story ID
 - **F4** Money primitives (one story for Lattice E1.6, Ledger `money.py`, the float lint and the `parse_float=Decimal` helpers) — S — Ledger/sonnet — property tests; seeded float fails lint — none
 - **F5** Secrets: `SecretToken` type (no repr/str/JSON), Fernet `kid` versioning + `make rotate-keys`, `get_secret(household, key)` resolver, log-canary test — M — Bulwark design/opus, Harbor build/sonnet — rotation re-encrypts all rows; canary never reaches logs — F1
 - **F6** Schema-gap migration (the serialized schema run): `transaction.superseded_by`, `import_batch`/statement table, `sync_run` table, RLS — S — Tide/sonnet + Lattice review — RLS lint + up/down green — F1
-- **F7** Merge gate: `ci-required` aggregate, single-Alembic-head check, RLS lint, blocking audits with expiring allowlist, SHA-pinned actions, gitleaks on PR range, protected-path check, rulesets on `main` — M — Harbor/sonnet (sole CI writer) — a red, stale or unreviewed PR can't merge — none
+- **F7** Merge gate: `ci-required` aggregate, single-Alembic-head check, RLS lint, blocking audits with expiring allowlist, SHA-pinned actions, gitleaks on PR range, protected-path check; `main` guarded per ADR 0013 (free tier: `main-guard` detection, minutes budget, `ci-local`) — M — Harbor/sonnet (sole CI writer) — a red, stale or unreviewed PR can't merge — none
 - **F8** Worktree hygiene: `scripts/wt-new.sh`, `make sync`, stale-base guard — S — Harbor/sonnet — new worktree HEAD == `origin/main` — none
 - **F9** Phase 1 security lows 1–2: argon2 semaphore before the DB session + real-client-IP check (XFF assertion in e2e) — S — Bulwark/opus — burst test keeps the pool free — none
 - **F10** Brand-theme plumbing (`data-brand`, Holo tokens/fonts, AA tests for both brands) — S — Prism/sonnet — token tests pass for Signal + Holo — none
