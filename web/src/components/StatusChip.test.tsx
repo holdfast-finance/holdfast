@@ -15,7 +15,7 @@ describe('<StatusChip>', () => {
     const { container } = render(<StatusChip status={status} />)
     const chip = screen.getByText(label)
     expect(chip).toHaveAttribute('data-status', status)
-    expect(chip).toHaveClass(`text-${token}`)
+    expect(chip).toHaveClass(`text-${token}-text`)
     const dot = container.querySelector('[aria-hidden="true"]')
     expect(dot).not.toBeNull()
     expect(dot).toHaveClass(`bg-${token}`, 'rounded-full')

@@ -11,7 +11,7 @@ export function PlaceholderPage({ id }: { id: PageId }) {
           {page.label}
         </h1>
         <p className="text-sm text-text-muted">{page.summary}</p>
-        <p className="money text-xs text-deepwater">Coming in Phase {page.phase}</p>
+        <p className="text-xs text-deepwater-text">Coming in Phase {page.phase}</p>
       </header>
       <Card className="rounded-card border border-hairline ring-0">
         <CardContent className="flex flex-col gap-3" aria-hidden="true">
