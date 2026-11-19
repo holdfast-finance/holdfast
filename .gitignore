@@ -52,3 +52,6 @@ test-results/
 .claude/settings.local.json
 CLAUDE.local.md
 .claude/worktrees/
+
+# Cloudflare CLI local cache (account id/name)
+.cloudflare/

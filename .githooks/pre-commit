@@ -3,8 +3,11 @@
 set -euo pipefail
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks git --staged --no-banner --redact -v >/dev/null 2>&1 || { echo "pre-commit: gitleaks found a possible secret. Run: gitleaks git --staged -v" >&2; exit 1; }
+elif [ "${HOLDFAST_SKIP_GITLEAKS:-}" = "1" ]; then
+  echo "pre-commit: gitleaks not installed; HOLDFAST_SKIP_GITLEAKS=1 set, skipping secret scan" >&2
 else
-  echo "pre-commit: gitleaks not installed; skipping secret scan (install it!)" >&2
+  echo "pre-commit: gitleaks is required (see CONTRIBUTING.md). Install it, or set HOLDFAST_SKIP_GITLEAKS=1 to bypass once." >&2
+  exit 1
 fi
 bad=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)\.env($|\.)|^data/|^secrets/' | grep -v '\.env\.example$' || true)
 if [ -n "$bad" ]; then echo "pre-commit: refusing to commit private paths:" >&2; echo "$bad" >&2; exit 1; fi
