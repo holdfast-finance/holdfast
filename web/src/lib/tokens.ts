@@ -61,6 +61,86 @@ export const CHIP_TINT: Record<keyof typeof FILL, number> = {
   deepwater: 0.15,
 }
 
+/*
+ * Holo (Holdfast Cloud, ADR 0009). Same rules: hues are fills, colored text uses `*-text`.
+ * `src/index.css` mirrors these under `[data-brand='holo']`. Light is the hero theme.
+ */
+export const HOLO_FILL = {
+  indigo: { light: '#4f46e5', dark: '#5b52ee' },
+  grow: { light: '#059669', dark: '#34d399' },
+  'heads-up': { light: '#d97706', dark: '#fbbf24' },
+  alert: { light: '#dc2626', dark: '#f87171' },
+  lavender: { light: '#a78bfa', dark: '#a78bfa' },
+} as const satisfies Record<string, ThemePair>
+
+export const HOLO_TEXT = {
+  indigo: { light: '#4338ca', dark: '#a5b4fc' },
+  grow: { light: '#065f46', dark: '#34d399' },
+  'heads-up': { light: '#92400e', dark: '#fbbf24' },
+  alert: { light: '#b91c1c', dark: '#f87171' },
+  lavender: { light: '#6d28d9', dark: '#c4b5fd' },
+} as const satisfies Record<string, ThemePair>
+
+/** Holo ground (page) and surface (card). */
+export const HOLO_GROUND = {
+  cloud: { light: '#f7f7fb', dark: '#12131a' },
+  surface: { light: '#ffffff', dark: '#1b1c25' },
+} as const satisfies Record<string, ThemePair>
+
+export const HOLO_FOCUS_RING: ThemePair = { light: '#4f46e5', dark: '#a5b4fc' }
+export const HOLO_INPUT_BORDER: ThemePair = { light: '#7b8094', dark: '#7a8099' }
+/** White on the Indigo fill (primary pill) in light, white on the brighter dark fill. */
+export const HOLO_INDIGO_INK: ThemePair = { light: '#ffffff', dark: '#ffffff' }
+/** Ink on the Lavender fill (secondary). */
+export const HOLO_LAVENDER_INK: ThemePair = { light: '#12131a', dark: '#12131a' }
+export const HOLO_CHIP_TINT: Record<keyof typeof HOLO_FILL, number> = {
+  indigo: 0.12,
+  grow: 0.12,
+  'heads-up': 0.12,
+  alert: 0.12,
+  lavender: 0.15,
+}
+
+/** Everything the AA test needs about one brand. */
+export interface BrandTokens {
+  fill: Record<string, ThemePair>
+  text: Record<string, ThemePair>
+  chipTint: Record<string, number>
+  /** Page ground and card surface, by CSS variable name. */
+  grounds: Record<string, ThemePair>
+  focusRing: ThemePair
+  inputBorder: ThemePair
+  /** Button text on the primary and secondary fills: [hue, ink]. */
+  buttons: readonly (readonly [string, ThemePair])[]
+}
+
+export const BRANDS = {
+  signal: {
+    fill: FILL,
+    text: TEXT,
+    chipTint: CHIP_TINT,
+    grounds: GROUND,
+    focusRing: FOCUS_RING,
+    inputBorder: INPUT_BORDER,
+    buttons: [
+      ['signal', { light: ABYSS_INK, dark: ABYSS_INK }],
+      ['deepwater', DEEPWATER_INK],
+    ],
+  },
+  holo: {
+    fill: HOLO_FILL,
+    text: HOLO_TEXT,
+    chipTint: HOLO_CHIP_TINT,
+    grounds: HOLO_GROUND,
+    focusRing: HOLO_FOCUS_RING,
+    inputBorder: HOLO_INPUT_BORDER,
+    buttons: [
+      ['indigo', HOLO_INDIGO_INK],
+      ['lavender', HOLO_LAVENDER_INK],
+    ],
+  },
+} as const satisfies Record<string, BrandTokens>
+
 type Rgb = readonly [number, number, number]
 
 export function hexToRgb(hex: string): Rgb {

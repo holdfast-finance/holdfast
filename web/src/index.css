@@ -114,6 +114,99 @@
 
   /* Radius: 10px buttons (rounded-lg), 12px cards (rounded-card), full chips */
   --radius: 0.625rem;
+  --radius-card-size: 0.75rem;
+
+  /* Type faces are a theme token too (Holo swaps all three). */
+  --brand-font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --brand-font-heading: 'Space Grotesk', var(--brand-font-sans);
+  --brand-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/*
+ * Holo theme (Holdfast Cloud, ADR 0009, docs/brand/BRAND.md "Holo brand"). Selected by
+ * <html data-brand="holo">; Direction 01 (the rules above) is `data-brand="signal"` and the
+ * default. Light is Holo's hero theme, so it defaults to light unless the system says dark or the
+ * theme store sets data-theme. Mirrors the HOLO_* values in src/lib/tokens.ts (tokens test).
+ */
+:root[data-brand='holo'] {
+  color-scheme: light;
+
+  --indigo: light-dark(#4f46e5, #5b52ee);
+  --grow: light-dark(#059669, #34d399);
+  --heads-up: light-dark(#d97706, #fbbf24);
+  --alert: light-dark(#dc2626, #f87171);
+  --lavender: light-dark(#a78bfa, #a78bfa);
+  --cloud: light-dark(#f7f7fb, #12131a);
+  --surface: light-dark(#ffffff, #1b1c25);
+
+  --indigo-text: light-dark(#4338ca, #a5b4fc);
+  --grow-text: light-dark(#065f46, #34d399);
+  --heads-up-text: light-dark(#92400e, #fbbf24);
+  --alert-text: light-dark(#b91c1c, #f87171);
+  --lavender-text: light-dark(#6d28d9, #c4b5fd);
+
+  --indigo-ink: light-dark(#ffffff, #ffffff);
+  --lavender-ink: light-dark(#12131a, #12131a);
+  --input-border: light-dark(#7b8094, #7a8099);
+  --focus-ring: light-dark(#4f46e5, #a5b4fc);
+
+  --hull-raised: color-mix(in srgb, var(--surface), light-dark(#12131a, #ffffff) 4%);
+  --hairline: light-dark(rgb(18 19 26 / 10%), rgb(255 255 255 / 9%));
+  --text: light-dark(#12131a, #eceef5);
+  --text-muted: light-dark(#575c70, #9aa0b4);
+  --glass: color-mix(in srgb, var(--surface) 80%, transparent);
+  --skeleton: light-dark(
+    color-mix(in srgb, #ffffff, #12131a 8%),
+    color-mix(in srgb, #1b1c25, #ffffff 5%)
+  );
+  --skeleton-edge: light-dark(rgb(18 19 26 / 12%), transparent);
+
+  --background: var(--cloud);
+  --card: var(--surface);
+  --primary: var(--indigo);
+  --primary-foreground: var(--indigo-ink);
+  --secondary: var(--lavender);
+  --secondary-foreground: var(--lavender-ink);
+  --destructive: var(--alert);
+  --chart-1: var(--indigo);
+  --chart-2: var(--lavender);
+  --chart-3: var(--heads-up);
+  --chart-4: var(--alert);
+  --chart-5: var(--text-muted);
+  --sidebar: var(--cloud);
+  --sidebar-primary: var(--indigo);
+  --sidebar-primary-foreground: var(--indigo-ink);
+
+  --primary-text: var(--indigo-text);
+  --secondary-text: var(--lavender-text);
+  --destructive-text: var(--alert-text);
+  --success: var(--grow);
+  --success-text: var(--grow-text);
+  --warning: var(--heads-up);
+  --warning-text: var(--heads-up-text);
+  --qr-ink: #12131a;
+  --chart-actual: var(--indigo);
+  --chart-forecast: var(--lavender);
+
+  --radius-card-size: 1.25rem;
+
+  --brand-font-sans: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+  --brand-font-heading: 'Sora', var(--brand-font-sans);
+  --brand-font-mono: 'DM Mono', ui-monospace, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-brand='holo']:not([data-theme]) {
+    color-scheme: dark;
+  }
+}
+
+:root[data-brand='holo'][data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root[data-brand='holo'][data-theme='light'] {
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: light) {
@@ -131,10 +224,10 @@
 }
 
 @theme inline {
-  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
-  --font-heading: 'Space Grotesk', var(--font-sans);
-  --font-display: 'Space Grotesk', var(--font-sans);
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-sans: var(--brand-font-sans);
+  --font-heading: var(--brand-font-heading);
+  --font-display: var(--brand-font-heading);
+  --font-mono: var(--brand-font-mono);
 
   /*
    * Only semantic colors become Tailwind utilities (ADR 0009). The brand palette above stays
@@ -192,7 +285,7 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-  --radius-card: 0.75rem;
+  --radius-card: var(--radius-card-size);
 
   --shadow-glow: 0 0 24px color-mix(in srgb, var(--primary) 35%, transparent);
 }
