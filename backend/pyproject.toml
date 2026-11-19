@@ -114,7 +114,9 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Routers never touch ORM models (writes go through services)"
+name = "Routers never touch ORM models or sessions (services own the unit of work)"
 type = "forbidden"
 source_modules = ["app.api"]
-forbidden_modules = ["app.models"]
+forbidden_modules = ["app.models", "app.db", "app.db_context"]
+# Direct imports only: routers reach these through services, which is the point.
+allow_indirect_imports = true

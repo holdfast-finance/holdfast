@@ -17,9 +17,9 @@ between lanes (roundtable 01, Risks).
 Three layers, imported only downward:
 
 1. **`app.api`: thin HTTP edge.** Parse and validate (Pydantic schemas), resolve dependencies
-   (principal, context), call one service, shape the response. Routers never import `app.models`
-   and never write. Read-only scoped sessions handed straight to a service read helper are
-   tolerated (e.g. the audit page), but new code should prefer a service function.
+   (principal, context), call one service, shape the response. Routers never import `app.models`,
+   `app.db` or `app.db_context`: they never open a session, read or write. No exceptions; the audit
+   page (`audit.household_page`) and cookie resolution (`sessions.resolve_token`) are service calls.
 2. **`app.services`: the unit of work.** A service opens the scoped session (RLS context), loads
    ORM models, calls domain logic, persists, and writes the audit row, all in one transaction.
    Auth, sessions, audit and **every money write** (ingest upserts, transaction edits, transfers,
@@ -37,12 +37,18 @@ run by `make lint-imports` and as part of `make lint`. Contracts:
 - *forbidden*: `app.domain` may not import `app.api`, `app.services`, `app.db`, `app.db_context`,
   `app.models`, `app.integrations`, `app.worker`, `app.config`, `fastapi`, `starlette`,
   `sqlalchemy`, `psycopg`, `redis`, `arq` or `httpx`.
-- *forbidden*: `app.api` may not import `app.models`.
+- *forbidden* (direct imports): `app.api` may not import `app.models`, `app.db` or `app.db_context`.
 
 **Router auto-registration:** `create_app` discovers every `app/api/routes_*.py` module (sorted by
-name) and mounts its `router: APIRouter` under `/api`. A module without one fails at startup.
-Test-only modules (`routes_testing`) are skipped **before import** unless `APP_ENV=test` and
-`E2E_HOOKS=true`, so the e2e hooks gate is unchanged. Adding a router never touches `main.py`.
+name) and mounts its `router: APIRouter` under `/api`. A module without one fails at startup. Only
+modules backed by a real `.py` source file are imported; sourceless `.pyc` and native extensions in
+the package directory are ignored. Adding a router never touches `main.py`.
+
+The e2e hooks gate (`APP_ENV=test` AND `E2E_HOOKS=true`) is enforced twice, failing closed:
+- modules named `routes_test*` are skipped **before import** unless both flags are set, and must
+  declare `TEST_ONLY = True` (startup fails otherwise);
+- any route module declaring `TEST_ONLY = True` that would mount without both flags makes startup
+  fail, so a misnamed test router can never be served.
 
 ## Alternatives considered
 - Convention only (no linter): drifts the first time a lane is in a hurry.
