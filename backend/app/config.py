@@ -18,6 +18,8 @@ from sqlalchemy.engine import URL, make_url
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://holdfast_app@db:5432/holdfast"
 DEFAULT_REDIS_URL = "redis://redis:6379/0"
+# The compose `frontend` network (caddy <-> api/web); pinned in docker-compose.yml.
+FRONTEND_SUBNET = "172.30.10.0/24"
 
 CsvList = Annotated[list[str], NoDecode]
 
@@ -34,8 +36,12 @@ class Settings(BaseSettings):
 
     # Core
     # "test" exists only for the automated e2e stack: it exposes the first-run setup token at
-    # GET /api/test/setup-token. "prod" can never expose it (see app.api.routes_testing).
+    # GET /api/test/setup-token (with E2E_HOOKS=true). "prod" can never expose it
+    # (see app.api.routes_testing).
     app_env: Literal["dev", "test", "prod"] = "dev"
+    # Second switch for the e2e hooks: /api/test/* is mounted only when APP_ENV=test *and*
+    # E2E_HOOKS=true, so a stray APP_ENV=test alone never exposes the setup token.
+    e2e_hooks: bool = False
     app_base_url: str = "https://localhost"
     app_host: str = "localhost"
     caddy_bind: str = "127.0.0.1"
@@ -58,17 +64,11 @@ class Settings(BaseSettings):
     # Auth (PLAN 12). WebAuthn RP id is APP_HOST; the expected origin is https://{APP_HOST}
     # unless WEBAUTHN_ORIGIN overrides it (e.g. a non-443 port).
     webauthn_origin: str | None = None
-    # Peers whose X-Forwarded-For is trusted (Caddy on the compose network). Comma-separated
-    # CIDRs. The API port is never published, so only the proxy can reach it.
+    # Peers whose X-Forwarded-For is trusted. Comma-separated CIDRs. Default: loopback plus the
+    # compose `frontend` network, whose subnet is pinned in docker-compose.yml (FRONTEND_SUBNET).
+    # Only Caddy should be able to reach the API there; the API port is never published.
     trusted_proxies: CsvList = Field(
-        default_factory=lambda: [
-            "127.0.0.0/8",
-            "::1/128",
-            "10.0.0.0/8",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "fc00::/7",
-        ]
+        default_factory=lambda: ["127.0.0.0/8", "::1/128", FRONTEND_SUBNET]
     )
 
     # Plaid

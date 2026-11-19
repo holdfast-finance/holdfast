@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import json
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 NAME_MAX = 200
+# A WebAuthn response is a few KB (attestation certificate chains included); 64 KiB is ample.
+CREDENTIAL_MAX_BYTES = 64 * 1024
+CREDENTIAL_MAX_KEYS = 32
 EMAIL_MAX = 254
 
 FilingRole = Literal["primary", "spouse", "dependent"]
@@ -30,12 +34,26 @@ def _email(value: str) -> str:
     return value
 
 
+def _credential(value: dict[str, Any]) -> dict[str, Any]:
+    if len(value) > CREDENTIAL_MAX_KEYS:
+        raise ValueError("That passkey response isn't valid.")
+    try:
+        size = len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("That passkey response isn't valid.") from None
+    if size > CREDENTIAL_MAX_BYTES:
+        raise ValueError("That passkey response is too large.")
+    return value
+
+
 # Bounded before stripping so a huge body can't be pushed through the validators.
 Name = Annotated[str, Field(max_length=NAME_MAX * 4), AfterValidator(_name)]
 Email = Annotated[str, Field(max_length=EMAIL_MAX * 2), AfterValidator(_email)]
 # Opaque tokens and codes: length-bounded, never echoed back.
 Token = Annotated[str, Field(min_length=1, max_length=512)]
 Code = Annotated[str, Field(min_length=1, max_length=64)]
+# A WebAuthn credential JSON (registration or assertion), size-bounded before py_webauthn sees it.
+WebAuthnCredential = Annotated[dict[str, Any], AfterValidator(_credential)]
 
 
 class Model(BaseModel):

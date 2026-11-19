@@ -18,6 +18,7 @@ from app.api import errors, routes_auth, routes_health, routes_household, routes
 from app.config import Settings, get_settings
 from app.db import CONNECT_TIMEOUT_SECONDS, create_engine, create_session_factory
 from app.logging import configure_logging, get_logger
+from app.security.body_limit import BodySizeLimitMiddleware
 from app.security.csrf import CSRFMiddleware
 from app.services.setup import SETUP_TTL_SECONDS, issue_setup_token, setup_state
 
@@ -25,6 +26,11 @@ API_PREFIX = "/api"
 SETUP_RETRY_SECONDS = 5.0
 
 log = get_logger(__name__)
+
+
+def e2e_hooks_enabled(settings: Settings) -> bool:
+    """``/api/test/*`` needs both APP_ENV=test and E2E_HOOKS=true (never in dev or prod)."""
+    return settings.app_env == "test" and settings.e2e_hooks
 
 
 def create_redis(settings: Settings) -> Redis:
@@ -47,7 +53,7 @@ async def announce_setup_token(app: FastAPI) -> str | None:
     if await setup_state(app.state.session_factory) == "complete":
         return None
     token = await issue_setup_token(app.state.redis)
-    if app.state.settings.app_env == "test":
+    if e2e_hooks_enabled(app.state.settings):
         app.state.test_setup_token = token
     minutes = SETUP_TTL_SECONDS // 60
     log.warning(
@@ -71,6 +77,12 @@ async def _setup_token_loop(app: FastAPI) -> None:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging()
+    if settings.app_env == "test":
+        log.warning(
+            "api.test_mode",
+            detail="APP_ENV=test is for automated e2e stacks only; never run it for real data.",
+            e2e_hooks=settings.e2e_hooks,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -105,13 +117,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     errors.install(app)
     app.add_middleware(CSRFMiddleware, prefix=API_PREFIX)
+    # Added last = outermost: oversized bodies are refused before anything else reads them.
+    app.add_middleware(BodySizeLimitMiddleware, prefix=API_PREFIX)
 
     api = APIRouter(prefix=API_PREFIX)
     api.include_router(routes_health.router)
     api.include_router(routes_setup.router)
     api.include_router(routes_auth.router)
     api.include_router(routes_household.router)
-    if settings.app_env == "test":
+    if e2e_hooks_enabled(settings):
         from app.api import routes_testing
 
         api.include_router(routes_testing.router)
