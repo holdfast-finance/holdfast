@@ -20,7 +20,7 @@ PLAN 12 and the Phase 1 contract fix the auth model: passkeys first, password + 
   - `hf:totp:used:{user}:{step}`: SET NX, 2 min, so a TOTP step is accepted only once.
   - `hf:rl:*`: failure counters and lock keys per IP and per account (sha256 of the email, whether or not the account exists).
   Losing Redis loses pending challenges, invites and lockouts, never accounts or sessions. Sessions stay in Postgres (`auth_session`, sha256 only) so revocation and audit survive restarts.
-- **Client IP**: trust `X-Forwarded-For` only when the peer is in `TRUSTED_PROXIES` (default loopback plus private ranges; the API port is never published), and take the right-most hop that isn't a trusted proxy.
+- **Client IP**: trust `X-Forwarded-For` only when the peer is in `TRUSTED_PROXIES` (default loopback plus the pinned compose `frontend` subnet `172.30.10.0/24`; see Hardening), and take the right-most hop that isn't a trusted proxy.
 - **Setup is resumable**: it counts as complete only once the owner holds a credential (passkey or enabled TOTP). Until then the token holder can re-run `POST /setup` to get a fresh session for the same owner. Concurrent setups are serialized with `pg_advisory_xact_lock`.
 - **Step-up (5 min) also gates adding a credential** once the user has one. Sessions minted from a setup token or invite start with `reauth_at = NULL`. Holding a link doesn't prove a credential.
 
@@ -32,4 +32,17 @@ PLAN 12 and the Phase 1 contract fix the auth model: passkeys first, password + 
 ## Consequences
 - A future multi-household user (one login, several households) needs a join table. Phase 1 is one household per user.
 - Running several API workers is fine: all shared state is in Redis or Postgres. Each start re-mints the setup token, so with several replicas only the last-logged token is valid.
-- Follow-ups: pass `WEBAUTHN_ORIGIN` and `TRUSTED_PROXIES` through `docker-compose.yml` when an operator needs non-defaults (the defaults fit compose today). Phase 9 "active sessions" can list `auth_session` rows directly.
+- Follow-ups: pass `WEBAUTHN_ORIGIN` through `docker-compose.yml` when an operator needs a non-default (`TRUSTED_PROXIES` is passed through now). Rename the session cookie to `__Host-hf_session` (forces `Secure`, `Path=/`, no `Domain`); deferred because it logs everyone out and touches the web contract. Phase 9 "active sessions" can list `auth_session` rows directly.
+
+## Hardening (Phase 1 review)
+Fixes from the final Phase 1 security review, each with a regression test (`backend/tests/api/test_auth_hardening.py` unless noted):
+- **Rate limits are atomic.** `RateLimiter.reserve()` is one Lua script: refuse if any scope is locked, else `INCR` every scope and set the exponential lock on any scope that reached its threshold. The attempt is counted *before* anything is verified, so N parallel requests can't all pass a check that ran before any of them failed. A reserved attempt stays a failure unless settled: `succeed()` clears account scopes and refunds the rest, `refund()` uncounts it when nothing was verified (setup already complete). Used by password login, TOTP and passkey step-up, passkey login, setup and invite accept.
+- **Passkeys count per IP only.** A passkey can't be guessed, and an account-scope lock on passkey login/step-up let anyone who knows an email lock its owner out. Password and TOTP keep both scopes; a passkey login clears the account's password/TOTP lockout.
+- **Trusted proxies narrowed.** The compose `frontend` network is pinned to `172.30.10.0/24` and `TRUSTED_PROXIES` defaults to loopback plus that subnet (no longer all of RFC 1918). Caddy overwrites `X-Forwarded-For` with `{remote_host}` on `/api`.
+- **Invite email pre-check is household-scoped.** An email taken in another household isn't revealed at invite time; accepting such an invite fails with a generic `409 conflict` that names neither the reason nor the household.
+- **argon2 runs off the event loop** (`asyncio.to_thread`) behind a semaphore of 4 (`passwords.MAX_CONCURRENT_HASHES`).
+- **Body size.** Caddy caps `/api/*` bodies at 1 MB (`request_body`); the API repeats it at 1 MiB in a pure ASGI middleware (`app/security/body_limit.py`) that answers `413 payload_too_large` (new error code). WebAuthn credential JSON is capped at 64 KiB / 32 top-level keys (422). `POST /auth/passkey/login/options` is throttled to 30 per minute per IP, since every call stores a challenge.
+- **Legacy invite path.** The web app redirects `/invite/<token>` to `/invite#<token>` with `replace`, so the path token leaves the address bar and history.
+- **Credential changes revoke other sessions.** Removing a passkey, turning TOTP off and setting a password revoke every other `auth_session` of the user; the current one stays.
+- **Test hooks need two switches.** `/api/test/*` mounts only with `APP_ENV=test` *and* `E2E_HOOKS=true` (new env var); a loopback-peer check was rejected because e2e reaches the API through Caddy. The API logs a WARNING at startup whenever `APP_ENV=test`.
+- **household_wide guard widened** (`tests/models/test_household_wide_guard.py`): scans `app/api`, `app/services`, `app/domain`, `app/security` with an explicit allowlist.
