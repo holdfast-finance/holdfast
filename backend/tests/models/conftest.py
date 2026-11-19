@@ -203,12 +203,16 @@ def _reference_ids(conn: Connection) -> tuple[uuid.UUID, uuid.UUID]:
 
 
 def seed_household(engine: Engine, label: str) -> Seed:
-    """One row in every household-scoped table, inserted as holdfast_app under RLS."""
+    """One row in every household-scoped table, inserted as holdfast_app under RLS.
+
+    Runs household-wide, like a sync job: the account belongs to Alex, and only Alex or a
+    household-wide job may write it (ADR 0008).
+    """
     with engine.begin() as c:
         hid = c.execute(
             text("SELECT create_household(:n)"), {"n": f"Example Household {label}"}
         ).scalar_one()
-        set_ctx(c, hid)
+        set_ctx(c, hid, wide=True)
         institution_id, security_id = _reference_ids(c)
         h = {"household_id": hid}
         p1 = _insert(c, "person", **h, display_name=f"Alex {label}", filing_role="primary")
@@ -403,17 +407,21 @@ def seed_household(engine: Engine, label: str) -> Seed:
     return Seed(household_id=hid, person_ids=[p1, p2], rows=rows)
 
 
-def delete_household(engine: Engine, household_id: uuid.UUID) -> None:
-    """Cascade-delete a household as holdfast_app, inside its own context."""
-    with engine.begin() as c:
+def delete_household(owner_engine: Engine, household_id: uuid.UUID) -> None:
+    """Cascade-delete a household as the schema owner, inside its own context.
+
+    The app role has no DELETE on household (ADR 0008); FORCE RLS binds the owner too, so the
+    context is still required.
+    """
+    with owner_engine.begin() as c:
         set_ctx(c, household_id, wide=True)
         c.execute(text("DELETE FROM household WHERE id = app_household_id()"))
 
 
 @pytest.fixture(scope="module")
-def two_households(app_engine: Engine) -> Iterator[tuple[Seed, Seed]]:
+def two_households(app_engine: Engine, owner_engine: Engine) -> Iterator[tuple[Seed, Seed]]:
     a = seed_household(app_engine, "A")
     b = seed_household(app_engine, "B")
     yield a, b
-    delete_household(app_engine, a.household_id)
-    delete_household(app_engine, b.household_id)
+    delete_household(owner_engine, a.household_id)
+    delete_household(owner_engine, b.household_id)

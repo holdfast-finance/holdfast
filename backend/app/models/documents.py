@@ -17,6 +17,8 @@ from app.models._common import (
     HouseholdId,
     Ratio,
     check_in,
+    check_no_ssn,
+    check_ratio,
     child_fk,
     parent_key,
 )
@@ -47,15 +49,22 @@ class Document(Base):
 
 
 class ParsedField(Base):
+    """A value extracted from a document. ``value`` may never hold an SSN-shaped number (CHECK):
+    parsers must mask SSNs (``XXX-XX-1234``) before storing. ``confidence`` is a fraction."""
+
     __tablename__ = "parsed_field"
-    __table_args__ = (child_fk("document_id", "document"),)
+    __table_args__ = (
+        child_fk("document_id", "document"),
+        check_no_ssn("value", "value_no_ssn"),
+        check_ratio("confidence"),
+    )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
     document_id: Mapped[uuid.UUID] = mapped_column(index=True)
     key: Mapped[str]
     value: Mapped[str | None]
-    confidence: Mapped[Ratio | None]
+    confidence: Mapped[Ratio | None] = mapped_column(comment="Fraction in [0, 1].")
     page: Mapped[int | None]
     bbox: Mapped[dict[str, Any] | None]
     verified_by_user: Mapped[bool] = mapped_column(server_default=text("false"))

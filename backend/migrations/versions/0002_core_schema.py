@@ -6,15 +6,21 @@ written out below and documented in ADR 0008:
 - ``app_household_id()`` / ``app_person_id()`` / ``app_household_wide()``: STABLE SQL helpers
   over transaction-local GUCs set by ``app.db_context``. Unset returns NULL / false (fail closed).
 - ENABLE + FORCE RLS and a ``household_isolation`` policy on every household-scoped table.
-- RESTRICTIVE per-person visibility policies (PLAN 20.3) on account, its detail tables and
-  balance_snapshot.
-- ``audit_log``: append-only for the app role (INSERT + SELECT, no UPDATE / DELETE).
+- RESTRICTIVE per-person policies (PLAN 20.3) on account, its detail tables and balance_snapshot:
+  a **read** policy (visibility) and separate **write** policies (owner, joint or household-wide
+  only), so seeing a shared / summary_only account never grants the right to change it.
+- ``account_guard_ownership``: BEFORE UPDATE trigger, only the owner (or anyone, for a joint
+  account, or a household-wide job) may change ``visibility`` / ``owner_person_id``.
+- ``transaction_split_balance``: deferred constraint trigger, a transaction's splits sum exactly
+  to its amount with the same sign.
+- RESTRICTIVE person scoping on agent_conversation / agent_message / agent_finding.
+- ``audit_log``: append-only for the app role (INSERT + SELECT, no UPDATE / DELETE), no FKs.
 - ``create_household(name)``: SECURITY DEFINER, the only way to create a household without context.
 
 Grants: ``infra/postgres/init/00-roles.sh`` sets ALTER DEFAULT PRIVILEGES so every table the owner
 creates gets SELECT/INSERT/UPDATE/DELETE for holdfast_app (and nothing else: no TRUNCATE, no DDL).
 This migration only *narrows* that (audit_log, household, institution, security).
-``tests/test_rls.py`` asserts the resulting privilege set table by table.
+``tests/models/test_rls_audit_and_roles.py`` asserts the privilege set table by table.
 
 Revision ID: 0002_core_schema
 Revises: 0001_baseline
@@ -34,6 +40,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 APP_ROLE = "holdfast_app"
+
+# Same pattern as app.models._common.SSN_PATTERN (copied: migrations never import app code).
+SSN_PATTERN = "(^|[^0-9])[0-9]{3}([- ]?)[0-9]{2}\\2[0-9]{4}([^0-9]|$)"
 
 # household_isolation: household_id = app_household_id() (USING and WITH CHECK).
 HOUSEHOLD_TABLES = (
@@ -69,30 +78,71 @@ HOUSEHOLD_TABLES = (
 # Shared reference data, no RLS. The app may read, add and refresh rows but not delete them.
 REFERENCE_TABLES = ("institution", "security")
 
-# Account rows the viewer may see at all (PLAN 20.3).
+# ---- per-person policies (PLAN 20.3, ADR 0008)
+# Account rows the viewer may *see*.
 ACCOUNT_VISIBLE = (
     "visibility IN ('shared', 'summary_only')"
     " OR owner_person_id IS NULL"
     " OR owner_person_id = app_person_id()"
     " OR app_household_wide()"
 )
+# Account rows the viewer may *write*: joint, theirs, or a household-wide job. Shared and
+# summary_only accounts are read-only to everyone but their owner.
+ACCOUNT_WRITABLE = (
+    "owner_person_id IS NULL OR owner_person_id = app_person_id() OR app_household_wide()"
+)
 # Accounts whose details (transactions, holdings, ...) the viewer may see: not summary_only for
 # someone else. The subquery on account is itself filtered by account's RLS.
-ACCOUNT_DETAIL_EXISTS = (
+ACCOUNT_DETAIL_VISIBLE = (
     "EXISTS (SELECT 1 FROM account a WHERE a.id = {table}.account_id AND ("
     "a.visibility = 'shared' OR a.owner_person_id IS NULL"
     " OR a.owner_person_id = app_person_id() OR app_household_wide()))"
 )
+# Detail rows the viewer may write: the row's account is writable. Used for UPDATE's USING (old
+# account) and WITH CHECK (new account), so moving a row between accounts needs both.
+ACCOUNT_DETAIL_WRITABLE = (
+    "app_household_wide() OR EXISTS (SELECT 1 FROM account a WHERE a.id = {table}.account_id"
+    " AND (a.owner_person_id IS NULL OR a.owner_person_id = app_person_id()))"
+)
 ACCOUNT_DETAIL_TABLES = ("transaction", "holding", "investment_txn", "liability")
-VISIBILITY_POLICIES: dict[str, str] = {
-    "account": ACCOUNT_VISIBLE,
-    **{t: ACCOUNT_DETAIL_EXISTS.format(table=f'"{t}"') for t in ACCOUNT_DETAIL_TABLES},
-    # Splits inherit their transaction's visibility (transaction RLS applies in the subquery).
+
+# table -> (read predicate, write predicate)
+PERSON_POLICIES: dict[str, tuple[str, str]] = {
+    "account": (ACCOUNT_VISIBLE, ACCOUNT_WRITABLE),
+    **{
+        t: (
+            ACCOUNT_DETAIL_VISIBLE.format(table=f'"{t}"'),
+            ACCOUNT_DETAIL_WRITABLE.format(table=f'"{t}"'),
+        )
+        for t in ACCOUNT_DETAIL_TABLES
+    },
+    # Splits inherit their transaction's visibility (transaction RLS applies in the subquery) and
+    # its account's write rule.
     "transaction_split": (
-        'EXISTS (SELECT 1 FROM "transaction" t WHERE t.id = transaction_split.transaction_id)'
+        'EXISTS (SELECT 1 FROM "transaction" t WHERE t.id = transaction_split.transaction_id)',
+        'app_household_wide() OR EXISTS (SELECT 1 FROM "transaction" t'
+        " JOIN account a ON a.id = t.account_id"
+        " WHERE t.id = transaction_split.transaction_id"
+        " AND (a.owner_person_id IS NULL OR a.owner_person_id = app_person_id()))",
     ),
-    # Balances follow account visibility, so summary_only viewers still see them.
-    "balance_snapshot": "EXISTS (SELECT 1 FROM account a WHERE a.id = balance_snapshot.account_id)",
+    # Balances follow account visibility, so summary_only viewers still see them. Writes follow
+    # the account write rule.
+    "balance_snapshot": (
+        "EXISTS (SELECT 1 FROM account a WHERE a.id = balance_snapshot.account_id)",
+        ACCOUNT_DETAIL_WRITABLE.format(table="balance_snapshot"),
+    ),
+}
+
+# Agent output inherits the run's visibility: a run for a person may have read their private
+# accounts, so it's visible only to them (or household-wide jobs). NULL person = household run.
+AGENT_PERSON_SCOPED = "person_id IS NULL OR person_id = app_person_id() OR app_household_wide()"
+AGENT_POLICIES: dict[str, str] = {
+    "agent_conversation": AGENT_PERSON_SCOPED,
+    "agent_finding": AGENT_PERSON_SCOPED,
+    # Messages inherit their conversation's scope (agent_conversation RLS applies).
+    "agent_message": (
+        "EXISTS (SELECT 1 FROM agent_conversation c WHERE c.id = agent_message.conversation_id)"
+    ),
 }
 
 HELPER_FUNCTIONS_SQL = """
@@ -142,23 +192,132 @@ COMMENT ON FUNCTION create_household(text) IS
 REVOKE ALL ON FUNCTION create_household(text) FROM PUBLIC;
 """
 
+# Defense in depth behind the account write policies: even if a future policy change let a
+# non-owner UPDATE an account row, they still couldn't change who sees it or who owns it.
+# coalesce(..., false): a NULL person must not make the test pass.
+ACCOUNT_GUARD_SQL = """
+CREATE FUNCTION account_guard_ownership() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF (NEW.visibility IS DISTINCT FROM OLD.visibility
+        OR NEW.owner_person_id IS DISTINCT FROM OLD.owner_person_id)
+       AND NOT coalesce(
+           OLD.owner_person_id IS NULL
+           OR OLD.owner_person_id = app_person_id()
+           OR app_household_wide(),
+           false)
+    THEN
+        RAISE EXCEPTION 'only the account owner may change its visibility or owner'
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END
+$$;
+COMMENT ON FUNCTION account_guard_ownership() IS
+    'Rejects visibility / owner changes on an account by anyone but its owner (ADR 0008).';
+CREATE TRIGGER account_guard_ownership
+    BEFORE UPDATE ON account
+    FOR EACH ROW EXECUTE FUNCTION account_guard_ownership();
+"""
+
+# Deferred so a unit of work can rewrite a transaction's splits (or its amount and splits) in
+# any order; the invariant is checked once per affected row at COMMIT. The function runs as the
+# invoker but switches app.household_wide on for its own queries (then restores the caller's
+# value) so it sees every split of the parent regardless of who is viewing; the household
+# boundary still applies. A function-level ``SET app.household_wide`` would be cleaner, but
+# Postgres reserves SET clauses on unregistered placeholders to superusers. If the check raises,
+# the (sub)transaction aborts and the GUC change is rolled back with it.
+# A missing parent means it was deleted (splits cascade), so there's nothing to check. Messages
+# carry only the transaction id, never amounts.
+SPLIT_BALANCE_SQL = """
+CREATE FUNCTION transaction_split_balance() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    prev_wide text := current_setting('app.household_wide', true);
+    ids uuid[];
+    tid uuid;
+    parent_amount numeric;
+    n bigint;
+    total numeric;
+    wrong_sign bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'transaction' THEN
+        ids := ARRAY[NEW.id];
+    ELSIF TG_OP = 'INSERT' THEN
+        ids := ARRAY[NEW.transaction_id];
+    ELSIF TG_OP = 'DELETE' THEN
+        ids := ARRAY[OLD.transaction_id];
+    ELSE
+        ids := ARRAY[NEW.transaction_id, OLD.transaction_id];
+    END IF;
+    PERFORM set_config('app.household_wide', 'on', true);
+
+    FOREACH tid IN ARRAY ids LOOP
+        SELECT t.amount INTO parent_amount FROM public."transaction" t WHERE t.id = tid;
+        CONTINUE WHEN NOT FOUND;
+        SELECT count(*),
+               coalesce(sum(s.amount), 0),
+               count(*) FILTER (WHERE sign(s.amount) IS DISTINCT FROM sign(parent_amount))
+          INTO n, total, wrong_sign
+          FROM public.transaction_split s
+         WHERE s.transaction_id = tid;
+        CONTINUE WHEN n = 0;
+        IF total <> parent_amount THEN
+            RAISE EXCEPTION 'splits of transaction % do not sum to its amount', tid
+                USING ERRCODE = '23514';
+        END IF;
+        IF wrong_sign > 0 THEN
+            RAISE EXCEPTION 'every split of transaction % must have the sign of its amount', tid
+                USING ERRCODE = '23514';
+        END IF;
+    END LOOP;
+    PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
+    RETURN NULL;
+END
+$$;
+COMMENT ON FUNCTION transaction_split_balance() IS
+    'Deferred check: a transaction''s splits sum exactly to its amount, same sign (ADR 0008).';
+CREATE CONSTRAINT TRIGGER transaction_split_balance
+    AFTER INSERT OR UPDATE OR DELETE ON transaction_split
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION transaction_split_balance();
+CREATE CONSTRAINT TRIGGER transaction_split_balance
+    AFTER UPDATE OF amount ON "transaction"
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION transaction_split_balance();
+"""
+
 
 def _enable_rls(table: str) -> None:
     op.execute(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY')
     op.execute(f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY')
 
 
+def _restrictive(name: str, table: str, command: str, using: str | None, check: str | None) -> None:
+    sql = f'CREATE POLICY {name} ON "{table}" AS RESTRICTIVE FOR {command}'
+    if using is not None:
+        sql += f" USING ({using})"
+    if check is not None:
+        sql += f" WITH CHECK ({check})"
+    op.execute(sql)
+
+
 def upgrade() -> None:
     _create_tables()
     op.execute(HELPER_FUNCTIONS_SQL)
 
-    # household: a household sees only itself. Rows are created by create_household() only.
+    # household: a household sees only itself. Rows are created by create_household() only, and
+    # the app can't delete them either (that will be an owner / SECURITY DEFINER path).
     _enable_rls("household")
     op.execute(
         "CREATE POLICY household_self ON household FOR ALL"
         " USING (id = app_household_id()) WITH CHECK (id = app_household_id())"
     )
-    op.execute(f"REVOKE INSERT ON household FROM {APP_ROLE}")
+    op.execute(f"REVOKE INSERT, DELETE ON household FROM {APP_ROLE}")
 
     for table in HOUSEHOLD_TABLES:
         _enable_rls(table)
@@ -168,11 +327,17 @@ def upgrade() -> None:
             " WITH CHECK (household_id = app_household_id())"
         )
 
-    for table, predicate in VISIBILITY_POLICIES.items():
-        op.execute(
-            f'CREATE POLICY person_visibility ON "{table}" AS RESTRICTIVE FOR ALL'
-            f" USING ({predicate}) WITH CHECK ({predicate})"
-        )
+    for table, (read, write) in PERSON_POLICIES.items():
+        _restrictive("person_read", table, "SELECT", read, None)
+        _restrictive("person_insert", table, "INSERT", None, write)
+        _restrictive("person_update", table, "UPDATE", write, write)
+        _restrictive("person_delete", table, "DELETE", write, None)
+
+    for table, predicate in AGENT_POLICIES.items():
+        _restrictive("person_scope", table, "ALL", predicate, predicate)
+
+    op.execute(ACCOUNT_GUARD_SQL)
+    op.execute(SPLIT_BALANCE_SQL)
 
     # audit_log: append-only. Pre-auth rows (household_id NULL) can be written, never read back.
     _enable_rls("audit_log")
@@ -194,10 +359,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Dropping the tables drops their policies and grants. The functions go last because the
-    # policies reference them.
+    # Dropping the tables drops their policies, triggers and grants. The functions go last
+    # because the policies and triggers reference them.
     _drop_tables()
     op.execute("DROP FUNCTION create_household(text)")
+    op.execute("DROP FUNCTION transaction_split_balance()")
+    op.execute("DROP FUNCTION account_guard_ownership()")
     op.execute("DROP FUNCTION app_household_wide()")
     op.execute("DROP FUNCTION app_person_id()")
     op.execute("DROP FUNCTION app_household_id()")
@@ -215,6 +382,7 @@ def _create_tables() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.CheckConstraint("length(name) BETWEEN 1 AND 200", name=op.f("ck_household_name_length")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_household")),
     )
     op.create_table(
@@ -252,86 +420,6 @@ def _create_tables() -> None:
         sa.UniqueConstraint("plaid_security_id", name=op.f("uq_security_plaid_security_id")),
     )
     op.create_index(op.f("ix_security_ticker"), "security", ["ticker"], unique=False)
-    op.create_table(
-        "agent_conversation",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("household_id", sa.Uuid(), nullable=False),
-        sa.Column("kind", sa.Text(), server_default=sa.text("'chat'"), nullable=False),
-        sa.Column("title", sa.Text(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint(
-            "kind IN ('chat', 'monthly_review', 'year_end')",
-            name=op.f("ck_agent_conversation_kind"),
-        ),
-        sa.ForeignKeyConstraint(
-            ["household_id"],
-            ["household.id"],
-            name=op.f("fk_agent_conversation_household_id_household"),
-            ondelete="CASCADE",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_conversation")),
-        sa.UniqueConstraint(
-            "id", "household_id", name=op.f("uq_agent_conversation_id_household_id")
-        ),
-    )
-    op.create_index(
-        op.f("ix_agent_conversation_household_id"),
-        "agent_conversation",
-        ["household_id"],
-        unique=False,
-    )
-    op.create_table(
-        "agent_finding",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("household_id", sa.Uuid(), nullable=False),
-        sa.Column("tax_year", sa.SmallInteger(), nullable=True),
-        sa.Column("severity", sa.Text(), server_default=sa.text("'info'"), nullable=False),
-        sa.Column("category", sa.Text(), nullable=False),
-        sa.Column("title", sa.Text(), nullable=False),
-        sa.Column("body_md", sa.Text(), nullable=False),
-        sa.Column("est_savings", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("status", sa.Text(), server_default=sa.text("'open'"), nullable=False),
-        sa.Column(
-            "source_refs",
-            postgresql.JSONB(astext_type=sa.Text()),
-            server_default=sa.text("'[]'::jsonb"),
-            nullable=False,
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint(
-            "severity IN ('info', 'low', 'medium', 'high')", name=op.f("ck_agent_finding_severity")
-        ),
-        sa.CheckConstraint(
-            "status IN ('open', 'accepted', 'dismissed', 'done')",
-            name=op.f("ck_agent_finding_status"),
-        ),
-        sa.ForeignKeyConstraint(
-            ["household_id"],
-            ["household.id"],
-            name=op.f("fk_agent_finding_household_id_household"),
-            ondelete="CASCADE",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_finding")),
-    )
-    op.create_index(
-        op.f("ix_agent_finding_household_id"), "agent_finding", ["household_id"], unique=False
-    )
     op.create_table(
         "bank_connection",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
@@ -505,10 +593,122 @@ def _create_tables() -> None:
             name=op.f("fk_person_household_id_household"),
             ondelete="CASCADE",
         ),
+        sa.CheckConstraint(
+            "length(display_name) BETWEEN 1 AND 200", name=op.f("ck_person_display_name_length")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_person")),
         sa.UniqueConstraint("id", "household_id", name=op.f("uq_person_id_household_id")),
     )
     op.create_index(op.f("ix_person_household_id"), "person", ["household_id"], unique=False)
+    op.create_table(
+        "agent_conversation",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("household_id", sa.Uuid(), nullable=False),
+        sa.Column("person_id", sa.Uuid(), nullable=True),
+        sa.Column("kind", sa.Text(), server_default=sa.text("'chat'"), nullable=False),
+        sa.Column("title", sa.Text(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "kind IN ('chat', 'monthly_review', 'year_end')",
+            name=op.f("ck_agent_conversation_kind"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["household_id"],
+            ["household.id"],
+            name=op.f("fk_agent_conversation_household_id_household"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["person_id", "household_id"],
+            ["person.id", "person.household_id"],
+            name=op.f("fk_agent_conversation_person_id_person"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_conversation")),
+        sa.UniqueConstraint(
+            "id", "household_id", name=op.f("uq_agent_conversation_id_household_id")
+        ),
+    )
+    op.create_index(
+        op.f("ix_agent_conversation_household_id"),
+        "agent_conversation",
+        ["household_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_agent_conversation_person_id"), "agent_conversation", ["person_id"], unique=False
+    )
+    op.create_table(
+        "agent_finding",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("household_id", sa.Uuid(), nullable=False),
+        sa.Column("person_id", sa.Uuid(), nullable=True),
+        sa.Column("tax_year", sa.SmallInteger(), nullable=True),
+        sa.Column("severity", sa.Text(), server_default=sa.text("'info'"), nullable=False),
+        sa.Column("category", sa.Text(), nullable=False),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("body_md", sa.Text(), nullable=False),
+        sa.Column(
+            "est_savings",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Estimated savings, a non-negative magnitude (never a signed cash flow).",
+        ),
+        sa.Column("status", sa.Text(), server_default=sa.text("'open'"), nullable=False),
+        sa.Column(
+            "source_refs",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "severity IN ('info', 'low', 'medium', 'high')", name=op.f("ck_agent_finding_severity")
+        ),
+        sa.CheckConstraint(
+            "status IN ('open', 'accepted', 'dismissed', 'done')",
+            name=op.f("ck_agent_finding_status"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["household_id"],
+            ["household.id"],
+            name=op.f("fk_agent_finding_household_id_household"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["person_id", "household_id"],
+            ["person.id", "person.household_id"],
+            name=op.f("fk_agent_finding_person_id_person"),
+            ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "est_savings IS NULL OR est_savings >= 0",
+            name=op.f("ck_agent_finding_est_savings_non_negative"),
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_finding")),
+    )
+    op.create_index(
+        op.f("ix_agent_finding_household_id"), "agent_finding", ["household_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_agent_finding_person_id"), "agent_finding", ["person_id"], unique=False
+    )
     op.create_table(
         "rule",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
@@ -568,6 +768,10 @@ def _create_tables() -> None:
             name=op.f("fk_tax_year_household_id_household"),
             ondelete="CASCADE",
         ),
+        sa.CheckConstraint(
+            f"(dependents::text) IS NULL OR (dependents::text) !~ '{SSN_PATTERN}'",
+            name=op.f("ck_tax_year_dependents_no_ssn"),
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_tax_year")),
         sa.UniqueConstraint("household_id", "year", name=op.f("uq_tax_year_household_id_year")),
         sa.UniqueConstraint("id", "household_id", name=op.f("uq_tax_year_id_household_id")),
@@ -606,7 +810,8 @@ def _create_tables() -> None:
         ),
         sa.CheckConstraint("currency ~ '^[A-Z]{3}$'", name=op.f("ck_account_currency")),
         sa.CheckConstraint(
-            "mask IS NULL OR mask !~ '[0-9]{5,}'", name=op.f("ck_account_mask_masked")
+            "mask IS NULL OR regexp_replace(mask, '\\D', '', 'g') ~ '^\\d{0,4}$'",
+            name=op.f("ck_account_mask_masked"),
         ),
         sa.CheckConstraint(
             "source IN ('plaid', 'simplefin', 'import', 'manual')", name=op.f("ck_account_source")
@@ -730,12 +935,18 @@ def _create_tables() -> None:
         sa.Column("household_id", sa.Uuid(), nullable=False),
         sa.Column("budget_id", sa.Uuid(), nullable=False),
         sa.Column("category_id", sa.Uuid(), nullable=False),
-        sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
+        sa.Column(
+            "amount",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Planned amount, non-negative magnitude.",
+        ),
         sa.Column(
             "alert_pct",
             sa.Numeric(precision=5, scale=4),
             server_default=sa.text("0.8"),
             nullable=False,
+            comment="Fraction in [0, 1]: 0.8000 alerts at 80%.",
         ),
         sa.ForeignKeyConstraint(
             ["budget_id", "household_id"],
@@ -754,6 +965,13 @@ def _create_tables() -> None:
             ["household.id"],
             name=op.f("fk_budget_line_household_id_household"),
             ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "amount IS NULL OR amount >= 0", name=op.f("ck_budget_line_amount_non_negative")
+        ),
+        sa.CheckConstraint(
+            "alert_pct IS NULL OR alert_pct BETWEEN 0 AND 1",
+            name=op.f("ck_budget_line_alert_pct_ratio"),
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_budget_line")),
         sa.UniqueConstraint(
@@ -866,10 +1084,30 @@ def _create_tables() -> None:
         sa.Column("household_id", sa.Uuid(), nullable=False),
         sa.Column("tax_year_id", sa.Uuid(), nullable=False),
         sa.Column("as_of", sa.Date(), nullable=False),
-        sa.Column("federal_liability", sa.Numeric(precision=14, scale=2), nullable=False),
-        sa.Column("state_liability", sa.Numeric(precision=14, scale=2), nullable=False),
-        sa.Column("withheld", sa.Numeric(precision=14, scale=2), nullable=False),
-        sa.Column("projected_due", sa.Numeric(precision=14, scale=2), nullable=False),
+        sa.Column(
+            "federal_liability",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Non-negative magnitude.",
+        ),
+        sa.Column(
+            "state_liability",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Non-negative magnitude.",
+        ),
+        sa.Column(
+            "withheld",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Non-negative magnitude.",
+        ),
+        sa.Column(
+            "projected_due",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Positive = owed at filing, negative = expected refund.",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -887,6 +1125,18 @@ def _create_tables() -> None:
             ["tax_year.id", "tax_year.household_id"],
             name=op.f("fk_estimate_snapshot_tax_year_id_tax_year"),
             ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "state_liability IS NULL OR state_liability >= 0",
+            name=op.f("ck_estimate_snapshot_state_liability_non_negative"),
+        ),
+        sa.CheckConstraint(
+            "withheld IS NULL OR withheld >= 0",
+            name=op.f("ck_estimate_snapshot_withheld_non_negative"),
+        ),
+        sa.CheckConstraint(
+            "federal_liability IS NULL OR federal_liability >= 0",
+            name=op.f("ck_estimate_snapshot_federal_liability_non_negative"),
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_estimate_snapshot")),
     )
@@ -907,10 +1157,20 @@ def _create_tables() -> None:
         sa.Column("person_id", sa.Uuid(), nullable=True),
         sa.Column("form", sa.Text(), nullable=False),
         sa.Column("line_key", sa.Text(), nullable=False),
-        sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
+        sa.Column(
+            "amount",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Signed as on the form line (losses negative), not the cash-flow convention.",
+        ),
         sa.Column("source_type", sa.Text(), nullable=False),
         sa.Column("source_id", sa.Uuid(), nullable=True),
-        sa.Column("confidence", sa.Numeric(precision=5, scale=4), nullable=True),
+        sa.Column(
+            "confidence",
+            sa.Numeric(precision=5, scale=4),
+            nullable=True,
+            comment="Fraction in [0, 1].",
+        ),
         sa.Column("needs_review", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("note", sa.Text(), nullable=True),
         sa.Column(
@@ -940,6 +1200,10 @@ def _create_tables() -> None:
             ["tax_year.id", "tax_year.household_id"],
             name=op.f("fk_tax_item_tax_year_id_tax_year"),
             ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "confidence IS NULL OR confidence BETWEEN 0 AND 1",
+            name=op.f("ck_tax_item_confidence_ratio"),
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_tax_item")),
     )
@@ -1002,18 +1266,6 @@ def _create_tables() -> None:
         sa.Column(
             "at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
         ),
-        sa.ForeignKeyConstraint(
-            ["household_id"],
-            ["household.id"],
-            name=op.f("fk_audit_log_household_id_household"),
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["user_id"],
-            ["app_user.id"],
-            name=op.f("fk_audit_log_user_id_app_user"),
-            ondelete="SET NULL",
-        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_audit_log")),
     )
     op.create_index(
@@ -1052,9 +1304,24 @@ def _create_tables() -> None:
         sa.Column("account_id", sa.Uuid(), nullable=False),
         sa.Column("as_of_date", sa.Date(), nullable=False),
         sa.Column("household_id", sa.Uuid(), nullable=False),
-        sa.Column("current", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("available", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("limit_amt", sa.Numeric(precision=14, scale=2), nullable=True),
+        sa.Column(
+            "current",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Assets positive; credit/loan negative = owed (Plaid negated on ingest).",
+        ),
+        sa.Column(
+            "available",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Spendable / drawable now, as reported (positive; remaining credit for cards).",
+        ),
+        sa.Column(
+            "limit_amt",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Credit limit, positive magnitude.",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -1072,6 +1339,10 @@ def _create_tables() -> None:
             ["household.id"],
             name=op.f("fk_balance_snapshot_household_id_household"),
             ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "limit_amt IS NULL OR limit_amt >= 0",
+            name=op.f("ck_balance_snapshot_limit_amt_non_negative"),
         ),
         sa.PrimaryKeyConstraint("account_id", "as_of_date", name=op.f("pk_balance_snapshot")),
     )
@@ -1183,10 +1454,30 @@ def _create_tables() -> None:
         sa.Column("type", sa.Text(), nullable=False),
         sa.Column("subtype", sa.Text(), nullable=True),
         sa.Column("security_id", sa.Uuid(), nullable=True),
-        sa.Column("quantity", sa.Numeric(precision=28, scale=10), nullable=True),
-        sa.Column("price", sa.Numeric(precision=18, scale=8), nullable=True),
-        sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
-        sa.Column("fees", sa.Numeric(precision=14, scale=2), nullable=True),
+        sa.Column(
+            "quantity",
+            sa.Numeric(precision=28, scale=10),
+            nullable=True,
+            comment="Change in units held: buy positive, sell negative.",
+        ),
+        sa.Column(
+            "price",
+            sa.Numeric(precision=18, scale=8),
+            nullable=True,
+            comment="Per-unit price, non-negative.",
+        ),
+        sa.Column(
+            "amount",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Cash effect: buy negative (outflow), sell/dividend positive. Plaid negated.",
+        ),
+        sa.Column(
+            "fees",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Fees as a non-negative magnitude, already included in amount.",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -1215,6 +1506,12 @@ def _create_tables() -> None:
             name=op.f("fk_investment_txn_security_id_security"),
             ondelete="SET NULL",
         ),
+        sa.CheckConstraint(
+            "price IS NULL OR price >= 0", name=op.f("ck_investment_txn_price_non_negative")
+        ),
+        sa.CheckConstraint(
+            "fees IS NULL OR fees >= 0", name=op.f("ck_investment_txn_fees_non_negative")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_investment_txn")),
         sa.UniqueConstraint(
             "account_id", "external_id", name=op.f("uq_investment_txn_account_id_external_id")
@@ -1231,11 +1528,31 @@ def _create_tables() -> None:
         sa.Column("account_id", sa.Uuid(), nullable=False),
         sa.Column("household_id", sa.Uuid(), nullable=False),
         sa.Column("kind", sa.Text(), nullable=False),
-        sa.Column("apr", sa.Numeric(precision=7, scale=4), nullable=True),
-        sa.Column("min_payment", sa.Numeric(precision=14, scale=2), nullable=True),
+        sa.Column(
+            "apr",
+            sa.Numeric(precision=7, scale=4),
+            nullable=True,
+            comment="Annual percentage rate as a percent: 24.9900 = 24.99% (not a fraction).",
+        ),
+        sa.Column(
+            "min_payment",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Non-negative magnitude.",
+        ),
         sa.Column("next_due_date", sa.Date(), nullable=True),
-        sa.Column("statement_balance", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("original_principal", sa.Numeric(precision=14, scale=2), nullable=True),
+        sa.Column(
+            "statement_balance",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="As stated by the lender: positive = owed, negative = credit balance.",
+        ),
+        sa.Column(
+            "original_principal",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Non-negative magnitude.",
+        ),
         sa.Column("payoff_date", sa.Date(), nullable=True),
         sa.Column(
             "updated_at",
@@ -1259,6 +1576,15 @@ def _create_tables() -> None:
             name=op.f("fk_liability_household_id_household"),
             ondelete="CASCADE",
         ),
+        sa.CheckConstraint("apr IS NULL OR apr >= 0", name=op.f("ck_liability_apr_non_negative")),
+        sa.CheckConstraint(
+            "min_payment IS NULL OR min_payment >= 0",
+            name=op.f("ck_liability_min_payment_non_negative"),
+        ),
+        sa.CheckConstraint(
+            "original_principal IS NULL OR original_principal >= 0",
+            name=op.f("ck_liability_original_principal_non_negative"),
+        ),
         sa.PrimaryKeyConstraint("account_id", name=op.f("pk_liability")),
     )
     op.create_index(op.f("ix_liability_household_id"), "liability", ["household_id"], unique=False)
@@ -1269,7 +1595,12 @@ def _create_tables() -> None:
         sa.Column("document_id", sa.Uuid(), nullable=False),
         sa.Column("key", sa.Text(), nullable=False),
         sa.Column("value", sa.Text(), nullable=True),
-        sa.Column("confidence", sa.Numeric(precision=5, scale=4), nullable=True),
+        sa.Column(
+            "confidence",
+            sa.Numeric(precision=5, scale=4),
+            nullable=True,
+            comment="Fraction in [0, 1].",
+        ),
         sa.Column("page", sa.Integer(), nullable=True),
         sa.Column("bbox", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column(
@@ -1286,6 +1617,14 @@ def _create_tables() -> None:
             ["household.id"],
             name=op.f("fk_parsed_field_household_id_household"),
             ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "confidence IS NULL OR confidence BETWEEN 0 AND 1",
+            name=op.f("ck_parsed_field_confidence_ratio"),
+        ),
+        sa.CheckConstraint(
+            f"value IS NULL OR value !~ '{SSN_PATTERN}'",
+            name=op.f("ck_parsed_field_value_no_ssn"),
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_parsed_field")),
     )
@@ -1321,7 +1660,12 @@ def _create_tables() -> None:
         sa.Column("import_fingerprint", sa.Text(), nullable=True),
         sa.Column("posted_date", sa.Date(), nullable=False),
         sa.Column("authorized_date", sa.Date(), nullable=True),
-        sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
+        sa.Column(
+            "amount",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Outflow negative, inflow positive. Plaid amounts are negated on ingest.",
+        ),
         sa.Column("description_raw", sa.Text(), nullable=False),
         sa.Column("merchant_name", sa.Text(), nullable=True),
         sa.Column("plaid_pfc_primary", sa.Text(), nullable=True),
@@ -1335,6 +1679,12 @@ def _create_tables() -> None:
         sa.Column("tax_tag", sa.Text(), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("receipt_document_id", sa.Uuid(), nullable=True),
+        sa.Column(
+            "pending_external_id",
+            sa.Text(),
+            nullable=True,
+            comment="Plaid pending_transaction_id: external_id of the pending row replaced.",
+        ),
         sa.Column("source", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
@@ -1380,6 +1730,9 @@ def _create_tables() -> None:
             name=op.f("fk_transaction_receipt_document_id_document"),
             ondelete="SET NULL (receipt_document_id)",
         ),
+        sa.CheckConstraint(
+            "transfer_group_id IS NULL OR is_transfer", name=op.f("ck_transaction_transfer_group")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_transaction")),
         sa.UniqueConstraint(
             "account_id", "external_id", name=op.f("uq_transaction_account_id_external_id")
@@ -1415,6 +1768,12 @@ def _create_tables() -> None:
         op.f("ix_transaction_household_id"), "transaction", ["household_id"], unique=False
     )
     op.create_index("ix_transaction_merchant_name", "transaction", ["merchant_name"], unique=False)
+    op.create_index(
+        op.f("ix_transaction_pending_external_id"),
+        "transaction",
+        ["pending_external_id"],
+        unique=False,
+    )
     op.create_index(
         op.f("ix_transaction_receipt_document_id"),
         "transaction",
@@ -1501,13 +1860,29 @@ def _create_tables() -> None:
         sa.Column("account_type", sa.Text(), nullable=True),
         sa.Column("opened", sa.Date(), nullable=True),
         sa.Column("status", sa.Text(), nullable=True),
-        sa.Column("credit_limit", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("balance", sa.Numeric(precision=14, scale=2), nullable=True),
-        sa.Column("high_balance", sa.Numeric(precision=14, scale=2), nullable=True),
+        sa.Column(
+            "credit_limit",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="As reported, non-negative.",
+        ),
+        sa.Column(
+            "balance",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Amount owed as reported by the bureau, non-negative magnitude.",
+        ),
+        sa.Column(
+            "high_balance",
+            sa.Numeric(precision=14, scale=2),
+            nullable=True,
+            comment="Highest balance as reported, non-negative magnitude.",
+        ),
         sa.Column("payment_history", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("account_number_masked", sa.Text(), nullable=True),
         sa.CheckConstraint(
-            "account_number_masked IS NULL OR account_number_masked !~ '[0-9]{5,}'",
+            "account_number_masked IS NULL"
+            " OR regexp_replace(account_number_masked, '\\D', '', 'g') ~ '^\\d{0,4}$'",
             name=op.f("ck_tradeline_account_number_masked_masked"),
         ),
         sa.ForeignKeyConstraint(
@@ -1522,6 +1897,17 @@ def _create_tables() -> None:
             name=op.f("fk_tradeline_household_id_household"),
             ondelete="CASCADE",
         ),
+        sa.CheckConstraint(
+            "balance IS NULL OR balance >= 0", name=op.f("ck_tradeline_balance_non_negative")
+        ),
+        sa.CheckConstraint(
+            "high_balance IS NULL OR high_balance >= 0",
+            name=op.f("ck_tradeline_high_balance_non_negative"),
+        ),
+        sa.CheckConstraint(
+            "credit_limit IS NULL OR credit_limit >= 0",
+            name=op.f("ck_tradeline_credit_limit_non_negative"),
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_tradeline")),
     )
     op.create_index(
@@ -1534,7 +1920,12 @@ def _create_tables() -> None:
         sa.Column("household_id", sa.Uuid(), nullable=False),
         sa.Column("transaction_id", sa.Uuid(), nullable=False),
         sa.Column("category_id", sa.Uuid(), nullable=True),
-        sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
+        sa.Column(
+            "amount",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+            comment="Same sign as the parent; a transaction's splits sum to its amount.",
+        ),
         sa.Column("tax_tag", sa.Text(), nullable=True),
         sa.Column("note", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(
@@ -1591,6 +1982,7 @@ def _drop_tables() -> None:
     op.drop_table("webauthn_credential")
     op.drop_index(op.f("ix_transaction_transfer_group_id"), table_name="transaction")
     op.drop_index(op.f("ix_transaction_receipt_document_id"), table_name="transaction")
+    op.drop_index(op.f("ix_transaction_pending_external_id"), table_name="transaction")
     op.drop_index("ix_transaction_merchant_name", table_name="transaction")
     op.drop_index(op.f("ix_transaction_household_id"), table_name="transaction")
     op.drop_index(
@@ -1650,6 +2042,12 @@ def _drop_tables() -> None:
     op.drop_index(op.f("ix_agent_message_household_id"), table_name="agent_message")
     op.drop_index(op.f("ix_agent_message_conversation_id"), table_name="agent_message")
     op.drop_table("agent_message")
+    op.drop_index(op.f("ix_agent_finding_person_id"), table_name="agent_finding")
+    op.drop_index(op.f("ix_agent_finding_household_id"), table_name="agent_finding")
+    op.drop_table("agent_finding")
+    op.drop_index(op.f("ix_agent_conversation_person_id"), table_name="agent_conversation")
+    op.drop_index(op.f("ix_agent_conversation_household_id"), table_name="agent_conversation")
+    op.drop_table("agent_conversation")
     op.drop_index(op.f("ix_account_owner_person_id"), table_name="account")
     op.drop_index(op.f("ix_account_household_id"), table_name="account")
     op.drop_index(op.f("ix_account_bank_connection_id"), table_name="account")
@@ -1669,10 +2067,6 @@ def _drop_tables() -> None:
     op.drop_index(op.f("ix_bank_connection_institution_id"), table_name="bank_connection")
     op.drop_index(op.f("ix_bank_connection_household_id"), table_name="bank_connection")
     op.drop_table("bank_connection")
-    op.drop_index(op.f("ix_agent_finding_household_id"), table_name="agent_finding")
-    op.drop_table("agent_finding")
-    op.drop_index(op.f("ix_agent_conversation_household_id"), table_name="agent_conversation")
-    op.drop_table("agent_conversation")
     op.drop_index(op.f("ix_security_ticker"), table_name="security")
     op.drop_table("security")
     op.drop_table("institution")

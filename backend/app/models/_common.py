@@ -17,6 +17,7 @@ Conventions (Phase 1 contract):
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -43,9 +44,11 @@ HouseholdId = Annotated[
 Money = Annotated[Decimal, mapped_column(Numeric(14, 2))]
 Quantity = Annotated[Decimal, mapped_column(Numeric(28, 10))]
 Price = Annotated[Decimal, mapped_column(Numeric(18, 8))]
-# Ratios such as confidence scores and alert thresholds (0.8000). Not money.
+# Fractions in [0, 1] such as confidence scores and alert thresholds (0.8000 = 80%). Not money.
+# Every Ratio column carries ``check_ratio``.
 Ratio = Annotated[Decimal, mapped_column(Numeric(5, 4))]
-# Percentage rates such as APR (24.9900 = 24.99%). Not money.
+# Percentages such as APR, stored as the percent itself (24.9900 = 24.99%), *not* a fraction like
+# Ratio. Not money.
 Rate = Annotated[Decimal, mapped_column(Numeric(7, 4))]
 
 # --------------------------------------------------------------------------- enum values
@@ -133,11 +136,41 @@ def child_fk(column: str, parent: str, *, ondelete: str = "CASCADE") -> ForeignK
     )
 
 
+# A string whose digits (after stripping everything else) number at most four: a mask, never a
+# full account or card number. ``4111-1111-1111-1111`` fails, ``XXXX-1234`` passes.
+MASK_SQL = "regexp_replace({col}, '\\D', '', 'g') ~ '^\\d{{0,4}}$'"
+
+# An SSN-shaped number: nine digits as ``123-45-6789``, ``123 45 6789`` or ``123456789``, not
+# embedded in a longer digit run. The back-reference makes both separators match, so ZIP+4
+# (``12345-6789``) and 10-digit phone numbers pass. Masked forms (``XXX-XX-6789``) pass too.
+SSN_PATTERN = "(^|[^0-9])[0-9]{3}([- ]?)[0-9]{2}\\2[0-9]{4}([^0-9]|$)"
+
+
 def check_masked(column: str) -> CheckConstraint:
-    """Reject anything that looks like a full account number: no run of 5+ digits.
+    """Reject anything that looks like a full account number: at most four digits in total.
 
     Masks like ``0000`` or ``XXXX-1234`` pass. Named ``ck_<table>_<column>_masked``.
     """
     return CheckConstraint(
-        f"{column} IS NULL OR {column} !~ '[0-9]{{5,}}'", name=f"{column}_masked"
+        f"{column} IS NULL OR {MASK_SQL.format(col=column)}", name=f"{column}_masked"
     )
+
+
+def check_no_ssn(expr: str, name: str) -> CheckConstraint:
+    """Reject SSN-shaped values in free text (``expr`` may be a cast such as ``col::text``)."""
+    return CheckConstraint(f"{expr} IS NULL OR {expr} !~ '{SSN_PATTERN}'", name=name)
+
+
+def is_valid_mask(value: str | None) -> bool:
+    """Python twin of the mask CHECK, for API validation before the database rejects it."""
+    return value is None or len(re.sub(r"\D", "", value)) <= 4
+
+
+def check_ratio(column: str) -> CheckConstraint:
+    """``CHECK (column BETWEEN 0 AND 1)`` for Ratio fractions. Named ``ck_<table>_<col>_ratio``."""
+    return CheckConstraint(f"{column} IS NULL OR {column} BETWEEN 0 AND 1", name=f"{column}_ratio")
+
+
+def check_non_negative(column: str) -> CheckConstraint:
+    """``CHECK (column >= 0)`` for magnitudes. Named ``ck_<table>_<column>_non_negative``."""
+    return CheckConstraint(f"{column} IS NULL OR {column} >= 0", name=f"{column}_non_negative")

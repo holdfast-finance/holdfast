@@ -24,6 +24,9 @@ from app.models._common import (
     Money,
     Ratio,
     check_in,
+    check_no_ssn,
+    check_non_negative,
+    check_ratio,
     child_fk,
     parent_key,
 )
@@ -35,6 +38,8 @@ class TaxYear(Base):
         check_in("filing_status", FILING_STATUSES, nullable=True),
         check_in("status", TAX_YEAR_STATUSES),
         CheckConstraint("state IS NULL OR state ~ '^[A-Z]{2}$'", name="state"),
+        # Dependents are names / birth years / relationships. SSNs are never stored.
+        check_no_ssn("(dependents::text)", "dependents_no_ssn"),
         UniqueConstraint("household_id", "year"),
         parent_key(),
     )
@@ -50,9 +55,13 @@ class TaxYear(Base):
 
 
 class TaxItem(Base):
+    """One amount on one form line. ``amount`` is signed exactly as the form line is (a capital
+    loss is negative, withholding is positive): not the cash-flow convention."""
+
     __tablename__ = "tax_item"
     __table_args__ = (
         check_in("source_type", TAX_SOURCE_TYPES),
+        check_ratio("confidence"),
         child_fk("tax_year_id", "tax_year"),
         child_fk("person_id", "person", ondelete="SET NULL"),
     )
@@ -63,10 +72,12 @@ class TaxItem(Base):
     person_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     form: Mapped[str]
     line_key: Mapped[str]
-    amount: Mapped[Money]
+    amount: Mapped[Money] = mapped_column(
+        comment="Signed as on the form line (losses negative), not the cash-flow convention."
+    )
     source_type: Mapped[str]
     source_id: Mapped[uuid.UUID | None]  # polymorphic (document / transaction), no FK
-    confidence: Mapped[Ratio | None]
+    confidence: Mapped[Ratio | None] = mapped_column(comment="Fraction in [0, 1].")
     needs_review: Mapped[bool] = mapped_column(server_default=text("false"))
     note: Mapped[str | None]
     created_at: Mapped[CreatedAt]
@@ -90,15 +101,25 @@ class TaxScenario(Base):
 
 
 class EstimateSnapshot(Base):
+    """A point-in-time tax estimate. Liabilities and withholding are non-negative magnitudes.
+    ``projected_due`` is signed: positive = owed at filing, negative = expected refund."""
+
     __tablename__ = "estimate_snapshot"
-    __table_args__ = (child_fk("tax_year_id", "tax_year"),)
+    __table_args__ = (
+        child_fk("tax_year_id", "tax_year"),
+        check_non_negative("federal_liability"),
+        check_non_negative("state_liability"),
+        check_non_negative("withheld"),
+    )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
     tax_year_id: Mapped[uuid.UUID] = mapped_column(index=True)
     as_of: Mapped[date]
-    federal_liability: Mapped[Money]
-    state_liability: Mapped[Money]
-    withheld: Mapped[Money]
-    projected_due: Mapped[Money]
+    federal_liability: Mapped[Money] = mapped_column(comment="Non-negative magnitude.")
+    state_liability: Mapped[Money] = mapped_column(comment="Non-negative magnitude.")
+    withheld: Mapped[Money] = mapped_column(comment="Non-negative magnitude.")
+    projected_due: Mapped[Money] = mapped_column(
+        comment="Positive = owed at filing, negative = expected refund."
+    )
     created_at: Mapped[CreatedAt]

@@ -20,17 +20,32 @@ from app.models._common import (
     HouseholdId,
     Money,
     check_in,
+    check_non_negative,
     child_fk,
     parent_key,
 )
 
 
 class AgentConversation(Base):
+    """An advisor conversation. ``person_id`` is the person the run was for.
+
+    Agent output inherits the run's visibility (ADR 0008): a run for a person can read their
+    private accounts, so its conversation is visible only to that person (or household-wide
+    jobs). ``person_id`` NULL means a household-level run over household-visible data only.
+    Messages inherit their conversation's visibility.
+    """
+
     __tablename__ = "agent_conversation"
-    __table_args__ = (check_in("kind", CONVERSATION_KINDS), parent_key())
+    __table_args__ = (
+        check_in("kind", CONVERSATION_KINDS),
+        # CASCADE, not SET NULL: clearing person_id would make private output household-visible.
+        child_fk("person_id", "person"),
+        parent_key(),
+    )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
+    person_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     kind: Mapped[str] = mapped_column(server_default=text("'chat'"))
     title: Mapped[str | None]
     created_at: Mapped[CreatedAt]
@@ -55,20 +70,27 @@ class AgentMessage(Base):
 
 
 class AgentFinding(Base):
+    """An advisor finding. Same person scoping as ``AgentConversation``."""
+
     __tablename__ = "agent_finding"
     __table_args__ = (
         check_in("severity", FINDING_SEVERITIES),
         check_in("status", FINDING_STATUSES),
+        check_non_negative("est_savings"),
+        child_fk("person_id", "person"),
     )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
+    person_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     tax_year: Mapped[int | None] = mapped_column(SmallInteger)
     severity: Mapped[str] = mapped_column(server_default=text("'info'"))
     category: Mapped[str]
     title: Mapped[str]
     body_md: Mapped[str]
-    est_savings: Mapped[Money | None]
+    est_savings: Mapped[Money | None] = mapped_column(
+        comment="Estimated savings, a non-negative magnitude (never a signed cash flow)."
+    )
     status: Mapped[str] = mapped_column(server_default=text("'open'"))
     source_refs: Mapped[list[Any]] = mapped_column(server_default=text("'[]'::jsonb"))
     created_at: Mapped[CreatedAt]

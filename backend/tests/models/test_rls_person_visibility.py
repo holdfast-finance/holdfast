@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy import Connection, Engine, select, text
@@ -41,7 +43,7 @@ class VisibilityHousehold:
 
 
 @pytest.fixture(scope="module")
-def household(app_engine: Engine) -> Iterator[VisibilityHousehold]:
+def household(app_engine: Engine, owner_engine: Engine) -> Iterator[VisibilityHousehold]:
     with app_engine.begin() as c:
         hid = c.execute(text("SELECT create_household('Example Visibility')")).scalar_one()
         set_ctx(c, hid, wide=True)
@@ -104,7 +106,7 @@ def household(app_engine: Engine) -> Iterator[VisibilityHousehold]:
                 current=Decimal("100.00"),
             )
     yield VisibilityHousehold(hid, alex, sam, accounts, transactions)
-    delete_household(app_engine, hid)
+    delete_household(owner_engine, hid)
 
 
 def _visible_accounts(c: Connection, hh: VisibilityHousehold, name: str) -> set[str]:
@@ -204,16 +206,261 @@ def test_other_person_cannot_touch_hidden_rows(
         assert c.execute(txn.delete().where(txn.c.account_id == summary)).rowcount == 0
 
 
-def test_other_person_cannot_hide_a_shared_account(
-    app_engine: Engine, household: VisibilityHousehold
-) -> None:
-    """Sam can't flip Alex's shared account to private (the new row would vanish from Sam)."""
+@contextmanager
+def rolled_back(engine: Engine) -> Iterator[Connection]:
+    """A transaction that is always rolled back, so write probes never change the fixture."""
+    with engine.connect() as c:
+        tx = c.begin()
+        try:
+            yield c
+        finally:
+            tx.rollback()
+
+
+def _account_row(app_engine: Engine, hh: VisibilityHousehold, kind: str) -> tuple[str, Any]:
     acct = table("account")
     with app_engine.begin() as c:
+        set_ctx(c, hh.household_id, None, wide=True)
+        visibility, owner = c.execute(
+            select(acct.c.visibility, acct.c.owner_person_id).where(acct.c.id == hh.accounts[kind])
+        ).one()
+        return visibility, owner
+
+
+# Every way a non-owner could gain or steal access by rewriting a visible account (finding H1).
+TAKEOVERS = [
+    pytest.param({"visibility": "shared"}, id="widen-to-shared"),
+    pytest.param({"owner_person_id": "SAM"}, id="claim-ownership"),
+    pytest.param({"owner_person_id": None}, id="make-joint"),
+    pytest.param({"visibility": "private", "owner_person_id": "SAM"}, id="steal-and-hide"),
+    pytest.param({"visibility": "private"}, id="hide-from-owner"),
+    pytest.param({"name": "renamed"}, id="plain-edit"),
+]
+
+
+@pytest.mark.parametrize("kind", ["summary_only", "shared"])
+@pytest.mark.parametrize("values", TAKEOVERS)
+def test_other_person_cannot_rewrite_a_visible_account(
+    app_engine: Engine, household: VisibilityHousehold, kind: str, values: dict[str, Any]
+) -> None:
+    """Seeing an account (shared / summary_only) never grants the right to change it."""
+    acct = table("account")
+    vals = {k: household.sam if v == "SAM" else v for k, v in values.items()}
+    before = _account_row(app_engine, household, kind)
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        assert c.execute(select(acct.c.id).where(acct.c.id == household.accounts[kind])).one()
+        upd = c.execute(acct.update().where(acct.c.id == household.accounts[kind]).values(**vals))
+        assert upd.rowcount == 0
+        assert c.execute(acct.delete().where(acct.c.id == household.accounts[kind])).rowcount == 0
+    assert _account_row(app_engine, household, kind) == before
+
+
+@pytest.mark.parametrize("owner", ["ALEX", "OTHER_HOUSEHOLD_PERSON"])
+def test_cannot_insert_an_account_owned_by_someone_else(
+    app_engine: Engine, household: VisibilityHousehold, owner: str
+) -> None:
+    owner_id = household.alex if owner == "ALEX" else uuid.uuid4()
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        with pytest.raises(DBAPIError, match=r"row-level security|foreign key"):
+            c.execute(
+                table("account")
+                .insert()
+                .values(
+                    household_id=household.household_id,
+                    owner_person_id=owner_id,
+                    visibility="private",
+                    source="manual",
+                    name="Example planted",
+                    type="depository",
+                )
+            )
+
+
+@pytest.mark.parametrize("owner", ["SAM", None])
+def test_can_insert_own_or_joint_account(
+    app_engine: Engine, household: VisibilityHousehold, owner: str | None
+) -> None:
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        c.execute(
+            table("account")
+            .insert()
+            .values(
+                household_id=household.household_id,
+                owner_person_id=household.sam if owner else None,
+                source="manual",
+                name="Example new",
+                type="depository",
+            )
+        )
+
+
+def test_owner_can_change_visibility_but_not_hand_the_account_away(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    acct = table("account")
+    target = acct.c.id == household.accounts["shared"]
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.alex)
+        assert c.execute(acct.update().where(target).values(visibility="private")).rowcount == 1
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.alex)
+        with pytest.raises(DBAPIError, match="row-level security"):
+            c.execute(acct.update().where(target).values(owner_person_id=household.sam))
+    with rolled_back(app_engine) as c:
+        # Reassigning an account to another person is a household-wide (admin) operation.
+        set_ctx(c, household.household_id, None, wide=True)
+        assert c.execute(acct.update().where(target).values(owner_person_id=household.sam)).rowcount
+
+
+def test_joint_account_is_writable_by_everyone(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    acct = table("account")
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        upd = c.execute(
+            acct.update().where(acct.c.id == household.accounts["joint"]).values(name="Ours")
+        )
+        assert upd.rowcount == 1
+
+
+def test_ownership_guard_trigger_blocks_non_owner_even_without_rls(
+    owner_engine: Engine, household: VisibilityHousehold
+) -> None:
+    """Defense in depth: with RLS lifted (inside a rolled-back transaction), the trigger alone
+    still stops a non-owner from changing visibility or owner."""
+    acct = table("account")
+    target = acct.c.id == household.accounts["summary_only"]
+    for values in ({"visibility": "shared"}, {"owner_person_id": household.sam}):
+        with rolled_back(owner_engine) as c:
+            c.execute(text("ALTER TABLE account NO FORCE ROW LEVEL SECURITY"))
+            set_ctx(c, household.household_id, household.sam)
+            with pytest.raises(DBAPIError, match="only the account owner"):
+                c.execute(acct.update().where(target).values(**values))
+    with rolled_back(owner_engine) as c:
+        c.execute(text("ALTER TABLE account NO FORCE ROW LEVEL SECURITY"))
+        set_ctx(c, household.household_id, household.sam)
+        # Other columns aren't the trigger's business (RLS covers them).
+        assert c.execute(acct.update().where(target).values(name="x")).rowcount == 1
+    with rolled_back(owner_engine) as c:
+        c.execute(text("ALTER TABLE account NO FORCE ROW LEVEL SECURITY"))
+        set_ctx(c, household.household_id, None)  # no person: still not the owner
+        with pytest.raises(DBAPIError, match="only the account owner"):
+            c.execute(acct.update().where(target).values(visibility="shared"))
+
+
+# --------------------------------------------------------------------------- detail writes
+
+DETAIL_WRITE_TABLES = (*ACCOUNT_DETAIL_TABLES, "balance_snapshot")
+
+
+def _detail_target(name: str, hh: VisibilityHousehold, kind: str) -> Any:
+    t = table(name)
+    if name == "transaction_split":
+        return t.c.transaction_id == hh.transactions[kind]
+    return t.c.account_id == hh.accounts[kind]
+
+
+@pytest.mark.parametrize("name", DETAIL_WRITE_TABLES)
+def test_other_person_cannot_edit_details_of_a_shared_account(
+    app_engine: Engine, household: VisibilityHousehold, name: str
+) -> None:
+    """Shared means read-only for everyone but the owner: no edits, no deletes."""
+    t = table(name)
+    probe = {"notes": "x"} if name == "transaction" else {"household_id": household.household_id}
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        target = _detail_target(name, household, "shared")
+        if name != "balance_snapshot":  # summary-only rules: balances stay visible
+            assert c.execute(select(t).where(target)).first() is not None
+        assert c.execute(t.update().where(target).values(**probe)).rowcount == 0
+        assert c.execute(t.delete().where(target)).rowcount == 0
+
+
+@pytest.mark.parametrize("name", DETAIL_WRITE_TABLES)
+def test_owner_and_joint_details_are_writable(
+    app_engine: Engine, household: VisibilityHousehold, name: str
+) -> None:
+    t = table(name)
+    for person, kind in ((household.alex, "shared"), (household.sam, "joint")):
+        with rolled_back(app_engine) as c:
+            set_ctx(c, household.household_id, person)
+            target = _detail_target(name, household, kind)
+            assert c.execute(t.delete().where(target)).rowcount >= 1, (name, kind)
+
+
+def test_other_person_cannot_insert_details_into_a_shared_account(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    h = {"household_id": household.household_id}
+    inserts = {
+        "transaction": {
+            **h,
+            "account_id": household.accounts["shared"],
+            "posted_date": date(2026, 3, 2),
+            "amount": Decimal("-1.00"),
+            "description_raw": "EXAMPLE",
+            "source": "manual",
+        },
+        "balance_snapshot": {
+            **h,
+            "account_id": household.accounts["shared"],
+            "as_of_date": date(2026, 3, 9),
+            "current": Decimal("1.00"),
+        },
+        "transaction_split": {
+            **h,
+            "transaction_id": household.transactions["shared"],
+            "amount": Decimal("-1.00"),
+        },
+    }
+    for name, values in inserts.items():
+        with rolled_back(app_engine) as c:
+            set_ctx(c, household.household_id, household.sam)
+            with pytest.raises(DBAPIError, match="row-level security"):
+                c.execute(table(name).insert().values(**values))
+
+
+def test_cannot_move_a_transaction_into_an_account_you_cannot_write(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    txn = table("transaction")
+    with rolled_back(app_engine) as c:
         set_ctx(c, household.household_id, household.sam)
         with pytest.raises(DBAPIError, match="row-level security"):
             c.execute(
-                acct.update()
-                .where(acct.c.id == household.accounts["shared"])
-                .values(visibility="private")
+                txn.update()
+                .where(txn.c.id == household.transactions["joint"])
+                .values(account_id=household.accounts["shared"])
             )
+
+
+def test_cannot_move_a_transaction_out_of_an_account_you_cannot_write(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    txn = table("transaction")
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.sam)
+        moved = c.execute(
+            txn.update()
+            .where(txn.c.id == household.transactions["shared"])
+            .values(account_id=household.accounts["joint"])
+        )
+        assert moved.rowcount == 0
+
+
+def test_owner_can_move_between_writable_accounts(
+    app_engine: Engine, household: VisibilityHousehold
+) -> None:
+    txn = table("transaction")
+    with rolled_back(app_engine) as c:
+        set_ctx(c, household.household_id, household.alex)
+        moved = c.execute(
+            txn.update()
+            .where(txn.c.id == household.transactions["private"])
+            .values(account_id=household.accounts["joint"])
+        )
+        assert moved.rowcount == 1

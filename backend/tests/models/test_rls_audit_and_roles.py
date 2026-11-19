@@ -87,7 +87,7 @@ def test_audit_rows_are_household_scoped(
 # --------------------------------------------------------------------------- create_household
 
 
-def test_create_household_works_without_context(app_engine: Engine) -> None:
+def test_create_household_works_without_context(app_engine: Engine, owner_engine: Engine) -> None:
     with app_engine.begin() as c:
         hid = c.execute(text("SELECT create_household('Example Setup')")).scalar_one()
         assert isinstance(hid, uuid.UUID)
@@ -96,18 +96,18 @@ def test_create_household_works_without_context(app_engine: Engine) -> None:
         assert count(c, "household") == 0
         set_ctx(c, hid)
         assert c.execute(text("SELECT name FROM household")).scalar_one() == "Example Setup"
-    delete_household(app_engine, hid)
+    delete_household(owner_engine, hid)
 
 
 def test_create_household_restores_existing_context(
-    app_engine: Engine, two_households: tuple[Seed, Seed]
+    app_engine: Engine, owner_engine: Engine, two_households: tuple[Seed, Seed]
 ) -> None:
     a, _ = two_households
     with app_engine.begin() as c:
         set_ctx(c, a.household_id)
         hid = c.execute(text("SELECT create_household('Example Second')")).scalar_one()
         assert c.execute(text("SELECT app_household_id()")).scalar_one() == a.household_id
-    delete_household(app_engine, hid)
+    delete_household(owner_engine, hid)
 
 
 def test_create_household_rejects_blank_name(app_engine: Engine) -> None:
@@ -135,15 +135,64 @@ def test_create_household_is_security_definer_with_pinned_search_path(
     assert public_exec is False
 
 
-def test_household_delete_cascades_to_every_table(app_engine: Engine) -> None:
+def test_household_delete_cascades_to_every_table(app_engine: Engine, owner_engine: Engine) -> None:
+    """Household data cascades away; the audit trail about it does not (no FK on audit_log)."""
     from tests.models.conftest import seed_household
 
     seed = seed_household(app_engine, "Cascade")
-    delete_household(app_engine, seed.household_id)
+    row = _audit(seed.household_id, "household.delete")
+    with app_engine.begin() as c:
+        set_ctx(c, seed.household_id)
+        c.execute(table("audit_log").insert().values(**row))
+    delete_household(owner_engine, seed.household_id)
     with app_engine.begin() as c:
         set_ctx(c, seed.household_id, wide=True)
         for name in HOUSEHOLD_TABLES:
             assert count(c, name) == 0, name
+        assert count(c, "audit_log", {"id": row["id"]}) == 1
+
+
+def test_app_cannot_delete_household(app_engine: Engine, two_households: tuple[Seed, Seed]) -> None:
+    """Deleting a household is an owner path: FK cascades bypass RLS and grants."""
+    a, _ = two_households
+    with app_engine.begin() as c:
+        set_ctx(c, a.household_id, a.person_ids[0], wide=True)
+        with pytest.raises(DBAPIError, match="permission denied"):
+            c.execute(text("DELETE FROM household WHERE id = app_household_id()"))
+
+
+def test_audit_log_has_no_foreign_keys(owner_engine: Engine) -> None:
+    """RI actions (CASCADE / SET NULL) bypass RLS and grants, so audit_log must have none."""
+    with owner_engine.connect() as c:
+        fks = c.execute(
+            text(
+                "SELECT conname FROM pg_constraint"
+                " WHERE conrelid = 'public.audit_log'::regclass AND contype = 'f'"
+            )
+        ).all()
+    assert fks == []
+
+
+def test_user_delete_keeps_audit_user_id(
+    app_engine: Engine, two_households: tuple[Seed, Seed]
+) -> None:
+    a, _ = two_households
+    user_id = uuid.uuid4()
+    row = {**_audit(a.household_id, "login"), "user_id": user_id}
+    with app_engine.begin() as c:
+        c.execute(
+            table("app_user").insert().values(id=user_id, email=f"u-{user_id.hex[:8]}@example.com")
+        )
+        set_ctx(c, a.household_id)
+        c.execute(table("audit_log").insert().values(**row))
+    with app_engine.begin() as c:
+        c.execute(table("app_user").delete().where(table("app_user").c.id == user_id))
+    with app_engine.begin() as c:
+        set_ctx(c, a.household_id)
+        got = c.execute(
+            text("SELECT user_id FROM audit_log WHERE id = :id"), {"id": row["id"]}
+        ).scalar_one()
+    assert got == user_id
 
 
 # --------------------------------------------------------------------------- grants and DDL
@@ -169,7 +218,7 @@ def test_app_has_dml_only(owner_engine: Engine, name: str) -> None:
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("household", {"SELECT", "UPDATE", "DELETE"}),
+        ("household", {"SELECT", "UPDATE"}),
         ("audit_log", {"SELECT", "INSERT"}),
         *[(t, {"SELECT", "INSERT", "UPDATE"}) for t in REFERENCE_TABLES],
     ],
