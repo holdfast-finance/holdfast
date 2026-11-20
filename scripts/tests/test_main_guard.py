@@ -26,6 +26,7 @@ class FakeGH:
         self.issues: list[tuple[str, str]] = []
         self.labels = 0
         self.timeline_events: list[dict] = []
+        self.head_prs: list[dict] = [{"number": 4, "base_ref": "main"}]
         self.compared = 0
 
     def compare(self, repo: str, before: str, after: str) -> dict:
@@ -42,6 +43,9 @@ class FakeGH:
 
     def timeline(self, repo: str, number: int) -> list:
         return self.timeline_events
+
+    def head_pulls(self, repo: str, head_repo: str, head_ref: str) -> list:
+        return self.head_prs
 
     def ensure_label(self, repo: str) -> None:
         self.labels += 1
@@ -78,12 +82,15 @@ def _merged() -> dict:
         "merged_at": "2026-11-19T00:00:00Z",
         "number": 4,
         "head_sha": HEAD,
+        "head_ref": "feat",
+        "head_repo": "o/r",
     }
 
 
 def _job(
     name: str, conclusion: str, started: str, workflow: str | None = None,
-    event: str | None = None, pr: int | None = 4, base: str = "main",
+    event: str | None = None, pr: int | None = None, base: str = "main",
+    branch: str = "feat", repo: str | None = "o/r",
 ) -> dict:
     if workflow is None:
         workflow = (
@@ -98,7 +105,10 @@ def _job(
         "started_at": started,
         "workflow": workflow,
         "event": event,
+        # Post-merge shape: GitHub empties pull_requests, so the default is [].
         "pull_requests": [{"number": pr, "base_ref": base}] if pr is not None else [],
+        "head_branch": branch,
+        "head_repo": repo,
     }
 
 
@@ -177,7 +187,7 @@ class MainGuardTests(unittest.TestCase):
                 ),
             ]
         }
-        chosen = main_guard.latest_run(runs[HEAD], "ci-required", 4)
+        chosen = main_guard.latest_run(runs[HEAD], "ci-required", 4, "feat", "o/r")
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen["conclusion"], "failure")
@@ -207,21 +217,53 @@ class MainGuardTests(unittest.TestCase):
         code, out = self._gate([
             _job("review-gate", "failure", "2026-11-19T01:00:00Z"),
             _job("review-gate", "success", "2026-11-19T05:00:00Z", pr=5),
-            _job("review-gate", "success", "2026-11-19T06:00:00Z", base="other"),
+            _job("review-gate", "success", "2026-11-19T06:00:00Z", pr=4, base="other"),
         ])
         self.assertEqual(code, 1, out)
 
-    def test_review_gate_empty_pull_requests_fails_closed(self) -> None:
-        code, out = self._gate([_job("review-gate", "success", "2026-11-19T01:00:00Z", pr=None)])
+    def test_post_merge_shape_with_empty_pull_requests_passes(self) -> None:
+        code, out = self._gate([_job("review-gate", "success", "2026-11-19T01:00:00Z")])
+        self.assertEqual(code, 0, out)
+
+    def test_sibling_branch_run_is_ignored(self) -> None:
+        code, out = self._gate([
+            _job("review-gate", "success", "2026-11-19T01:00:00Z"),
+            _job("ci-required", "failure", "2026-11-19T02:00:00Z"),
+            _job("ci-required", "success", "2026-11-19T06:00:00Z", branch="forge"),
+            _job("ci-required", "success", "2026-11-19T07:00:00Z", repo="evil/r"),
+        ])
         self.assertEqual(code, 1, out)
-        self.assertIn("missing", out)
+        self.assertIn("failure", out)
+
+    def test_same_branch_pr_against_other_base_fails(self) -> None:
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        gh.head_prs = [{"number": 4, "base_ref": "main"}, {"number": 9, "base_ref": "x"}]
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("targets base x", out)
+
+    def test_null_head_repo_fails_closed(self) -> None:
+        merged = _merged()
+        merged["head_repo"] = None
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [merged]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("unknown", out)
 
     def test_forged_ci_required_for_other_pr_or_base_is_ignored(self) -> None:
         runs = {HEAD: [
             _job("review-gate", "success", "2026-11-19T00:00:00Z"),
             _job("ci-required", "failure", "2026-11-19T01:00:00Z"),
             _job("ci-required", "success", "2026-11-19T05:00:00Z", pr=3, base="x"),
-            _job("ci-required", "success", "2026-11-19T06:00:00Z", base="x"),
+            _job("ci-required", "success", "2026-11-19T06:00:00Z", pr=4, base="x"),
         ]}
         gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
         code, out = _run(gh)
@@ -229,16 +271,15 @@ class MainGuardTests(unittest.TestCase):
         self.assertIn("ci-required", out)
         self.assertIn("failure", out)
 
-    def test_ci_required_empty_pull_requests_and_push_fail_closed(self) -> None:
-        for job in (
-            _job("ci-required", "success", "2026-11-19T01:00:00Z", pr=None),
+    def test_ci_required_push_event_is_ignored(self) -> None:
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
             _job("ci-required", "success", "2026-11-19T01:00:00Z", event="push"),
-        ):
-            runs = {HEAD: [_job("review-gate", "success", "2026-11-19T00:00:00Z"), job]}
-            gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
-            code, out = _run(gh)
-            self.assertEqual(code, 1, out)
-            self.assertIn("missing", out)
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("missing", out)
 
     def test_base_ref_changed_fails(self) -> None:
         runs = {HEAD: [
@@ -272,10 +313,10 @@ class MainGuardTests(unittest.TestCase):
                 return 0, (
                     '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
                     '"created_at": "2026-11-19T00:00:00Z", "name": "CI", "conclusion": "failure", '
-                    '"pull_requests": [{"number": 4, "base_ref": "main"}]}\n'
+                    '"pull_requests": [], "head_branch": "feat", "head_repo": "o/r"}\n'
                     '{"id": 10, "path": ".github/workflows/fork.yml", "event": "pull_request", '
                     '"created_at": "2026-11-19T03:00:00Z", "name": "Fork", "conclusion": "success", '
-                    '"pull_requests": [{"number": 4, "base_ref": "main"}]}\n'
+                    '"pull_requests": [], "head_branch": "feat", "head_repo": "o/r"}\n'
                 ), ""
             if "/runs/9/jobs" in joined:
                 return 0, (
@@ -294,7 +335,7 @@ class MainGuardTests(unittest.TestCase):
         self.assertIn("path", jq)
         self.assertIn("name", jq)
         self.assertNotIn("rulesets", jq)
-        chosen = main_guard.latest_run(rows, "ci-required", 4)
+        chosen = main_guard.latest_run(rows, "ci-required", 4, "feat", "o/r")
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen["conclusion"], "failure")

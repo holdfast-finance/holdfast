@@ -52,13 +52,19 @@
    sandboxed. Follow-up story F7c: run it in a container with an allowlisted env and no network
    (and a scrubbed env, since the steps need many tool variables).
    `main-guard` binds each check to its trusted trigger: `review-gate` counts only from a
-   `pull_request_target` run that lists the merged PR with base `main` (empty list fails closed);
-   `ci-required` counts only from `pull_request` runs of `ci.yml`, and those must also list the
-   merged PR with base `main` (a sibling PR against a crafted base cannot forge it). A
-   `base_ref_changed` event on the merged PR's timeline fails the push. `ci.yml` runs
-   `pull_request` only for base `main`.
-   **Accepted risk (L3):** `main-guard` detects, it does not prevent. A bad push to `main` is found
-   after the fact and reverted through a PR.
+   `pull_request_target` run and `ci-required` only from a `pull_request` run of `ci.yml`.
+   GitHub empties a run's `pull_requests` once the PR merges, so both runs are bound by
+   `head_branch` and `head_repository` matching the merged PR's head (a non-empty
+   `pull_requests` must still name the merged PR with base `main`). A same-branch sibling PR
+   against a crafted base fails the push (any PR from that head with base other than `main`,
+   any state), and so does a `base_ref_changed` event on the merged PR's timeline. A null
+   head repository fails closed. `ci.yml` runs `pull_request` only for base `main`.
+   **Accepted risk (L3):** `main-guard` runs from the workflow file in the pushed commit, so a push
+   to `main` that edits or deletes `.github/workflows/main-guard.yml` judges itself and can report
+   green. This is accepted until rulesets are available. Mitigations: `.github/` is a protected
+   path (review-gate plus a Bulwark sign-off for anything that arrives through a PR), and the weekly
+   digest lists every commit on `main` that touched `.github/workflows/main-guard.yml`
+   (`git log --since=1.week -- .github/workflows/main-guard.yml`).
 5. **Later options (owner decisions, no cost):**
    - **Making the repo public** removes both limits: rulesets become available and Actions minutes are
      unlimited for public repos. It's an AGPL project going open source anyway. The cost is publishing
