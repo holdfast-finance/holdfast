@@ -6,13 +6,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, SmallInteger, UniqueConstraint, func, text
+from sqlalchemy import BigInteger, CheckConstraint, SmallInteger, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models._common import (
     DOCUMENT_KINDS,
     DOCUMENT_PARSE_STATUSES,
+    PROFILE_ID_MAX,
+    PROFILE_ID_PATTERN,
+    SHA256_HEX_PATTERN,
+    STORAGE_PATH_MAX,
+    STORAGE_PATH_PATTERN,
     UUIDPK,
     HouseholdId,
     Ratio,
@@ -25,11 +30,34 @@ from app.models._common import (
 
 
 class Document(Base):
+    """An uploaded file: statement, export, tax form, receipt or credit report (ADR 0017).
+
+    The bytes live on disk under ``DOCUMENT_STORE``; the database holds only metadata, never
+    the content. ``storage_path`` is relative to the store (CHECK: no leading slash, no ``.`` or
+    ``..`` segments). ``UNIQUE (household_id, sha256)`` makes re-uploading the same file return
+    the existing row (PLAN 8.1 step 1).
+
+    ``parse_status`` is ``needs_review`` whenever any of the document's import runs is: a trigger
+    raises the flag when a run is flagged, and another refuses to clear it while a run still
+    needs review. The only way out is accepting the run (``import_run.reconcile_status``).
+    """
+
     __tablename__ = "document"
     __table_args__ = (
         check_in("kind", DOCUMENT_KINDS),
         check_in("parse_status", DOCUMENT_PARSE_STATUSES),
-        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_hex"),
+        CheckConstraint(f"sha256 ~ '{SHA256_HEX_PATTERN}'", name="sha256_hex"),
+        CheckConstraint("size_bytes > 0", name="size_bytes_positive"),
+        CheckConstraint(
+            f"length(storage_path) <= {STORAGE_PATH_MAX}"
+            f" AND storage_path ~ '{STORAGE_PATH_PATTERN}'",
+            name="storage_path_relative",
+        ),
+        CheckConstraint(
+            f"detected_profile IS NULL OR (length(detected_profile) <= {PROFILE_ID_MAX}"
+            f" AND detected_profile ~ '{PROFILE_ID_PATTERN}')",
+            name="detected_profile_format",
+        ),
         child_fk("person_id", "person", ondelete="SET NULL"),
         UniqueConstraint("household_id", "sha256"),
         parent_key(),
@@ -42,8 +70,12 @@ class Document(Base):
     tax_year: Mapped[int | None] = mapped_column(SmallInteger)
     filename: Mapped[str]
     sha256: Mapped[str]  # lower-case hex; dedupes re-uploads per household
+    # Relative to DOCUMENT_STORE (CHECK ``storage_path_relative``). Content is never in the DB.
     storage_path: Mapped[str]
     mime: Mapped[str]
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    # Bank profile id matched by text fingerprints (PLAN 8.1 step 2); NULL until detected.
+    detected_profile: Mapped[str | None]
     uploaded_at: Mapped[datetime] = mapped_column(server_default=func.now())
     parse_status: Mapped[str] = mapped_column(server_default=text("'pending'"))
 

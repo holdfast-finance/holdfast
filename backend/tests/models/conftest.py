@@ -61,6 +61,8 @@ HOUSEHOLD_TABLES = (
     "agent_message",
     "agent_finding",
     "job_run",
+    "import_run",
+    "sync_run",
 )
 IDENTITY_TABLES = ("app_user", "webauthn_credential", "auth_session", "totp_recovery_code")
 REFERENCE_TABLES = ("institution", "security")
@@ -260,8 +262,10 @@ def seed_household(engine: Engine, label: str) -> Seed:
             kind="receipt",
             filename="receipt.pdf",
             sha256=uuid.uuid4().hex * 2,
-            storage_path=f"/data/documents/{uuid.uuid4()}",
+            # Relative to DOCUMENT_STORE. An absolute path fails ck_document_storage_path_relative.
+            storage_path=f"receipts/{uuid.uuid4()}.pdf",
             mime="application/pdf",
+            size_bytes=1024,
         )
         txn = _insert(
             c,
@@ -383,6 +387,8 @@ def seed_household(engine: Engine, label: str) -> Seed:
             payload={"household_id": str(hid)},
             max_attempts=3,
         )
+        import_run = _insert(c, "import_run", **h, document_id=doc, account_id=acct)
+        sync_run = _insert(c, "sync_run", **h, bank_connection_id=conn_id)
 
     rows: dict[str, dict[str, Any]] = {
         "person": {"id": p1},
@@ -413,6 +419,8 @@ def seed_household(engine: Engine, label: str) -> Seed:
         "agent_message": {"id": msg},
         "agent_finding": {"id": finding},
         "job_run": {"id": job_run},
+        "import_run": {"id": import_run},
+        "sync_run": {"id": sync_run},
     }
     assert set(rows) == set(HOUSEHOLD_TABLES)
     return Seed(household_id=hid, person_ids=[p1, p2], rows=rows)
