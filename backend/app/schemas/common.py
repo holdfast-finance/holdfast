@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal, InvalidOperation
+import re
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -65,23 +66,32 @@ Code = Annotated[str, Field(min_length=1, max_length=64)]
 WebAuthnCredential = Annotated[dict[str, Any], AfterValidator(_credential)]
 
 
+# API bounds are separate from storage precision. Fields can impose tighter limits.
+# Use ASCII fixed-point strings and preserve signed zero, including "-0".
+_DECIMAL_MAX_INTEGER_DIGITS = 14
+_DECIMAL_MAX_SCALE = 8
+_DECIMAL_PATTERN = re.compile(
+    rf"^-?(?:0|[1-9][0-9]{{0,{_DECIMAL_MAX_INTEGER_DIGITS - 1}}})"
+    rf"(?:\.[0-9]{{1,{_DECIMAL_MAX_SCALE}}})?$"
+)
+
+
 def _parse_decimal_str(value: object) -> Decimal:
-    """API decimals arrive as strings. JSON numbers are rejected so a float never enters."""
-    if isinstance(value, Decimal):
-        parsed = value
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text:
-            raise ValueError("Amount must be a decimal string.")
-        try:
-            parsed = Decimal(text)
-        except InvalidOperation:
-            raise ValueError("Amount must be a decimal string.") from None
-    else:
-        raise ValueError("Amount must be a decimal string.")
-    if not parsed.is_finite():
-        raise ValueError("Amount must be a finite decimal string.")
-    return parsed
+    """Validate strings before parsing and bound Python Decimals before serialization."""
+    if isinstance(value, str) and _DECIMAL_PATTERN.fullmatch(value):
+        return Decimal(value)
+    if not isinstance(value, Decimal):
+        raise ValueError("Amount must be a fixed-point decimal string within bounds.")
+
+    _, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise ValueError("Amount must be finite.")
+    # A zero coefficient has only one integer digit even with a positive exponent.
+    if exponent < -_DECIMAL_MAX_SCALE or (
+        digits != (0,) and len(digits) + exponent > _DECIMAL_MAX_INTEGER_DIGITS
+    ):
+        raise ValueError("Amount exceeds the decimal string bounds.")
+    return value
 
 
 def _dump_decimal_str(value: Decimal) -> str:
@@ -100,7 +110,7 @@ DecimalStr = Annotated[
     Decimal,
     BeforeValidator(_parse_decimal_str),
     PlainSerializer(_dump_decimal_str, return_type=str, when_used="json"),
-    WithJsonSchema({"type": "string", "pattern": r"^-?(?:0|[1-9]\d*)(?:\.\d+)?$"}),
+    WithJsonSchema({"type": "string", "pattern": _DECIMAL_PATTERN.pattern}),
     DECIMAL_STRING,
 ]
 
