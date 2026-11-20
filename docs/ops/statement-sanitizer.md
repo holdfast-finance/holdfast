@@ -62,7 +62,8 @@ Zip input rejects path traversal (`..`, absolute, backslash, drive letters), sym
 files and encrypted entries. Defaults: 500 files, 50 MiB per file, 500 MiB total counted from
 bytes the reader actually returns, a 200x guard on bytes written versus the compressed size, and
 50 PDF pages. Python's zip reader also stops at the declared uncompressed size; a header that
-does not match the payload fails an integrity check and the run aborts. Extraction goes to a
+does not match the payload fails an integrity check and the run aborts. A reader that returns
+more bytes than the header declared is rejected too. Extraction goes to a
 `0700` temp dir that is removed afterwards, including a member rejected for size or ratio.
 Other file types are skipped.
 

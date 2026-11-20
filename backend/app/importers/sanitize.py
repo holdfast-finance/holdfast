@@ -1234,12 +1234,7 @@ class Sanitizer:
                 and re.fullmatch(r"[\d.]*(\[[^\]]*\])?", found.group(2))
             ):
                 self.replaced["date"] += 1
-                suffix = re.sub(
-                    r"\d+",
-                    lambda piece: self._synth_digits(piece.group(0)),
-                    found.group(2),
-                )
-                return shifted + suffix
+                return shifted + self._deny(found.group(2))
             return self.token(value)
         if tag in OFX_ID_TAGS:
             self.replaced["account"] += 1
@@ -1630,6 +1625,8 @@ def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -
                         if total_written > limits.max_total_bytes:
                             raise SanitizeError("zip uncompressed size exceeds limit")
                         fh.write(chunk)
+                if written > info.file_size:
+                    raise SanitizeError("zip entry is larger than its declared size")
                 if written > 1024 * 1024 and written > limits.max_ratio * max(
                     info.compress_size, 1
                 ):

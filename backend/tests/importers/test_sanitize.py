@@ -528,14 +528,9 @@ def test_zip_compression_ratio_uses_bytes_written(tmp_path: Path) -> None:
         )
 
 
-def test_zip_written_total_stops_a_reader_past_the_header(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Bytes the reader returns still count, even when the header said less."""
-    archive = tmp_path / "ok.zip"
-    make_zip(archive, [("a.csv", b"Date,Amount\n2025-01-05,-1.00\n", None)])
+def _patch_zip_reader(monkeypatch: pytest.MonkeyPatch, extra: bytearray) -> None:
+    """Make ZipFile.open return ``extra`` after the real member."""
     real_open = zipfile.ZipFile.open
-    extra = bytearray(b"x" * 5000)
 
     def open_long(
         self: zipfile.ZipFile,
@@ -569,9 +564,56 @@ def test_zip_written_total_stops_a_reader_past_the_header(
         return Longer()
 
     monkeypatch.setattr(zipfile.ZipFile, "open", open_long)
+
+
+def test_zip_written_total_stops_a_reader_past_the_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes the reader returns still count, even when the header said less."""
+    archive = tmp_path / "ok.zip"
+    make_zip(archive, [("a.csv", b"Date,Amount\n2025-01-05,-1.00\n", None)])
+    _patch_zip_reader(monkeypatch, bytearray(b"x" * 5000))
     with pytest.raises(sz.SanitizeError, match="uncompressed"):
         sz.sanitize_path(
             archive,
             tmp_path / "out",
             limits=sz.Limits(max_file_bytes=100_000, max_total_bytes=1000),
         )
+
+
+def test_zip_overread_past_declared_size_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An over-read under the byte caps is still rejected."""
+    marker = b"CANARYOVERREAD"
+    archive = tmp_path / "ok.zip"
+    make_zip(archive, [("a.csv", b"Date,Amount\n2025-01-05,-1.00\n", None)])
+    _patch_zip_reader(monkeypatch, bytearray(marker + (b"x" * 1100)))
+    out = tmp_path / "out"
+    with pytest.raises(sz.SanitizeError, match="declared size") as caught:
+        sz.sanitize_path(
+            archive,
+            out,
+            limits=sz.Limits(max_file_bytes=100_000, max_total_bytes=100_000),
+        )
+    assert marker.decode() not in str(caught.value)
+    leaked = [path for path in out.rglob("*") if path.is_file() and marker in path.read_bytes()]
+    assert leaked == []
+
+
+def test_ofx_timezone_letters_do_not_survive(tmp_path: Path) -> None:
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "x.qfx").write_text(
+        "<OFX>\n<DTPOSTED>20250201143000.000[-5:EST]\n"
+        "<DTASOF>20250201[EASTERN]\n<NAME>ZEBRATRONIX\n</OFX>\n"
+    )
+    out = tmp_path / "out"
+    run(src, out)
+    blob = (out / "doc-0001.txt").read_text()
+    posted = blob.split("<DTPOSTED>")[1].split("\n")[0]
+    asof = blob.split("<DTASOF>")[1].split("\n")[0]
+    assert "EST" not in posted and "EST" not in asof
+    assert "EASTERN" not in asof
+    assert "20250201" not in blob
+    assert "[" in posted and "]" in posted
