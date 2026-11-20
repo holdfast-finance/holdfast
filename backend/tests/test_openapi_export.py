@@ -138,6 +138,16 @@ class _Bare(Model):
     amount: Decimal
 
 
+def money_openapi_document() -> dict[str, object]:
+    app = FastAPI()
+
+    @app.post("/amount", operation_id="money")
+    def _post(body: _AmountIn) -> _AmountIn:
+        return body
+
+    return app.openapi()
+
+
 def test_decimal_str_is_a_string_and_rejects_json_numbers() -> None:
     parsed = _AmountIn.model_validate_json('{"amount": "-42.10"}')
     assert parsed.amount == Decimal("-42.10")
@@ -151,12 +161,10 @@ def test_decimal_str_is_a_string_and_rejects_json_numbers() -> None:
     assert has_bare_decimal(bare_hints["amount"])
     assert not has_bare_decimal(good_hints["amount"])
 
-    app = FastAPI()
-
-    @app.post("/amount")
-    def _post(body: _AmountIn) -> _AmountIn:
-        return body
-
-    dumped = json.dumps(app.openapi())
+    dumped = json.dumps(money_openapi_document())
     assert '"type": "number"' not in dumped
     assert '"type": "string"' in dumped
+
+
+if __name__ == "__main__":
+    print(json.dumps(money_openapi_document()))

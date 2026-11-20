@@ -123,17 +123,27 @@ ports: env-check ## Assert no compose service publishes beyond the rules
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
 	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
 
-.PHONY: api-types api-types-check
+.PHONY: api-types api-types-check api-types-test
 # Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).
 # This target also diffs the full openapi-typescript output. No workflow edit: Harbor owns CI.
 api-types api-types-check: ## Generate web API types, or fail if schema.d.ts drifted
-	@tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
+	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
 	  (cd backend && uv run --locked python -m scripts.dump_openapi) > "$$tmp/schema.json"; \
 	  pnpm --dir web exec openapi-typescript "$$tmp/schema.json" -o "$$tmp/schema.d.ts"; \
-	  { printf '// holdfast-schema-sha256: %s\n' "$$(sha256sum "$$tmp/schema.json" | awk '{print $$1}')"; \
+	  checksum=$$(sha256sum "$$tmp/schema.json"); \
+	  { printf '// holdfast-schema-sha256: %s\n' "$${checksum%% *}"; \
 	    cat "$$tmp/schema.d.ts"; } > "$$tmp/out.d.ts"; \
 	  if [ "$@" = api-types ]; then \
 	    cp "$$tmp/out.d.ts" web/src/api/schema.d.ts; \
 	  else \
 	    diff -u web/src/api/schema.d.ts "$$tmp/out.d.ts"; \
 	  fi
+
+api-types-check: api-types-test
+
+api-types-test: ## Compile the generated types of a synthetic API money field
+	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
+	  (cd backend && uv run --locked python -m tests.test_openapi_export) > "$$tmp/schema.json"; \
+	  pnpm --dir web exec openapi-typescript "$$tmp/schema.json" -o "$$tmp/schema.d.ts"; \
+	  cp backend/tests/fixtures/openapi-money.ts "$$tmp/openapi-money.ts"; \
+	  pnpm --dir web exec tsc --ignoreConfig --noEmit --strict "$$tmp/openapi-money.ts"
