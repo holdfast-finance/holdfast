@@ -4,7 +4,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type Plugin, type UserConfig } from 'vite'
+
+import { defaultBrandEnv, rewriteDefaultBrand } from './src/lib/brand-html.ts'
 
 // In Docker the edge Caddy serves the app and routes /api/* to api:8000 on the same origin.
 // Outside Docker, `pnpm dev` proxies /api to a locally running backend instead.
@@ -60,8 +62,34 @@ function mockServiceWorker(): Plugin {
   }
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), mockServiceWorker()],
+// `%VITE_BRAND%` is absent from Vite's env map when the variable is unset, so the
+// HTML env hook warns on every dev request and production build. Self-host leaves
+// it unset: the default is signal, never holo. An empty string stays empty; the
+// post hook rewrites `data-brand=""` and a leftover placeholder.
+const envDir = fileURLToPath(new URL('.', import.meta.url))
+
+function applyBrandEnv(mode: string): void {
+  const current =
+    process.env.VITE_BRAND !== undefined
+      ? process.env.VITE_BRAND
+      : loadEnv(mode, envDir, 'VITE_').VITE_BRAND
+  const next = defaultBrandEnv(current)
+  if (current === next) return
+  process.env.VITE_BRAND = next
+}
+
+function defaultBrandAttribute(): Plugin {
+  return {
+    name: 'holdfast-default-brand',
+    transformIndexHtml: {
+      order: 'post',
+      handler: rewriteDefaultBrand,
+    },
+  }
+}
+
+const config = {
+  plugins: [react(), tailwindcss(), mockServiceWorker(), defaultBrandAttribute()],
   cacheDir,
   build: {
     assetsInlineLimit: (filePath) => (FONT_FILE.test(filePath) ? false : undefined),
@@ -94,4 +122,9 @@ export default defineConfig({
     css: false,
     restoreMocks: true,
   },
+} satisfies UserConfig
+
+export default defineConfig(({ mode }) => {
+  applyBrandEnv(mode)
+  return config
 })
