@@ -1,7 +1,9 @@
 """Job runs against real Postgres (holdfast_app, RLS) and Redis: idempotency, lock, retries.
 
 Acceptance (ROADMAP F2): a job enqueued twice gives one side effect; a malformed (non-UUID)
-payload is rejected before enqueue and before run.
+payload is rejected before enqueue and before run. F2b (Bulwark's #24 follow-ups): enqueue
+authorizes against the caller, timeouts and cancellations never leave a run ``running``, stale
+attempts can't mark a re-claimed run, and the handler runs on the stored payload.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from arq import Retry, Worker
@@ -28,12 +30,19 @@ from app.jobs.registry import (
     JobPayload,
     JobRegistry,
     JobSpec,
+    Ref,
     RetryPolicy,
 )
 from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function, execute
-from app.models import AuditLog, JobRun
+from app.models import Account, AuditLog, JobRun, Person
 from app.services import jobs as job_runs
-from app.services.jobs import EnqueueResult, IdempotencyConflict, enqueue
+from app.services.jobs import (
+    EnqueueResult,
+    IdempotencyConflict,
+    JobReferenceNotVisible,
+    RunLost,
+    enqueue,
+)
 from tests.models.conftest import set_ctx
 
 pytestmark = pytest.mark.services
@@ -43,7 +52,7 @@ CANARY = "access-sandbox-canary-0000"
 
 
 class ItemPayload(JobPayload):
-    item_id: uuid.UUID
+    item_id: Annotated[uuid.UUID, Ref(Account)]
 
 
 REG = JobRegistry()
@@ -109,19 +118,67 @@ class RecordingQueue:
         return object()
 
 
+async def _account(
+    deps: RunnerDeps,
+    hid: uuid.UUID,
+    *,
+    owner: uuid.UUID | None = None,
+    visibility: str = "shared",
+) -> uuid.UUID:
+    """A synthetic account (joint unless ``owner``), inserted household-wide like a sync job."""
+    account_id = uuid.uuid4()
+    async with scoped_session(deps.factory, hid, None, household_wide=True) as s:
+        s.add(
+            Account(
+                id=account_id,
+                household_id=hid,
+                owner_person_id=owner,
+                source="manual",
+                name="Example Checking",
+                mask="0000",
+                type="depository",
+                visibility=visibility,
+            )
+        )
+    return account_id
+
+
+async def _person(deps: RunnerDeps, hid: uuid.UUID, name: str) -> uuid.UUID:
+    person_id = uuid.uuid4()
+    async with scoped_session(deps.factory, hid, None) as s:
+        s.add(Person(id=person_id, household_id=hid, display_name=name, filing_role="primary"))
+    return person_id
+
+
 async def _enqueue(
-    deps: RunnerDeps, spec: JobSpec[ItemPayload], hid: uuid.UUID, key: str = "k1"
+    deps: RunnerDeps,
+    spec: JobSpec[ItemPayload],
+    hid: uuid.UUID,
+    key: str = "k1",
+    *,
+    item: uuid.UUID | None = None,
 ) -> tuple[EnqueueResult, tuple[Any, ...]]:
     q = RecordingQueue()
     res = await enqueue(
         deps.factory,
         q,
         spec,
-        ItemPayload(household_id=hid, item_id=uuid.uuid4()),
+        ItemPayload(household_id=hid, item_id=item or await _account(deps, hid)),
+        household_id=hid,
+        requested_by=None,
         idempotency_key=key,
     )
     assert len(q.calls) == 1
     return res, q.calls[0][1]
+
+
+def _as(hid: uuid.UUID, person: uuid.UUID | None = None) -> dict[str, Any]:
+    """The authenticated caller: household plus requesting person (None: a system caller)."""
+    return {"household_id": hid, "requested_by": person}
+
+
+def _item(args: tuple[Any, ...]) -> uuid.UUID:
+    return uuid.UUID(args[2].split('"item_id":"')[1][:36])
 
 
 async def _run(deps: RunnerDeps, hid: uuid.UUID, run_id: uuid.UUID) -> JobRun:
@@ -148,11 +205,12 @@ async def test_enqueue_twice_runs_once_through_arq(
     hid, _ = households
     qname = f"test-jobs-{uuid.uuid4().hex}"
     pool = arq_pool(redis, queue_name=qname)
-    payload = ItemPayload(household_id=hid, item_id=uuid.uuid4())
+    payload = ItemPayload(household_id=hid, item_id=await _account(deps, hid))
+    who = {"household_id": hid, "requested_by": None}
 
-    first = await enqueue(deps.factory, pool, effect, payload, idempotency_key="sync:1")
+    first = await enqueue(deps.factory, pool, effect, payload, **who, idempotency_key="sync:1")
     second = await enqueue(
-        deps.factory, pool, effect, payload.model_dump(), idempotency_key="sync:1"
+        deps.factory, pool, effect, payload.model_dump(), **who, idempotency_key="sync:1"
     )
     assert first.created and not second.created
     assert first.run_id == second.run_id
@@ -181,7 +239,7 @@ async def test_enqueue_twice_runs_once_through_arq(
     assert (run.status, run.attempts, run.last_error) == ("succeeded", 1, None)
 
     # Once done, the same key is a no-op: no new arq job, no new side effect.
-    third = await enqueue(deps.factory, pool, effect, payload, idempotency_key="sync:1")
+    third = await enqueue(deps.factory, pool, effect, payload, **who, idempotency_key="sync:1")
     assert (third.run_id, third.created, third.status) == (first.run_id, False, "succeeded")
     assert await redis.zcard(qname) == 0
 
@@ -202,9 +260,9 @@ async def test_duplicate_of_a_queued_run_is_re_pushed_under_the_same_arq_id(
     """Heals a crash between the job_run commit and the Redis push; arq dedupes on _job_id."""
     hid, _ = households
     q = RecordingQueue()
-    payload = {"household_id": str(hid), "item_id": str(uuid.uuid4())}
-    a = await enqueue(deps.factory, q, effect, payload, idempotency_key="k")
-    b = await enqueue(deps.factory, q, effect, payload, idempotency_key="k")
+    payload = {"household_id": str(hid), "item_id": str(await _account(deps, hid))}
+    a = await enqueue(deps.factory, q, effect, payload, **_as(hid), idempotency_key="k")
+    b = await enqueue(deps.factory, q, effect, payload, **_as(hid), idempotency_key="k")
     assert a.run_id == b.run_id
     assert [c[2] for c in q.calls] == [str(a.run_id), str(a.run_id)]
 
@@ -252,7 +310,7 @@ async def test_malformed_payload_is_rejected_before_enqueue(
     }
     q = RecordingQueue()
     with pytest.raises(InvalidJobPayload):
-        await enqueue(deps.factory, q, effect, payload, idempotency_key="k")
+        await enqueue(deps.factory, q, effect, payload, **_as(hid), idempotency_key="k")
     assert q.calls == []
     assert await _count(deps, hid, JobRun) == 0
 
@@ -268,6 +326,7 @@ async def test_bad_idempotency_key_is_rejected_before_enqueue(
             q,
             effect,
             ItemPayload(household_id=hid, item_id=uuid.uuid4()),
+            **_as(hid),
             idempotency_key=f"https://example.invalid/?t={CANARY}",
         )
     assert q.calls == []
@@ -357,7 +416,7 @@ async def test_failure_backs_off_then_succeeds(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, flaky, hid)
-    item = uuid.UUID(args[2].split('"item_id":"')[1][:36])
+    item = _item(args)
     FAILS_LEFT[item] = 2
 
     with pytest.raises(Retry) as first:
@@ -383,7 +442,7 @@ async def test_retries_are_bounded_and_errors_never_store_messages(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, flaky, hid)
-    item = uuid.UUID(args[2].split('"item_id":"')[1][:36])
+    item = _item(args)
     FAILS_LEFT[item] = 99
 
     for job_try in (1, 2):
@@ -409,7 +468,7 @@ async def test_last_queue_try_records_failure_instead_of_retrying(
     """arq would silently drop a Retry past its max_tries; the runner closes the run first."""
     hid, _ = households
     res, args = await _enqueue(deps, flaky, hid)
-    item = uuid.UUID(args[2].split('"item_id":"')[1][:36])
+    item = _item(args)
     FAILS_LEFT[item] = 1
     assert await execute(deps, flaky, args, job_try=FAST.queue_max_tries) == "failed"
     assert (await _run(deps, hid, res.run_id)).status == "failed"
@@ -420,7 +479,8 @@ async def test_orphaned_running_run_is_reclaimed_under_the_lock(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, effect, hid)
-    assert await job_runs.claim(deps.factory, hid, res.run_id) == 1  # a worker that then died
+    claimed = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)
+    assert claimed is not None and claimed.attempt == 1  # a worker that then died
     ATTEMPTS_SEEN.clear()
     assert await execute(deps, effect, args, job_try=2) == "succeeded"
     assert ATTEMPTS_SEEN == [2]
@@ -432,7 +492,7 @@ async def test_orphan_with_no_attempts_left_is_closed_out(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, one_shot, hid)
-    assert await job_runs.claim(deps.factory, hid, res.run_id) == 1
+    assert await job_runs.claim(deps.factory, hid, res.run_id, one_shot.name) is not None
     assert await execute(deps, one_shot, args, job_try=2) == "skipped"
     run = await _run(deps, hid, res.run_id)
     assert (run.status, run.last_error) == ("failed", "WorkerLost")
@@ -523,7 +583,7 @@ async def test_lock_is_released_after_a_failure(
 ) -> None:
     hid, _ = households
     _, args = await _enqueue(deps, flaky, hid)
-    FAILS_LEFT[uuid.UUID(args[2].split('"item_id":"')[1][:36])] = 1
+    FAILS_LEFT[_item(args)] = 1
     with pytest.raises(Retry):
         await execute(deps, flaky, args, job_try=1)
     async with household_lock(deps.engine, hid) as held:
@@ -545,3 +605,245 @@ async def test_job_runs_are_invisible_to_other_households(
     assert await execute(deps, effect, forged, job_try=1) == "skipped"
     assert (await _run(deps, a, res.run_id)).status == "queued"
     assert await _effects(deps, b) == 0
+
+
+# --------------------------------------------------------------------------- F2b: enqueue authority
+
+
+async def test_enqueue_for_another_household_is_rejected(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Confused deputy: the payload's household_id is never trusted over the caller's."""
+    a, b = households
+    b_item = await _account(deps, b)
+    q = RecordingQueue()
+    forged = ItemPayload(household_id=b, item_id=b_item)
+    with pytest.raises(JobReferenceNotVisible) as info:
+        await enqueue(deps.factory, q, effect, forged, **_as(a), idempotency_key="k")
+    assert str(b) not in str(info.value)
+    # The caller's own household, but naming another household's row: RLS hides it.
+    smuggled = ItemPayload(household_id=a, item_id=b_item)
+    with pytest.raises(JobReferenceNotVisible) as info:
+        await enqueue(deps.factory, q, effect, smuggled, **_as(a), idempotency_key="k")
+    assert str(b_item) not in str(info.value) and "item_id" in str(info.value)
+    assert q.calls == []
+    assert await _count(deps, a, JobRun) == 0
+    assert await _count(deps, b, JobRun) == 0
+
+
+async def test_person_cannot_enqueue_on_rows_they_cannot_see(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    alex = await _person(deps, hid, "Alex Example")
+    sam = await _person(deps, hid, "Sam Example")
+    private = await _account(deps, hid, owner=alex, visibility="private")
+    shared = await _account(deps, hid, owner=alex, visibility="shared")
+    q = RecordingQueue()
+
+    def job(item: uuid.UUID) -> ItemPayload:
+        return ItemPayload(household_id=hid, item_id=item)
+
+    for requester in (sam, None):  # another person, and a person-less system caller
+        with pytest.raises(JobReferenceNotVisible):
+            await enqueue(
+                deps.factory, q, effect, job(private), **_as(hid, requester), idempotency_key="p"
+            )
+    assert q.calls == [] and await _count(deps, hid, JobRun) == 0
+
+    mine = await enqueue(
+        deps.factory, q, effect, job(private), **_as(hid, alex), idempotency_key="p"
+    )
+    assert mine.created
+    # Sam can't use the key to reach Alex's run either: the check runs before the dedupe.
+    with pytest.raises(JobReferenceNotVisible):
+        await enqueue(deps.factory, q, effect, job(private), **_as(hid, sam), idempotency_key="p")
+    # A shared account is visible to everyone in the household.
+    theirs = await enqueue(
+        deps.factory, q, effect, job(shared), **_as(hid, sam), idempotency_key="s"
+    )
+    assert theirs.created
+    assert len(q.calls) == 2
+
+
+async def test_payloads_without_references_need_no_lookup(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, other = households
+    reg = JobRegistry()
+
+    @reg.job("test.household_only", payload=JobPayload)
+    async def household_only(ctx: JobContext, payload: JobPayload) -> None:
+        return None
+
+    q = RecordingQueue()
+    res = await enqueue(
+        deps.factory, q, household_only, {"household_id": str(hid)}, **_as(hid), idempotency_key="h"
+    )
+    assert res.created
+    with pytest.raises(JobReferenceNotVisible):
+        await enqueue(
+            deps.factory,
+            q,
+            household_only,
+            {"household_id": str(hid)},
+            **_as(other),
+            idempotency_key="h",
+        )
+
+
+# ------------------------------------------------------------------------- F2b: never stuck running
+
+GATES: dict[uuid.UUID, asyncio.Event] = {}
+QUICK = timedelta(milliseconds=200)
+
+
+async def _hang(ctx: JobContext, payload: ItemPayload) -> None:
+    await _side_effect(ctx, payload)  # uncommitted: must roll back
+    gate = GATES.get(payload.item_id)
+    if gate is not None:
+        gate.set()
+    await asyncio.sleep(30)
+
+
+@REG.job("test.hangs", payload=ItemPayload, retry=FAST, timeout=QUICK)
+async def hangs(ctx: JobContext, payload: ItemPayload) -> None:
+    await _hang(ctx, payload)
+
+
+@REG.job("test.hangs_once", payload=ItemPayload, retry=RetryPolicy(max_attempts=1), timeout=QUICK)
+async def hangs_once(ctx: JobContext, payload: ItemPayload) -> None:
+    await _hang(ctx, payload)
+
+
+@REG.job("test.blocks", payload=ItemPayload, retry=FAST)
+async def blocks(ctx: JobContext, payload: ItemPayload) -> None:
+    await _hang(ctx, payload)
+
+
+@REG.job("test.blocks_once", payload=ItemPayload, retry=RetryPolicy(max_attempts=1))
+async def blocks_once(ctx: JobContext, payload: ItemPayload) -> None:
+    await _hang(ctx, payload)
+
+
+async def test_timeout_is_recorded_and_retried_not_left_running(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    res, args = await _enqueue(deps, hangs, hid)
+    with pytest.raises(Retry) as retry:
+        await asyncio.wait_for(execute(deps, hangs, args, job_try=1), timeout=5)
+    assert retry.value.defer_score == 2_000
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts, run.last_error) == ("retrying", 1, "TimeoutError")
+    assert await _effects(deps, hid) == 0
+    async with household_lock(deps.engine, hid) as held:
+        assert held  # released
+
+
+async def test_timeout_on_the_last_attempt_fails_the_run(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    res, args = await _enqueue(deps, hangs_once, hid)
+    assert await asyncio.wait_for(execute(deps, hangs_once, args, job_try=1), timeout=5) == "failed"
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts, run.last_error) == ("failed", 1, "TimeoutError")
+    # The same key now returns a terminal run instead of a phantom ``running`` one.
+    q = RecordingQueue()
+    payload = ItemPayload(household_id=hid, item_id=_item(args))
+    again = await enqueue(deps.factory, q, hangs_once, payload, **_as(hid), idempotency_key="k1")
+    assert (again.run_id, again.created, again.status) == (res.run_id, False, "failed")
+    assert q.calls == []
+
+
+@pytest.mark.parametrize(
+    ("spec", "status"), [(blocks, "retrying"), (blocks_once, "failed")], ids=["retry", "final"]
+)
+async def test_cancellation_records_state_and_propagates(
+    deps: RunnerDeps,
+    households: tuple[uuid.UUID, uuid.UUID],
+    spec: JobSpec[ItemPayload],
+    status: str,
+) -> None:
+    """Worker shutdown or arq's own timeout cancel the task: the row must leave ``running``."""
+    hid, _ = households
+    res, args = await _enqueue(deps, spec, hid)
+    GATES[_item(args)] = started = asyncio.Event()
+    task = asyncio.create_task(execute(deps, spec, args, job_try=1))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts, run.last_error) == (status, 1, "CancelledError")
+    assert await _effects(deps, hid) == 0
+    async with household_lock(deps.engine, hid) as held:
+        assert held
+
+
+def test_arq_timeout_is_a_backstop_above_the_runner_timeout() -> None:
+    fn = arq_function(hangs)
+    assert fn.timeout_s == (QUICK + timedelta(seconds=60)).total_seconds()
+    assert fn.keep_result_s == 0
+
+
+# --------------------------------------------------------------------------- F2b: stale attempts
+
+
+async def test_a_stale_attempt_cannot_mark_a_re_claimed_run(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    res, _ = await _enqueue(deps, effect, hid)
+    first = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)
+    second = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)  # orphan re-claim
+    assert first is not None and second is not None
+    assert (first.attempt, second.attempt) == (1, 2)
+
+    with pytest.raises(RunLost):
+        async with scoped_session(deps.factory, hid, None) as s:
+            await job_runs.mark_succeeded(s, res.run_id, first.attempt)
+    stale = timedelta(seconds=1)
+    await job_runs.mark_retrying(deps.factory, hid, res.run_id, first.attempt, "Stale", stale)
+    await job_runs.mark_failed(deps.factory, hid, res.run_id, first.attempt, "Stale")
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts, run.last_error) == ("running", 2, None)
+
+    async with scoped_session(deps.factory, hid, None) as s:
+        await job_runs.mark_succeeded(s, res.run_id, second.attempt)
+    assert (await _run(deps, hid, res.run_id)).status == "succeeded"
+
+
+# ------------------------------------------------------------------------- F2b: stored payload wins
+
+
+async def test_a_swapped_redis_payload_is_ignored_for_the_stored_one(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Someone with Redis write access swaps in another (valid) id of the same household."""
+    hid, _ = households
+    res, args = await _enqueue(deps, effect, hid)
+    authorized, swapped = _item(args), await _account(deps, hid)
+    tampered = (args[0], args[1], args[2].replace(str(authorized), str(swapped)))
+    assert tampered != args
+    assert await execute(deps, effect, tampered, job_try=1) == "succeeded"
+    async with scoped_session(deps.factory, hid, None) as s:
+        touched = (
+            (await s.execute(select(AuditLog.entity_id).where(AuditLog.action == EFFECT_ACTION)))
+            .scalars()
+            .all()
+        )
+    assert touched == [str(authorized)]
+    assert (await _run(deps, hid, res.run_id)).status == "succeeded"
+
+
+async def test_a_run_delivered_under_another_job_name_is_not_claimed(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    res, args = await _enqueue(deps, effect, hid)
+    assert await execute(deps, flaky, args, job_try=1) == "skipped"
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts) == ("queued", 0)
+    assert await execute(deps, effect, args, job_try=1) == "succeeded"

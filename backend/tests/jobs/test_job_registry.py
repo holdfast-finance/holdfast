@@ -5,27 +5,30 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
 from app.jobs import queue
+from app.jobs.lock import lock_key
 from app.jobs.registry import (
     InvalidIdempotencyKey,
     InvalidJobPayload,
     JobContext,
     JobPayload,
     JobRegistry,
+    Ref,
     RetryPolicy,
     check_idempotency_key,
     discover_jobs,
 )
-from app.jobs.runner import arq_function
+from app.jobs.runner import ARQ_TIMEOUT_MARGIN, arq_function
+from app.models import Account, BankConnection, Institution
 from app.worker.main import WorkerSettings, heartbeat
 
 
 class ItemPayload(JobPayload):
-    item_id: uuid.UUID
+    item_id: Annotated[uuid.UUID, Ref(Account)]
 
 
 async def _noop(ctx: JobContext, payload: ItemPayload) -> None:
@@ -52,6 +55,34 @@ def test_payload_fields_must_be_uuids(annotation: Any) -> None:
             (JobPayload,),
             {"__annotations__": {"extra": annotation}, "__module__": __name__},
         )
+
+
+def test_id_fields_must_name_their_table() -> None:
+    with pytest.raises(TypeError, match="exactly one Ref"):
+
+        class Bare(JobPayload):
+            item_id: uuid.UUID
+
+    with pytest.raises(TypeError, match="exactly one Ref"):
+
+        class Twice(JobPayload):
+            item_id: Annotated[uuid.UUID, Ref(Account), Ref(BankConnection)]
+
+    with pytest.raises(TypeError, match="takes no Ref"):
+
+        class Household(JobPayload):
+            household_id: Annotated[uuid.UUID, Ref(Account)]
+
+
+@pytest.mark.parametrize("target", [Institution, dict, "account"])
+def test_refs_point_at_household_scoped_tables_only(target: Any) -> None:
+    with pytest.raises(TypeError, match="household-scoped"):
+        Ref(target)
+
+
+def test_refs_are_collected_per_payload() -> None:
+    assert dict(ItemPayload.refs) == {"item_id": Ref(Account)}
+    assert dict(JobPayload.refs) == {}
 
 
 def test_payload_always_carries_household_id() -> None:
@@ -110,7 +141,7 @@ def test_model_construct_cannot_bypass_validation() -> None:
 
 def test_a_payload_for_another_job_is_rejected() -> None:
     class Other(JobPayload):
-        account_id: uuid.UUID
+        account_id: Annotated[uuid.UUID, Ref(Account)]
 
     with pytest.raises(InvalidJobPayload):
         _spec().validate(Other(household_id=HID, account_id=IID))
@@ -208,7 +239,25 @@ def test_arq_function_uses_the_job_name_and_bounded_tries() -> None:
     fn = arq_function(spec)
     assert fn.name == "test.wired"
     assert fn.max_tries == spec.retry.queue_max_tries
-    assert fn.timeout_s == spec.timeout.total_seconds()
+    # arq's timeout is a backstop above the runner's own asyncio.timeout(spec.timeout).
+    assert fn.timeout_s == (spec.timeout + ARQ_TIMEOUT_MARGIN).total_seconds()
+    assert timedelta(0) < ARQ_TIMEOUT_MARGIN
+    assert fn.keep_result_s == 0  # job_run is the record; arq stores nothing
+
+
+# --------------------------------------------------------------------------- household lock key
+
+
+def test_lock_key_hashes_the_whole_household_uuid() -> None:
+    """UUIDv7 ids created in the same millisecond share their first bytes; keys must not."""
+    prefix = bytes.fromhex("019a2b3c4d5e7000")
+    a = uuid.UUID(bytes=prefix + bytes.fromhex("8000000000000001"))
+    b = uuid.UUID(bytes=prefix + bytes.fromhex("8000000000000002"))
+    assert a.bytes[:4] == b.bytes[:4]
+    assert lock_key(a) != lock_key(b)
+    assert lock_key(a) == lock_key(uuid.UUID(str(a)))  # stable across processes
+    keys = [lock_key(uuid.uuid4()) for _ in range(200)]
+    assert all(-(2**31) <= k < 2**31 for k in keys)  # fits pg_try_advisory_lock(int, int)
 
 
 def test_worker_registers_discovered_jobs_and_json_serializer() -> None:
