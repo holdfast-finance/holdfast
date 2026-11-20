@@ -10,7 +10,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check')]
+        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -42,6 +42,8 @@ $Help = [ordered]@{
     'lint'    = 'ruff + ruff format --check + mypy + import-linter, eslint + tsc'
     'fmt'     = 'Format backend (ruff) and web (format script, if any)'
     'migrate' = 'alembic upgrade head as holdfast_owner (one-off migrate container)'
+    'rotate-keys' = 'Re-encrypt stored secrets under the primary FERNET_KEY (ADR 0015); run twice'
+    'rotate-keys-prod' = 'rotate-keys against the prod stack (use this on a prod host)'
     'seed'    = 'Seed Plaid Sandbox data (placeholder until Phase 2)'
     'keys'    = 'Create .env from .env.example with fresh secrets (refuses to overwrite)'
     'check'   = 'lint + test'
@@ -159,6 +161,8 @@ switch ($Target) {
         }
     }
     'migrate' { Assert-Env; docker @Compose run --rm migrate }
+    'rotate-keys' { Assert-Env; docker @Compose run --rm --no-deps rotate-keys }
+    'rotate-keys-prod' { Assert-Env; docker @ComposeProd run --rm --no-deps rotate-keys }
     'seed' { & $Python scripts/seed_sandbox.py }
     'keys' { & $Python scripts/gen-keys.py --write }
     'check' { Invoke-Lint; Invoke-Test }
