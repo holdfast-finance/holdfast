@@ -22,14 +22,19 @@ runs was the remaining Phase 1.5 gap.
 A run may be `reconciled` only when all three numbers are present and the absolute
 difference is at most `0.01`. Anything else is `needs_review`. Accepting a flagged
 run requires a user id and a timestamp, and the database refuses to rewrite a
-finished reconciliation. A flagged run flags its document, and the document stays
-flagged until the run is accepted.
+finished reconciliation. A succeeded run has left `pending`: its reconcile status
+is `reconciled`, `needs_review`, or `accepted`. A flagged run sets the document's
+parse status to `needs_review` and latches that flag on the document. The latch
+survives deletion of the run. It clears only when a run is accepted and no sibling
+run still needs review.
 
 An imported transaction carries a 64-character hex fingerprint, unique per account,
-and the id of the run that created it. The run cannot be deleted while those rows
-exist. `superseded_by_id` points at the row that replaced this one. The database
-keeps that link inside one account, one-to-one, and forbids chains. Deleting the
-winner clears the link. Metrics exclude superseded rows.
+and the id of the run that created it. Once set, that id cannot be changed or
+cleared. The run cannot be deleted while those rows exist. `superseded_by_id`
+points at the row that replaced this one. The database keeps that link inside one
+account, one-to-one, and forbids chains. The check locks the winner, and any row
+this one already replaces, before it looks for a chain. Deleting the winner clears
+the link. Metrics exclude superseded rows.
 
 `sync_run` is one connector sync. It stores the cursor it started from and, only
 when it succeeds, the cursor it committed. Cursors are opaque paging tokens, not
@@ -38,7 +43,8 @@ written in the same transaction as the batch it covers.
 
 Both tables have `household_id`, forced RLS, and an index on `household_id`.
 An import run follows its account the way a balance snapshot does. A run with no
-account holds no balances and is visible to the household. A sync run is
+account holds no balances and no transaction sum, and is visible to the household.
+A sync run is
 household-visible, like the connection it belongs to. `error_class` stores an
 exception class name, never a message.
 

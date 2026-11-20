@@ -128,6 +128,10 @@ def test_needs_review_flags_the_document_until_accepted(
                     reviewed_at=WHEN,
                 )
             )
+            latched = c.execute(
+                select(doc.c.import_review_latched).where(doc.c.id == doc_id)
+            ).scalar_one()
+            assert latched is False
             c.execute(doc.update().where(doc.c.id == doc_id).values(parse_status="parsed"))
         with app_engine.begin() as c, pytest.raises(IntegrityError, match="review of import run"):
             set_ctx(c, seed.household_id, wide=True)
@@ -388,6 +392,146 @@ def test_absolute_storage_path_is_rejected(app_engine: Engine, owner_engine: Eng
             )
     finally:
         delete_household(owner_engine, seed.household_id)
+
+
+# Twenty zeros: a rejected status value. The database error must not repeat it.
+REJECTED_STATUS = "00000000000000000000"
+
+
+def test_unassigned_run_holds_no_transaction_sum(app_engine: Engine, owner_engine: Engine) -> None:
+    seed = seed_household(app_engine, "unassigned")
+    run = table("import_run")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(
+                run.insert().values(
+                    household_id=seed.household_id,
+                    document_id=seed.rows["document"]["id"],
+                )
+            )
+        with (
+            app_engine.begin() as c,
+            pytest.raises(IntegrityError, match="balances_need_account"),
+        ):
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(
+                run.insert().values(
+                    household_id=seed.household_id,
+                    document_id=seed.rows["document"]["id"],
+                    txn_sum=Decimal("1.00"),
+                )
+            )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_succeeded_run_cannot_stay_pending(app_engine: Engine, owner_engine: Engine) -> None:
+    seed = seed_household(app_engine, "succeeded")
+    try:
+        with (
+            app_engine.begin() as c,
+            pytest.raises(IntegrityError, match="succeeded_is_reconciled"),
+        ):
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(
+                table("import_run")
+                .insert()
+                .values(
+                    household_id=seed.household_id,
+                    document_id=seed.rows["document"]["id"],
+                    account_id=seed.rows["account"]["id"],
+                    status="succeeded",
+                    finished_at=WHEN,
+                    reconcile_status="pending",
+                )
+            )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_import_run_link_cannot_be_cleared(app_engine: Engine, owner_engine: Engine) -> None:
+    seed = seed_household(app_engine, "link")
+    txn = table("transaction")
+    run_id = seed.rows["import_run"]["id"]
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, seed.household_id, wide=True)
+            row = _txn(
+                c,
+                seed.household_id,
+                seed.rows["account"]["id"],
+                Decimal("-8.00"),
+                "import",
+                fingerprint=_fp(5),
+                import_run_id=run_id,
+            )
+        with (
+            app_engine.begin() as c,
+            pytest.raises(IntegrityError, match="import run link is final"),
+        ):
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(txn.update().where(txn.c.id == row).values(import_run_id=None))
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_deleting_a_flagged_run_leaves_the_document_latched(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "latch")
+    doc = table("document")
+    run = table("import_run")
+    doc_id = seed.rows["document"]["id"]
+    run_id = seed.rows["import_run"]["id"]
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(
+                run.update().where(run.c.id == run_id).values(reconcile_status="needs_review")
+            )
+            c.execute(run.delete().where(run.c.id == run_id))
+            latched = c.execute(
+                select(doc.c.import_review_latched).where(doc.c.id == doc_id)
+            ).scalar_one()
+            assert latched is True
+        with app_engine.begin() as c, pytest.raises(IntegrityError, match="needs review"):
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(doc.update().where(doc.c.id == doc_id).values(parse_status="parsed"))
+        with app_engine.begin() as c, pytest.raises(IntegrityError, match="review clears only"):
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(doc.update().where(doc.c.id == doc_id).values(import_review_latched=False))
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_reconcile_status_error_does_not_echo_the_value(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "echo")
+    run = table("import_run")
+    try:
+        with app_engine.begin() as c, pytest.raises(IntegrityError) as caught:
+            set_ctx(c, seed.household_id, wide=True)
+            c.execute(
+                run.update()
+                .where(run.c.id == seed.rows["import_run"]["id"])
+                .values(reconcile_status=REJECTED_STATUS)
+            )
+        message = _db_message(caught.value)
+        assert "cannot change" in message
+        assert REJECTED_STATUS not in message
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def _db_message(exc: IntegrityError) -> str:
+    """The database diagnostic only. The statement parameters are the write, not the error."""
+    diag = getattr(exc.orig, "diag", None)
+    if diag is None:
+        return str(exc.orig)
+    parts = (diag.message_primary, diag.message_detail, diag.context, diag.internal_query)
+    return " ".join(part for part in parts if part)
 
 
 def _txn(

@@ -50,13 +50,18 @@ class ImportRun(Base):
       ``reviewed_at`` (CHECK). ``accepted`` is never written on insert.
     - Once out of ``pending`` the result is final: balances, sum, period, account and document
       can't change (trigger ``import_run_guard``). Re-reconciling means a new run.
+    - A succeeded run has left ``pending``: ``reconcile_status`` is ``reconciled``,
+      ``needs_review``, or ``accepted``.
 
-    Flagging a run flags its document (``document.parse_status = 'needs_review'``) by trigger.
+    Flagging a run sets the document's ``parse_status`` to ``needs_review`` and latches that
+    flag. The latch clears only when a run is accepted and no sibling still needs review.
+    Deleting the run leaves the latch set.
 
     **Visibility.** A run with an account follows that account like ``balance_snapshot`` (its
     balances are summary data): hidden from others when the account is private, writable only by
     the owner, for joint accounts, or by household-wide jobs. A run with no account (a
-    multi-account export) can't hold balances (CHECK) and is household-visible.
+    multi-account export) holds no balances and no transaction sum (CHECK) and is
+    household-visible.
 
     **Counts.** ``rows_parsed`` counts every row read from the file. Of those, ``rows_inserted``
     became new transactions and ``rows_duplicate`` matched an existing fingerprint (re-import).
@@ -90,7 +95,8 @@ class ImportRun(Base):
             name="counts_consistent",
         ),
         CheckConstraint(
-            "account_id IS NOT NULL OR (opening_balance IS NULL AND closing_balance IS NULL)",
+            "account_id IS NOT NULL OR (opening_balance IS NULL AND closing_balance IS NULL"
+            " AND txn_sum IS NULL)",
             name="balances_need_account",
         ),
         CheckConstraint(
@@ -107,6 +113,11 @@ class ImportRun(Base):
         CheckConstraint(
             "(status IN ('succeeded', 'failed')) = (finished_at IS NOT NULL)",
             name="finished_when_done",
+        ),
+        CheckConstraint(
+            "status <> 'succeeded' OR reconcile_status IN"
+            " ('reconciled', 'needs_review', 'accepted')",
+            name="succeeded_is_reconciled",
         ),
         CheckConstraint("error_class IS NULL OR status = 'failed'", name="error_only_on_failure"),
         parent_key(),

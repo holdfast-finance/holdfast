@@ -37,9 +37,9 @@ class Document(Base):
     ``..`` segments). ``UNIQUE (household_id, sha256)`` makes re-uploading the same file return
     the existing row (PLAN 8.1 step 1).
 
-    ``parse_status`` is ``needs_review`` whenever any of the document's import runs is: a trigger
-    raises the flag when a run is flagged, and another refuses to clear it while a run still
-    needs review. The only way out is accepting the run (``import_run.reconcile_status``).
+    ``parse_status`` stays ``needs_review`` while ``import_review_latched`` is set. A trigger
+    sets the latch when a run is flagged and clears it only when a run is accepted and no
+    sibling run still needs review. Deleting the run does not clear the latch.
     """
 
     __tablename__ = "document"
@@ -78,6 +78,8 @@ class Document(Base):
     detected_profile: Mapped[str | None]
     uploaded_at: Mapped[datetime] = mapped_column(server_default=func.now())
     parse_status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    # Set when a run needs review. Cleared only by accepting that run (ADR 0017).
+    import_review_latched: Mapped[bool] = mapped_column(server_default=text("false"))
 
 
 class ParsedField(Base):

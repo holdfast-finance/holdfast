@@ -89,16 +89,18 @@ class Transaction(Base):
 
     **Imports** (ADR 0017). An imported row (``source = 'import'``) always has an
     ``import_fingerprint`` (64-char hex, ``app.domain.fingerprint``), unique per account, so a
-    re-import inserts nothing. ``import_run_id`` records which run created it (imports only); a run
-    can't be deleted while its rows exist (NO ACTION), so undoing an import deletes its rows first,
-    under RLS.
+    re-import inserts nothing. ``import_run_id`` records which run created it (imports only).
+    Once set, that link cannot be changed or cleared (trigger ``transaction_import_run_guard``).
+    A run can't be deleted while its rows exist (NO ACTION), so undoing an import deletes its
+    rows first, under RLS.
 
     **Supersession** (PLAN 8.1 step 5, "Plaid wins"). ``superseded_by_id`` points at the row that
     replaces this one; superseded rows stay (so their fingerprints keep re-imports idempotent) but
     every metric and view must exclude them (``superseded_by_id IS NULL``). The database enforces:
     same account (composite FK to ``(id, account_id)``), not self, one-to-one (a winner replaces
     at most one row), and no chains (a winner is live, and a row that replaces another can't
-    itself be superseded; trigger ``transaction_supersession_guard``). Deleting the winner (Plaid
+    itself be superseded). ``transaction_supersession_guard`` locks the winner, and any row this
+    one already replaces, before that check. Deleting the winner (Plaid
     ``removed``) clears the link, so the replaced row counts again.
     """
 

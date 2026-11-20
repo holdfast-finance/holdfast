@@ -5,19 +5,23 @@ see them:
 
 - ``import_run``: ENABLE + FORCE RLS, ``household_isolation``, and RESTRICTIVE per-person
   policies like ``balance_snapshot`` (a run's balances follow its account's visibility; a run
-  with no account holds no balances and is household-visible).
+  with no account holds no balances and no transaction sum, and is household-visible).
 - ``sync_run``: ENABLE + FORCE RLS, ``household_isolation`` (household-visible, like
   ``bank_connection``).
 - CHECKs on the existing ``document`` and ``transaction`` tables (autogenerate misses CHECKs on
   existing tables): document size, relative storage path, profile id; imported rows carry a hex
   fingerprint, provenance only on imports, no self-supersession.
 - ``import_run_guard``: reconciliation is final once out of ``pending``; ``needs_review`` leaves
-  only to ``accepted``; ``accepted`` is never inserted; a review can't be rewritten.
-- ``import_run_flag_document`` / ``document_review_guard``: a flagged run flags its document, and
-  the document's flag can't be cleared while any of its runs still needs review.
-- ``transaction_supersession_guard``: no supersession chains.
+  only to ``accepted``; ``accepted`` is never inserted; a review can't be rewritten. The status
+  error is a fixed string.
+- ``import_run_flag_document`` / ``import_run_accept_document`` / ``document_review_guard``: a
+  flagged run latches its document. The latch clears only when a run is accepted and no sibling
+  run still needs review. Deleting the run does not clear it.
+- ``transaction_import_run_guard``: ``import_run_id``, once set, cannot be changed or cleared.
+- ``transaction_supersession_guard``: no supersession chains. The winner and any row this one
+  already replaces are locked before the check.
 
-The three functions that read or write another table switch ``app.household_wide`` on for their
+The functions that read or write another table switch ``app.household_wide`` on for their
 own query and restore the caller's value, like ``transaction_split_balance`` (0002), so a
 person-scoped policy can never make them see less and fail open.
 
@@ -92,8 +96,7 @@ BEGIN
             AND NEW.reconcile_status IN ('reconciled', 'needs_review'))
         OR (OLD.reconcile_status = 'needs_review' AND NEW.reconcile_status = 'accepted'))
     THEN
-        RAISE EXCEPTION 'import run %: reconcile status cannot change from % to %',
-            OLD.id, OLD.reconcile_status, NEW.reconcile_status
+        RAISE EXCEPTION 'import run %: reconcile status cannot change', OLD.id
             USING ERRCODE = '23514';
     END IF;
     IF OLD.reviewed_at IS NOT NULL AND (
@@ -120,18 +123,53 @@ DECLARE
     prev_wide text := current_setting('app.household_wide', true);
 BEGIN
     PERFORM set_config('app.household_wide', 'on', true);
-    UPDATE public.document SET parse_status = 'needs_review'
-     WHERE id = NEW.document_id AND parse_status <> 'needs_review';
+    UPDATE public.document
+       SET parse_status = 'needs_review',
+           import_review_latched = true
+     WHERE id = NEW.document_id
+       AND (parse_status <> 'needs_review' OR NOT import_review_latched);
     PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
     RETURN NULL;
 END
 $$;
 COMMENT ON FUNCTION import_run_flag_document() IS
-    'An import run flagged needs_review flags its document too (PLAN 8.1 step 4).';
+    'A needs_review run flags its document and latches that flag (PLAN 8.1 step 4).';
 CREATE TRIGGER import_run_flag_document
     AFTER INSERT OR UPDATE OF reconcile_status ON import_run
     FOR EACH ROW WHEN (NEW.reconcile_status = 'needs_review')
     EXECUTE FUNCTION import_run_flag_document();
+
+CREATE FUNCTION import_run_accept_document() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    prev_wide text := current_setting('app.household_wide', true);
+    still_open boolean;
+BEGIN
+    PERFORM set_config('app.household_wide', 'on', true);
+    SELECT EXISTS (
+        SELECT 1 FROM public.import_run r
+         WHERE r.document_id = NEW.document_id
+           AND r.id <> NEW.id
+           AND r.reconcile_status = 'needs_review'
+    ) INTO still_open;
+    IF NOT still_open THEN
+        UPDATE public.document
+           SET import_review_latched = false
+         WHERE id = NEW.document_id AND import_review_latched;
+    END IF;
+    PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
+    RETURN NULL;
+END
+$$;
+COMMENT ON FUNCTION import_run_accept_document() IS
+    'Accepting the last open run clears the document latch. Nothing else does.';
+CREATE TRIGGER import_run_accept_document
+    AFTER UPDATE OF reconcile_status ON import_run
+    FOR EACH ROW
+    WHEN (NEW.reconcile_status = 'accepted' AND OLD.reconcile_status IS DISTINCT FROM 'accepted')
+    EXECUTE FUNCTION import_run_accept_document();
 
 CREATE FUNCTION document_review_guard() RETURNS trigger
     LANGUAGE plpgsql
@@ -139,15 +177,28 @@ CREATE FUNCTION document_review_guard() RETURNS trigger
 AS $$
 DECLARE
     prev_wide text := current_setting('app.household_wide', true);
-    open_review boolean;
+    accepted boolean;
+    still_open boolean;
 BEGIN
-    PERFORM set_config('app.household_wide', 'on', true);
-    SELECT EXISTS (
-        SELECT 1 FROM public.import_run r
-         WHERE r.document_id = NEW.id AND r.reconcile_status = 'needs_review'
-    ) INTO open_review;
-    PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
-    IF open_review THEN
+    IF OLD.import_review_latched AND NOT NEW.import_review_latched THEN
+        PERFORM set_config('app.household_wide', 'on', true);
+        SELECT EXISTS (
+            SELECT 1 FROM public.import_run r
+             WHERE r.document_id = NEW.id AND r.reconcile_status = 'accepted'
+        ) INTO accepted;
+        SELECT EXISTS (
+            SELECT 1 FROM public.import_run r
+             WHERE r.document_id = NEW.id AND r.reconcile_status = 'needs_review'
+        ) INTO still_open;
+        PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
+        IF still_open OR NOT accepted THEN
+            RAISE EXCEPTION
+                'document % review clears only when its import run is accepted', NEW.id
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    IF OLD.parse_status = 'needs_review' AND NEW.parse_status <> 'needs_review'
+       AND NEW.import_review_latched THEN
         RAISE EXCEPTION 'document % has an import run that needs review; accept the run first',
             NEW.id
             USING ERRCODE = '23514';
@@ -156,18 +207,44 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION document_review_guard() IS
-    'A document stays needs_review while any of its import runs needs review (hard rule 6).';
+    'A latched document stays needs_review until a run is accepted (hard rule 6).';
 CREATE TRIGGER document_review_guard
-    BEFORE UPDATE OF parse_status ON document
+    BEFORE UPDATE OF parse_status, import_review_latched ON document
     FOR EACH ROW
-    WHEN (OLD.parse_status = 'needs_review' AND NEW.parse_status <> 'needs_review')
+    WHEN (
+        (OLD.parse_status = 'needs_review' AND NEW.parse_status <> 'needs_review')
+        OR (OLD.import_review_latched AND NOT NEW.import_review_latched)
+    )
     EXECUTE FUNCTION document_review_guard();
+"""
+
+# Once set, the link to the run that created a row is final. Clearing it would let that
+# run be deleted while its rows stayed. The document latch still blocks a parsed status.
+IMPORT_RUN_LINK_SQL = """
+CREATE FUNCTION transaction_import_run_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF OLD.import_run_id IS NOT NULL
+       AND NEW.import_run_id IS DISTINCT FROM OLD.import_run_id THEN
+        RAISE EXCEPTION 'transaction % import run link is final', OLD.id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+COMMENT ON FUNCTION transaction_import_run_guard() IS
+    'import_run_id, once set, cannot be changed or cleared (ADR 0017).';
+CREATE TRIGGER transaction_import_run_guard
+    BEFORE UPDATE OF import_run_id ON "transaction"
+    FOR EACH ROW EXECUTE FUNCTION transaction_import_run_guard();
 """
 
 # The FK already keeps supersession inside one account and the partial unique index makes it
 # one-to-one; this forbids chains: the winner must be live, and a row that replaces another
-# can't itself be replaced. Ingest is serialized per household (ADR 0016 lock), so two writers
-# can't race a chain into existence.
+# can't itself be replaced. The rows are locked first so two sessions cannot each miss the
+# other's link. The job lock (ADR 0016) is extra, not the only serialization.
 SUPERSESSION_GUARD_SQL = """
 CREATE FUNCTION transaction_supersession_guard() RETURNS trigger
     LANGUAGE plpgsql
@@ -182,6 +259,10 @@ BEGIN
         RETURN NEW;
     END IF;
     PERFORM set_config('app.household_wide', 'on', true);
+    PERFORM id FROM public."transaction"
+     WHERE id = NEW.superseded_by_id OR superseded_by_id = NEW.id
+     ORDER BY id
+     FOR UPDATE;
     SELECT EXISTS (
         SELECT 1 FROM public."transaction" w
          WHERE w.id = NEW.superseded_by_id AND w.superseded_by_id IS NOT NULL
@@ -234,8 +315,18 @@ def upgrade() -> None:
     _create_sync_run()
     _create_import_run()
 
-    # document: size, detected profile, and a storage path that stays inside DOCUMENT_STORE.
+    # document: size, detected profile, a storage path inside DOCUMENT_STORE, and a review
+    # latch that outlives the import run that raised it.
     op.add_column("document", sa.Column("size_bytes", sa.BigInteger(), nullable=False))
+    op.add_column(
+        "document",
+        sa.Column(
+            "import_review_latched",
+            sa.Boolean(),
+            server_default=sa.text("false"),
+            nullable=False,
+        ),
+    )
     op.add_column("document", sa.Column("detected_profile", sa.Text(), nullable=True))
     op.create_check_constraint(
         op.f("ck_document_size_bytes_positive"), "document", "size_bytes > 0"
@@ -322,12 +413,14 @@ def upgrade() -> None:
     _restrictive("person_delete", "DELETE", IMPORT_RUN_WRITE, None)
 
     op.execute(IMPORT_RUN_GUARD_SQL)
+    op.execute(IMPORT_RUN_LINK_SQL)
     op.execute(SUPERSESSION_GUARD_SQL)
 
 
 def downgrade() -> None:
     # Triggers on surviving tables first; dropping import_run drops its own triggers and policies.
     op.execute('DROP TRIGGER transaction_supersession_guard ON "transaction"')
+    op.execute('DROP TRIGGER transaction_import_run_guard ON "transaction"')
     op.execute("DROP TRIGGER document_review_guard ON document")
 
     for name in (
@@ -352,13 +445,16 @@ def downgrade() -> None:
     for name in ("detected_profile_format", "storage_path_relative", "size_bytes_positive"):
         op.drop_constraint(op.f(f"ck_document_{name}"), "document", type_="check")
     op.drop_column("document", "detected_profile")
+    op.drop_column("document", "import_review_latched")
     op.drop_column("document", "size_bytes")
 
     op.drop_table("import_run")
     op.drop_table("sync_run")
 
     op.execute("DROP FUNCTION transaction_supersession_guard()")
+    op.execute("DROP FUNCTION transaction_import_run_guard()")
     op.execute("DROP FUNCTION document_review_guard()")
+    op.execute("DROP FUNCTION import_run_accept_document()")
     op.execute("DROP FUNCTION import_run_flag_document()")
     op.execute("DROP FUNCTION import_run_guard()")
 
@@ -492,6 +588,11 @@ def _create_import_run() -> None:
             "(status IN ('succeeded', 'failed')) = (finished_at IS NOT NULL)",
             name=op.f("ck_import_run_finished_when_done"),
         ),
+        sa.CheckConstraint(
+            "status <> 'succeeded' OR reconcile_status IN"
+            " ('reconciled', 'needs_review', 'accepted')",
+            name=op.f("ck_import_run_succeeded_is_reconciled"),
+        ),
         sa.CheckConstraint(ERROR_CLASS_SQL, name=op.f("ck_import_run_error_class_is_class_name")),
         sa.CheckConstraint(
             "error_class IS NULL OR status = 'failed'",
@@ -516,7 +617,8 @@ def _create_import_run() -> None:
             name=op.f("ck_import_run_status"),
         ),
         sa.CheckConstraint(
-            "account_id IS NOT NULL OR (opening_balance IS NULL AND closing_balance IS NULL)",
+            "account_id IS NOT NULL OR (opening_balance IS NULL AND closing_balance IS NULL"
+            " AND txn_sum IS NULL)",
             name=op.f("ck_import_run_balances_need_account"),
         ),
         sa.CheckConstraint(
