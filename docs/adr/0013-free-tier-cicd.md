@@ -54,11 +54,14 @@
    `main-guard` binds each check to its trusted trigger: `review-gate` counts only from a
    `pull_request_target` run and `ci-required` only from a `pull_request` run of `ci.yml`.
    GitHub empties a run's `pull_requests` once the PR merges, so both runs are bound by
-   `head_branch` and `head_repository` matching the merged PR's head (a non-empty
-   `pull_requests` must still name the merged PR with base `main`). A same-branch sibling PR
-   against a crafted base fails the push (any PR from that head with base other than `main`,
-   any state), and so does a `base_ref_changed` event on the merged PR's timeline. A null
-   head repository fails closed. `ci.yml` runs `pull_request` only for base `main`.
+   `head_branch` and `head_repository` matching the merged PR's head. An empty
+   `pull_requests` list is allowed. A non-empty list must contain only the merged PR, every
+   entry's base must be `main`, and each entry's head SHA must be the merged head. A
+   same-branch sibling whose current base is not `main` fails the push. So does
+   `base_ref_changed` on any PR from that head, including one later retargeted to `main`.
+   A workflow-run listing that names a different head SHA is dropped, and a listing shorter
+   than `total_count` fails closed. A null head repository fails closed. `ci.yml` runs
+   `pull_request` only for base `main`.
    **Accepted risk (L3):** `main-guard` runs from the workflow file in the pushed commit, so a push
    to `main` that edits or deletes `.github/workflows/main-guard.yml` judges itself and can report
    green. This is accepted until rulesets are available. Mitigations: `.github/` is a protected

@@ -26,6 +26,7 @@ class FakeGH:
         self.issues: list[tuple[str, str]] = []
         self.labels = 0
         self.timeline_events: list[dict] = []
+        self.timelines: dict[int, list[dict]] | None = None
         self.head_prs: list[dict] = [{"number": 4, "base_ref": "main"}]
         self.compared = 0
 
@@ -42,6 +43,8 @@ class FakeGH:
         return self._runs[sha]
 
     def timeline(self, repo: str, number: int) -> list:
+        if self.timelines is not None:
+            return self.timelines[number]
         return self.timeline_events
 
     def head_pulls(self, repo: str, head_repo: str, head_ref: str) -> list:
@@ -354,10 +357,12 @@ class MainGuardTests(unittest.TestCase):
                 return 0, (
                     '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
                     '"created_at": "2026-11-19T00:00:00Z", "name": "CI", "conclusion": "failure", '
-                    '"pull_requests": [], "head_branch": "feat", "head_repo": "o/r"}\n'
+                    '"head_sha": "abc", "total_count": 2, "pull_requests": [], '
+                    '"head_branch": "feat", "head_repo": "o/r"}\n'
                     '{"id": 10, "path": ".github/workflows/fork.yml", "event": "pull_request", '
                     '"created_at": "2026-11-19T03:00:00Z", "name": "Fork", "conclusion": "success", '
-                    '"pull_requests": [], "head_branch": "feat", "head_repo": "o/r"}\n'
+                    '"head_sha": "abc", "total_count": 2, "pull_requests": [], '
+                    '"head_branch": "feat", "head_repo": "o/r"}\n'
                 ), ""
             if "/runs/9/jobs" in joined:
                 return 0, (
@@ -381,6 +386,98 @@ class MainGuardTests(unittest.TestCase):
         assert chosen is not None
         self.assertEqual(chosen["conclusion"], "failure")
         self.assertEqual(chosen["workflow"], ".github/workflows/ci.yml")
+        self.assertIn("head_sha", jq)
+        self.assertIn("total_count", jq)
+
+    def test_check_runs_drops_a_different_head_sha(self) -> None:
+        def runner(cmd: list[str], input_text: str | None = None) -> tuple[int, str, str]:
+            joined = " ".join(cmd)
+            if "actions/runs?" in joined:
+                return 0, (
+                    '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
+                    '"head_sha": "fff", "total_count": 1, "pull_requests": [], '
+                    '"head_branch": "feat", "head_repo": "o/r"}\n'
+                ), ""
+            return 1, "", "jobs must not be fetched for another sha"
+        self.assertEqual(main_guard.GhApi(runner).check_runs("o/r", "abc"), [])
+
+    def test_check_runs_fails_closed_when_the_listing_is_short(self) -> None:
+        def runner(cmd: list[str], input_text: str | None = None) -> tuple[int, str, str]:
+            joined = " ".join(cmd)
+            if "actions/runs?" in joined:
+                return 0, (
+                    '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
+                    '"head_sha": "abc", "total_count": 1001, "pull_requests": [], '
+                    '"head_branch": "feat", "head_repo": "o/r"}\n'
+                ), ""
+            return 1, "", "unexpected"
+        with self.assertRaises(main_guard.ApiError):
+            main_guard.GhApi(runner).check_runs("o/r", "abc")
+
+    def test_run_that_also_names_another_pr_is_ignored(self) -> None:
+        forged = _job("ci-required", "success", "2026-11-19T05:00:00Z")
+        forged["pull_requests"] = [
+            {"number": 4, "base_ref": "main", "head_sha": HEAD},
+            {"number": 9, "base_ref": "main", "head_sha": HEAD},
+        ]
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "failure", "2026-11-19T01:00:00Z"),
+            forged,
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("failure", out)
+
+    def test_pull_request_entry_for_a_different_head_is_ignored(self) -> None:
+        forged = _job("ci-required", "success", "2026-11-19T05:00:00Z", pr=4)
+        forged["pull_requests"][0]["head_sha"] = "e" * 40
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "failure", "2026-11-19T01:00:00Z"),
+            forged,
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("failure", out)
+
+    def test_nonempty_pull_requests_for_this_pr_and_head_passes(self) -> None:
+        def bound(name: str) -> dict:
+            job = _job(name, "success", "2026-11-19T00:00:00Z", pr=4)
+            job["pull_requests"][0]["head_sha"] = HEAD
+            return job
+        runs = {HEAD: [bound("review-gate"), bound("ci-required")]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 0, out)
+
+    def test_retargeted_sibling_fails_even_when_its_base_is_now_main(self) -> None:
+        shapes: tuple[list[dict], ...] = (
+            [],
+            [{"number": 4, "base_ref": "main", "head_sha": HEAD}],
+        )
+        for pulls in shapes:
+            runs = {HEAD: [
+                _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+                _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+            ]}
+            for job in runs[HEAD]:
+                job["pull_requests"] = [dict(item) for item in pulls]
+            gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+            gh.head_prs = [
+                {"number": 4, "base_ref": "main"},
+                {"number": 9, "base_ref": "main"},
+            ]
+            gh.timelines = {
+                4: [{"event": "reviewed"}],
+                9: [{"event": "base_ref_changed"}],
+            }
+            code, out = _run(gh)
+            self.assertEqual(code, 1, out)
+            self.assertIn("PR #9", out)
+            self.assertIn("base was changed", out)
 
     def test_pulls_command_does_not_call_rulesets(self) -> None:
         seen: list[list[str]] = []

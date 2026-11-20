@@ -60,9 +60,10 @@ jobs:
               "review-gate": ("pull_request_target",),
           }
           # Both must also come from the merged PR's head branch and repo. GitHub empties a run's
-          # ``pull_requests`` after merge, so that list is checked only when it is non-empty (it
-          # must then name the merged PR with base ``main``). A same-branch sibling PR against a
-          # crafted base is caught by ``head_pulls`` (any PR from that head with base != main fails).
+          # ``pull_requests`` after merge, so an empty list is allowed. A non-empty list must be
+          # only the merged PR, every entry's base ``main``, and every entry's head SHA the merged
+          # head. Any PR from that head whose base changed (including one later retargeted to
+          # ``main``) fails closed. A sibling whose current base is not ``main`` also fails.
           PR_BOUND_CHECKS = ("ci-required", "review-gate")
           BASE_BRANCH = "main"
           LABEL = "main-guard"
@@ -164,13 +165,25 @@ jobs:
                       [
                           "gh", "api", "--paginate", runs_path,
                           "--jq",
-                          ".workflow_runs[] | {id, path, event, created_at, name, conclusion,"
-                          " pull_requests: [(.pull_requests // [])[] | {number, base_ref: .base.ref}],"
+                          ". as $page | .workflow_runs[] | {id, path, event, created_at, name,"
+                          " conclusion, head_sha, total_count: $page.total_count,"
+                          " pull_requests: [(.pull_requests // [])[] | {number,"
+                          " base_ref: .base.ref, head_sha: .head.sha}],"
                           " head_branch, head_repo: .head_repository.full_name}",
                       ]
                   )
+                  if workflow_runs:
+                      totals = [
+                          total
+                          for run in workflow_runs
+                          if isinstance(total := run.get("total_count"), int)
+                      ]
+                      if not totals or max(totals) > len(workflow_runs):
+                          raise ApiError(runs_path, 1)
                   rows: list[dict[str, Any]] = []
                   for run in workflow_runs:
+                      if run.get("head_sha") != sha:
+                          continue
                       run_id = run.get("id")
                       path = run.get("path")
                       if isinstance(run_id, str) and run_id.isdigit():
@@ -191,6 +204,7 @@ jobs:
                           job["pull_requests"] = run.get("pull_requests") or []
                           job["head_branch"] = run.get("head_branch")
                           job["head_repo"] = run.get("head_repo")
+                          job["head_sha"] = run.get("head_sha")
                           rows.append(job)
                   return rows
 
@@ -310,10 +324,13 @@ jobs:
               return run.get("event") in CHECK_EVENTS.get(name, ())
 
 
-          def pr_matches(name: str, run: dict[str, Any], pr_number: int | None) -> bool:
-              """A non-empty ``pull_requests`` must name the merged PR with base main.
+          def pr_matches(
+              name: str, run: dict[str, Any], pr_number: int | None, head_sha: str | None = None,
+          ) -> bool:
+              """Empty ``pull_requests`` is the post-merge shape and is allowed.
 
-              Empty is allowed: GitHub clears it once the PR is merged.
+              A non-empty list must be only the merged PR. Every entry needs base ``main``
+              and the merged head SHA. ``any()`` would let a second PR launder the run.
               """
               if name not in PR_BOUND_CHECKS:
                   return True
@@ -322,10 +339,13 @@ jobs:
                   return False
               if not prs:
                   return True
-              return any(
+              if pr_number is None or not head_sha:
+                  return False
+              return all(
                   isinstance(pr, dict)
                   and pr.get("number") == pr_number
                   and pr.get("base_ref") == BASE_BRANCH
+                  and pr.get("head_sha") == head_sha
                   for pr in prs
               )
 
@@ -341,9 +361,20 @@ jobs:
               return run.get("head_branch") == head_ref and run.get("head_repo") == head_repo
 
 
+          def _listed_head_ok(run: dict[str, Any], head_sha: str | None) -> bool:
+              """A job that names a workflow head SHA must name the SHA we queried."""
+              if not head_sha:
+                  return True
+              listed = run.get("head_sha")
+              if listed is None:
+                  return True
+              return listed == head_sha
+
+
           def latest_run(
               runs: list[dict[str, Any]], name: str, pr_number: int | None = None,
               head_ref: str | None = None, head_repo: str | None = None,
+              head_sha: str | None = None,
           ) -> dict[str, Any] | None:
               """Latest run of this job from its own workflow file, trusted event, PR and head."""
               matching = [
@@ -351,8 +382,9 @@ jobs:
                   if run.get("name") == name
                   and workflow_matches(name, run)
                   and event_matches(name, run)
-                  and pr_matches(name, run, pr_number)
+                  and pr_matches(name, run, pr_number, head_sha)
                   and head_matches(name, run, head_ref, head_repo)
+                  and _listed_head_ok(run, head_sha)
               ]
               if not matching:
                   return None
@@ -379,7 +411,7 @@ jobs:
               for name in CHECK_NAMES:
                   run = latest_run(
                       runs, name, merged[0].get("number"),
-                      merged[0].get("head_ref"), merged[0].get("head_repo"),
+                      merged[0].get("head_ref"), merged[0].get("head_repo"), head,
                   )
                   conclusion = None if run is None else run.get("conclusion")
                   if conclusion != "success":
@@ -458,16 +490,27 @@ jobs:
                               f"{odd[0].get('base_ref')} (#{odd[0].get('number')}); refusing to pass"
                           )
                           continue
-                      try:
-                          events = gh.timeline(repo, int(merged[0]["number"]))
-                      except (ApiError, KeyError, TypeError, ValueError):
-                          reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
-                          continue
-                      if any(e.get("event") == "base_ref_changed" for e in events):
-                          reasons.append(
-                              f"{sha}: PR #{merged[0]['number']} base was changed; "
-                              "a green run may belong to another base"
-                          )
+                      blocked = False
+                      for sibling in siblings:
+                          number = sibling.get("number")
+                          if isinstance(number, bool) or not isinstance(number, int):
+                              reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
+                              blocked = True
+                              break
+                          try:
+                              events = gh.timeline(repo, number)
+                          except (ApiError, KeyError, TypeError, ValueError):
+                              reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
+                              blocked = True
+                              break
+                          if any(e.get("event") == "base_ref_changed" for e in events):
+                              reasons.append(
+                                  f"{sha}: PR #{number} base was changed; "
+                                  "a green run may belong to another base"
+                              )
+                              blocked = True
+                              break
+                      if blocked:
                           continue
                       try:
                           runs = gh.check_runs(repo, str(merged[0]["head_sha"]))
