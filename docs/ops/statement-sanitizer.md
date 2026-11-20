@@ -11,7 +11,11 @@ Put the zip (or PDFs, CSVs, OFX/QFX) under `data/inbox/` (git-ignored). Then:
 make sanitize IN=data/inbox/statements.zip OUT=data/outbox/run1
 ```
 
-`IN` can be a zip, a directory, or one file. `OUT` is created `0700`; files are `0600`.
+`IN` can be a zip, a directory, or one file. `OUT` is created `0700`; files are `0600`, created
+with `O_EXCL|O_NOFOLLOW`, so a planted symlink is never written through. A symlinked `OUT` is
+refused. A non-empty `OUT` is refused too, so stale output from an older run cannot mix with a new
+one. Add `CLEAR=1` (CLI: `--clear-out`) to empty an existing `OUT` first; it removes files only
+and refuses a subdirectory.
 Outputs per document: `doc-0001.txt` (layout text), `doc-0001.layout.json` (tokens with
 positions), `doc-0001.report.json`, plus a top-level `SUMMARY.json`. Output names are numbered;
 original file names are never copied. The report holds counts by kind and a 12-char SHA-256 of
@@ -21,12 +25,17 @@ Equivalent: `cd backend && uv run python -m app.importers.sanitize <in> <out>`.
 
 Keep an institution name so profile detection still has its fingerprint:
 `make sanitize IN=... OUT=... KEEP="First Example Bank"` (repeat or space-separate words; `KEEP`
-words are left as-is, so only keep names that are not yours).
+words are left as-is, so only keep names that are not yours). Words that double as common names
+or merchants (`mobile`, `card`, `stock`) are not in the label list. If a statement needs them as
+labels, pass them back with `--keep mobile --keep card --keep stock`.
 
 ## What it does
 
 - Default-deny: every word that is not a known label (Beginning Balance, Deposits, ...), a date,
-  an amount or punctuation is replaced with a synthetic word of the same length and case.
+  an amount or ASCII punctuation is replaced with a synthetic word of the same length and case.
+  Letters in any script (Cyrillic, Greek, CJK, fullwidth, accented) count as words, including next
+  to punctuation. Non-ASCII symbols, combining marks and exotic spaces are replaced one for one;
+  only ASCII punctuation and whitespace pass through.
 - Names, addresses, merchants, account/card/routing numbers and any other digit run are replaced.
   Emails become `userNNN@example.test`.
 - Dates keep their format and their order. Each gap is redrawn, and a clock time is replaced, so
@@ -36,7 +45,18 @@ words are left as-is, so only keep names that are not yours).
   section totals and closing are recomputed so opening + sum of transactions = closing. On a
   brokerage row, two of quantity, price and value are fresh and the third is their product.
   The report says `reconciled_before`, `reconciled_after` and `reconciliation_survived`.
-- Nothing original is logged or printed.
+- `layout.json` carries no source glyph widths. PDF tokens snap to the character-cell grid, and
+  `x1 - x0` is the sanitized text length times the cell width. Amounts anchor on their snapped
+  right edge, other tokens on their snapped left edge. A reader cannot rank surnames by width or
+  count the digits of an amount from the geometry.
+- Thousands grouping (`1,234.56` versus `1234.56`) is one choice per document, applied to the
+  synthetic value. It is never copied from the original token, so it does not reveal a magnitude.
+- OFX/QFX: every piece of text is sanitized, including bare lines, text before the first tag,
+  `<![CDATA[...]]>` bodies and `<!-- -->` comments. Only header lines with a known key and a plain
+  value (`VERSION:102`, `DATA:OFXSGML`) and a `<?xml?>` / `<?OFX?>` prolog with known keys pass
+  as-is. Anything else in them is sanitized.
+- Nothing original is logged or printed. An unexpected error prints its type only, never a message
+  or a path.
 
 ## Review before anyone else sees it
 
@@ -58,16 +78,22 @@ bank name to an agent and say the fixtures are ready. Never copy anything from `
 
 ## Safety limits
 
-Zip input rejects path traversal (`..`, absolute, backslash, drive letters), symlinks, special
+The file and byte budget is one per run, shared by every zip and plain file together. Zip
+members count against it before anything is extracted. Zip input rejects path traversal (`..`, absolute, backslash, drive letters), symlinks, special
 files and encrypted entries. Defaults: 500 files, 50 MiB per file, 500 MiB total counted from
 bytes the reader actually returns, a 200x guard on bytes written versus the compressed size, and
 50 PDF pages. Python's zip reader also stops at the declared uncompressed size; a header that
 does not match the payload fails an integrity check and the run aborts. A reader that returns
 more bytes than the header declared is rejected too. Extraction goes to a
 `0700` temp dir that is removed afterwards, including a member rejected for size or ratio.
-Other file types are skipped.
+Other file types are skipped. An unsupported compression method, a truncated stream or an I/O
+error ends the run with a fixed message that never includes a path.
 
 ## Known limits
+
+- PDF parsing (pdfplumber) runs in-process with no memory or time limit beyond the 50-page cap.
+  A hostile PDF could exhaust RAM or CPU. A portable limit (RLIMIT_AS is Linux and macOS only, and
+  a timeout needs a subprocess) is not built; only run the tool on files you downloaded yourself.
 
 - Scanned or image-only PDFs have no text layer. They are flagged `no_text_layer_needs_ocr` in
   the report and emit nothing useful. OCR is not included.

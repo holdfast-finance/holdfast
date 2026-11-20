@@ -31,9 +31,11 @@ import re
 import secrets
 import shutil
 import stat
+import string
 import sys
 import tempfile
 import zipfile
+import zlib
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -69,19 +71,19 @@ class Limits:
 _LABEL_WORDS = """
 account accounts ach activity additions adjustment adjustments advance advances amount
 amounts and annual apr at atm available balance balances basis begin beginning billing
-bonds bonus brought by card carried cashback category change charge charged charges
+bonds bonus brought by carried cashback category change charge charged charges
 check checking checks class closing continued contribution contributions core cost cr credit
 credits current customer cycle daily date dates days debit debits deposit deposited deposits
 description detail details direct dividend dividends dr due earned electronic employee
 employer end ending etf fee fees for forward from fund funds gain holdings id
 important in income information interest last limit loss market mastercard member memo
-minimum mobile money month mutual name nav net new no note notes notice number of on online
+minimum money month mutual name nav net new no note notes notice number of on online
 opening other overdraft overview pages paid past payee payment payments pending
 percentage period periods points pos position positions posted posting previous
 promotional purchase purchases quantity quarter quarterly rate realized redeemed redemption
 ref reference refund refunds regular return returned reversal reward rewards routing running
 savings security service services settle settlement shares since standard start statement
-statements status stock sub subtotal subtractions summary sweep symbol taxes the to total
+statements status sub subtotal subtractions summary sweep symbol taxes the to total
 totals trade trans transaction transactions transfer transfers type unit units unrealized
 usd value vested visa week wire with withdrawal withdrawals withdrawn withheld year yearly
 ytd
@@ -123,7 +125,9 @@ NUMERIC_DATE_RE = re.compile(
     r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\.\d{1,2}\.\d{2,4}"
 )
 EDGE_RE = re.compile(r"(?P<lead>[^\w]*)(?P<core>.*?)(?P<trail>[^\w]*)", re.DOTALL)
-PART_RE = re.compile(r"[A-Za-z]+|\d+|[^A-Za-z\d]+")
+PART_RE = re.compile(r"[^\W\d_]+|\d+|[\W_]+")
+_LETTER_RE = re.compile(r"[^\W\d_]")
+_ASCII_PUNCT_WS = frozenset(string.punctuation + " \t\r\n\f\v")
 DAY_RE = re.compile(r"(\d{1,2})([,;]?)")
 YEAR_RE = re.compile(r"(\d{4})([,;.]?)")
 MONTH_TOKEN_RE = re.compile(r"([A-Za-z]+)(\.?)([,;]?)")
@@ -140,6 +144,17 @@ _DATE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("compact", re.compile(r"((?:19|20)\d{2})()(\d{2})(\d{2})")),
 ]
 
+OFX_TAG_RE = re.compile(r"<(/?)([A-Za-z0-9.]+)>([^<\r\n]*)")
+OFX_PROLOG_RE = re.compile(r"<\?(xml|OFX)((?:\s+[A-Za-z]+=\"[^\"<>]*\")*)\s*\?>")
+OFX_ATTR_RE = re.compile(r'([A-Za-z]+)="([^"<>]*)"')
+OFX_WRAPPED_RE = re.compile(r"(<!\[CDATA\[|<!--)(.*?)(\]\]>|-->)", re.DOTALL)
+OFX_PROLOG_KEYS = frozenset(
+    {"OFXHEADER", "VERSION", "SECURITY", "ENCODING", "STANDALONE", "OLDFILEUID", "NEWFILEUID"}
+)
+# Header and prolog values that may pass verbatim. Everything else goes through the sanitizer.
+OFX_SAFE_WORDS = frozenset(
+    {"NONE", "OFXSGML", "USASCII", "UTF-8", "UNICODE", "TYPE1", "TYPE2", "XML", "YES", "NO"}
+)
 OFX_KEEP_TAGS = frozenset(
     {"TRNTYPE", "CURDEF", "CODE", "SEVERITY", "ACCTTYPE", "LANGUAGE", "CURRENCY", "INVACCTTYPE"}
 )
@@ -157,6 +172,13 @@ OFX_BAL_TAGS = frozenset({"BALAMT", "AVAILCASH", "MARGINBALANCE"})
 _BROKER_QTY = frozenset({"quantity", "qty", "units", "shares"})
 _BROKER_PRICE = frozenset({"price", "unitprice", "unit price"})
 _BROKER_VALUE = frozenset({"value", "mktval", "marketvalue", "market value"})
+
+
+def _safe_header_value(value: str) -> bool:
+    return (
+        value in OFX_SAFE_WORDS
+        or re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,3}){0,2}", value) is not None
+    )
 
 
 def _amount_match(text: str, *, int_ok: bool = False) -> re.Match[str] | None:
@@ -214,12 +236,15 @@ class _Amt:
     role: str
 
 
-def _render_signed(match: re.Match[str], signed: Decimal) -> str:
-    """Format ``signed`` in the currency and grouping style of ``match``."""
+def _render_signed(match: re.Match[str], signed: Decimal, *, grouped: bool) -> str:
+    """Format ``signed`` in the currency style of ``match``.
+
+    Thousands grouping is a document-wide choice applied to the synthetic value. It is never
+    read from the original token, which would leak a magnitude bucket.
+    """
     num = match.group("num") or "0"
     euro = _num_is_euro(num)
     decimals = _num_decimals(num, euro=euro)
-    grouped = ("," in num) and not euro
     lead_dot = num.startswith(".")
     body = _format_mag(abs(signed), decimals, grouped=grouped, euro=euro, lead_dot=lead_dot)
     cur = match.group("cur") or ""
@@ -365,6 +390,7 @@ class Sanitizer:
         self._cell_plan: dict[tuple[int, int], str] = {}
         self._ofx_plan: dict[tuple[int, int], str] = {}
         self._ofx_used: Counter[int] = Counter()
+        self.grouped = False  # document-wide thousands grouping, set by observe_grouping
 
     # -- generators --------------------------------------------------------------------------
     def _synth_word(self, original: str) -> str:
@@ -400,6 +426,16 @@ class Sanitizer:
             out = "".join(chars)
         self._digits[original] = out
         return out
+
+    def observe_grouping(self, rows: list[list[str]]) -> None:
+        """One document-wide bit: does this document group thousands with separators?"""
+        for texts in rows:
+            for text in texts:
+                for found in AMOUNT_SEARCH_RE.finditer(text):
+                    num = found.group("num") or ""
+                    if "," in num and not _num_is_euro(num):
+                        self.grouped = True
+                        return
 
     # -- dates -------------------------------------------------------------------------------
     def prescan_years(self, texts: Iterable[str]) -> None:
@@ -763,9 +799,8 @@ class Sanitizer:
         decimals = _num_decimals(num, euro=euro)
         original = _parse_num(num, euro=euro)
         magnitude = self._draw_mag(decimals, forbid=original)
-        grouped = ("," in num) and not euro
         body = _format_mag(
-            magnitude, decimals, grouped=grouped, euro=euro, lead_dot=num.startswith(".")
+            magnitude, decimals, grouped=self.grouped, euro=euro, lead_dot=num.startswith(".")
         )
         self.replaced["amount"] += 1
         return text[: match.start("num")] + body + text[match.end("num") :]
@@ -779,9 +814,9 @@ class Sanitizer:
         """Replace every word and every digit run. No length is exempt."""
         out: list[str] = []
         for part in PART_RE.findall(text):
-            if part.isalpha():
+            if _LETTER_RE.match(part):
                 low = part.lower()
-                if low in LABELS or low in self.keep:
+                if part.isascii() and (low in LABELS or low in self.keep):
                     self.kept["label"] += 1
                     out.append(part)
                 elif _is_mask(part):
@@ -790,13 +825,30 @@ class Sanitizer:
                 else:
                     self.replaced["word"] += 1
                     out.append(self._synth_word(part))
-            elif part.isdigit():
+            elif part[:1].isdecimal():
                 self.replaced["account" if len(part) >= 9 else "number"] += 1
                 out.append(self._synth_digits(part))
             else:
-                if part.strip():
-                    self.kept["punctuation"] += 1
-                out.append(part)
+                out.append(self._scrub_punct(part))
+        return "".join(out)
+
+    def _scrub_punct(self, run: str) -> str:
+        """Keep ASCII punctuation and whitespace. Anything else is replaced one for one.
+
+        Non-ASCII symbols, combining marks, zero-width and exotic spaces can carry name or
+        script information, so they never pass through verbatim.
+        """
+        if all(ch in _ASCII_PUNCT_WS for ch in run):
+            if run.strip():
+                self.kept["punctuation"] += 1
+            return run
+        out: list[str] = []
+        for ch in run:
+            if ch in _ASCII_PUNCT_WS:
+                out.append(ch)
+            else:
+                self.replaced["symbol"] += 1
+                out.append(self._rng.choice("bcdfglmnprstvz"))
         return "".join(out)
 
     def _spans(self, text: str) -> list[tuple[int, int, str, str]]:
@@ -923,8 +975,8 @@ class Sanitizer:
             edge = EDGE_RE.fullmatch(t)
             core = edge.group("core") if edge is not None else t
             if EMAIL_RE.fullmatch(core):
-                lead = edge.group("lead") if edge is not None else ""
-                trail = edge.group("trail") if edge is not None else ""
+                lead = self._scrub_punct(edge.group("lead")) if edge is not None else ""
+                trail = self._scrub_punct(edge.group("trail")) if edge is not None else ""
                 self.replaced["email"] += 1
                 return f"{lead}user{self._rng.randint(100, 999)}@example.test{trail}"
         glued = self._format_glued(t)
@@ -937,9 +989,17 @@ class Sanitizer:
             shifted = self._shift_date(core)
             if shifted is not None:
                 self.replaced["date"] += 1
-                return edge.group("lead") + shifted + edge.group("trail")
+                return (
+                    self._scrub_punct(edge.group("lead"))
+                    + shifted
+                    + self._scrub_punct(edge.group("trail"))
+                )
             if PERCENT_RE.fullmatch(core):
-                return edge.group("lead") + self._fresh_percent(core) + edge.group("trail")
+                return (
+                    self._scrub_punct(edge.group("lead"))
+                    + self._fresh_percent(core)
+                    + self._scrub_punct(edge.group("trail"))
+                )
         fresh = self._fresh_amount(t, int_ok=int_ok)
         if fresh is not None:
             return fresh
@@ -1081,26 +1141,27 @@ class Sanitizer:
             for site in row_sites:
                 if site.role == "txn":
                     signed = next(value for item, value in line_txns if item is site)
-                    display = _inject(site, abs(signed))
+                    display = _inject(site, abs(signed), grouped=self.grouped)
                 elif site.role == "opening":
-                    display = _render_signed(site.match, open_signed)
+                    display = _render_signed(site.match, open_signed, grouped=self.grouped)
                 elif site.role == "closing" and close_signed is not None:
-                    display = _render_signed(site.match, close_signed)
+                    display = _render_signed(site.match, close_signed, grouped=self.grouped)
                 elif site.role == "running":
-                    display = _render_signed(site.match, balance_after)
+                    display = _render_signed(site.match, balance_after, grouped=self.grouped)
                 elif site.role == "section":
-                    display = _render_signed(site.match, section)
+                    display = _render_signed(site.match, section, grouped=self.grouped)
                     section = Decimal(0)
                 elif site.role == "qty" and qty_mag is not None:
-                    display = _inject(site, qty_mag)
+                    display = _inject(site, qty_mag, grouped=self.grouped)
                 elif site.role == "price" and price_mag is not None:
-                    display = _inject(site, price_mag)
+                    display = _inject(site, price_mag, grouped=self.grouped)
                 elif site.role == "value" and product is not None:
-                    display = _render_product(site.match, product)
+                    display = _render_product(site.match, product, grouped=self.grouped)
                 else:
                     display = _inject(
                         site,
                         self._draw_mag(_match_decimals(site.match), forbid=abs(site.signed)),
+                        grouped=self.grouped,
                     )
                 self._cell_plan[(site.line, site.tok)] = display
 
@@ -1146,17 +1207,21 @@ class Sanitizer:
                 txn_at += 1
                 balance += value
                 seen_txn_before_bal += 1
-                display = _render_signed(match, value)
+                display = _render_signed(match, value, grouped=self.grouped)
             elif identity and bals and (line_no, nth) == (bals[0][0], bals[0][1]):
-                display = _render_signed(match, open_signed)
+                display = _render_signed(match, open_signed, grouped=self.grouped)
             elif identity and bals and (line_no, nth) == (bals[-1][0], bals[-1][1]):
-                display = _render_signed(match, close_signed or Decimal(0))
+                display = _render_signed(match, close_signed or Decimal(0), grouped=self.grouped)
             elif tag in {"UNITS", "UNITPRICE", "MKTVAL"}:
-                display = _render_signed(match, self._signed_ofx(signed, match))
+                display = _render_signed(
+                    match, self._signed_ofx(signed, match), grouped=self.grouped
+                )
                 self._ofx_plan[(line_no, nth)] = display
                 continue
             else:
-                display = _render_signed(match, self._signed_ofx(signed, match))
+                display = _render_signed(
+                    match, self._signed_ofx(signed, match), grouped=self.grouped
+                )
             self._ofx_plan[(line_no, nth)] = display
         self._tie_ofx_broker(rows)
 
@@ -1187,19 +1252,25 @@ class Sanitizer:
                 quantity = self._draw_mag(_match_decimals(units[2]))
                 unit_price = self._draw_mag(_match_decimals(price[2]))
                 product = quantity * unit_price
-                self._ofx_plan[(units[0], units[1])] = _render_signed(units[2], quantity)
-                self._ofx_plan[(price[0], price[1])] = _render_signed(price[2], unit_price)
-                self._ofx_plan[(market[0], market[1])] = _render_signed(market[2], product)
+                self._ofx_plan[(units[0], units[1])] = _render_signed(
+                    units[2], quantity, grouped=self.grouped
+                )
+                self._ofx_plan[(price[0], price[1])] = _render_signed(
+                    price[2], unit_price, grouped=self.grouped
+                )
+                self._ofx_plan[(market[0], market[1])] = _render_signed(
+                    market[2], product, grouped=self.grouped
+                )
                 pending = {}
 
     # -- OFX ---------------------------------------------------------------------------------
     def ofx_line(self, line: str, line_no: int = 0) -> str:
         head = re.fullmatch(r"([A-Z]+):(.*)", line)
-        if head:
-            if head[1] in OFX_HEADER_KEEP:
-                self.kept["ofx_header"] += 1
-                return line
-            return f"{head[1]}:{self.token(head[2])}"
+        if head and head[1] in OFX_HEADER_KEEP and _safe_header_value(head[2]):
+            self.kept["ofx_header"] += 1
+            return line
+        if head and "<" not in line:
+            return f"{self.text(head[1])}:{self.token(head[2])}"
         cursor = 0
 
         def sub(match: re.Match[str]) -> str:
@@ -1216,7 +1287,38 @@ class Sanitizer:
                     return f"<{tag}>{planned}"
             return f"<{tag}>{self._ofx_value(tag, value)}"
 
-        return re.sub(r"<(/?)([A-Za-z0-9.]+)>([^<\r\n]*)", sub, line)
+        out: list[str] = []
+        pos = 0
+        for found in OFX_TAG_RE.finditer(line):
+            if found.start() > pos:
+                out.append(self._ofx_gap(line[pos : found.start()]))
+            out.append(sub(found))
+            pos = found.end()
+        if pos < len(line):
+            out.append(self._ofx_gap(line[pos:]))
+        return "".join(out)
+
+    def _ofx_gap(self, gap: str) -> str:
+        """Sanitize text the tag regex did not claim: prologs, CDATA, comments, bare lines."""
+        if all(ch in " \t\r\n" for ch in gap):
+            return gap
+        lead = gap[: len(gap) - len(gap.lstrip(" \t\r\n"))]
+        trail = gap[len(gap.rstrip(" \t\r\n")) :]
+        core = gap.strip(" \t\r\n")
+        prolog = OFX_PROLOG_RE.fullmatch(core)
+        if prolog is not None:
+            attrs: list[str] = []
+            for key, value in OFX_ATTR_RE.findall(prolog.group(2)):
+                if key.upper() not in OFX_PROLOG_KEYS:
+                    return lead + self.text(core) + trail
+                shown = value if _safe_header_value(value) else self._deny(value)
+                attrs.append(f' {key}="{shown}"')
+            self.kept["ofx_header"] += 1
+            return f"{lead}<?{prolog.group(1)}{''.join(attrs)}?>{trail}"
+        wrapped = OFX_WRAPPED_RE.fullmatch(core)
+        if wrapped is not None:
+            return f"{lead}{wrapped.group(1)}{self.text(wrapped.group(2))}{wrapped.group(3)}{trail}"
+        return lead + self.text(core) + trail
 
     def _ofx_value(self, tag: str, value: str) -> str:
         stripped = value.strip()
@@ -1257,24 +1359,24 @@ def _match_decimals(match: re.Match[str]) -> int:
     return _num_decimals(num, euro=_num_is_euro(num))
 
 
-def _inject(site: _Amt, magnitude: Decimal) -> str:
+def _inject(site: _Amt, magnitude: Decimal, *, grouped: bool) -> str:
     num = site.match.group("num") or "0"
     euro = _num_is_euro(num)
     body = _format_mag(
         magnitude,
         _num_decimals(num, euro=euro),
-        grouped=("," in num) and not euro,
+        grouped=grouped,
         euro=euro,
         lead_dot=num.startswith("."),
     )
     return site.raw[: site.match.start("num")] + body + site.raw[site.match.end("num") :]
 
 
-def _render_product(match: re.Match[str], product: Decimal) -> str:
+def _render_product(match: re.Match[str], product: Decimal, *, grouped: bool) -> str:
     decimals = _match_decimals(match)
     quantum = Decimal(10) ** -decimals if decimals else Decimal(1)
     if product.quantize(quantum, rounding=ROUND_HALF_EVEN) == product:
-        return _render_signed(match, product)
+        return _render_signed(match, product, grouped=grouped)
     cur = match.group("cur") or ""
     sign = "-" if product < 0 else ""
     return f"{sign}{cur}{format(product, 'f')}"
@@ -1460,6 +1562,7 @@ def sanitize_doc(
     s = Sanitizer(seed, keep_words)
     rows = [[tok.text for tok in ln.tokens] for page in doc.pages for ln in page.lines]
     s.observe_lines(rows, kind=doc.kind)
+    s.observe_grouping(rows)
     s.plan(rows, kind=doc.kind)
     before: list[list[str]] = []
     after: list[list[str]] = []
@@ -1480,9 +1583,7 @@ def sanitize_doc(
             n_tokens += len(texts)
             before.append(texts)
             after.append(new)
-            new_lines.append(
-                Line(ln.y, [Token(t.x0, t.x1, n) for t, n in zip(ln.tokens, new, strict=True)])
-            )
+            new_lines.append(Line(ln.y, _place_tokens(doc.kind, page, ln, new)))
         out_pages.append(Page(page.width, page.height, new_lines))
     rec_before = check_reconciliation(before) if doc.kind != "ofx" else None
     rec_after = check_reconciliation(after) if doc.kind != "ofx" else None
@@ -1502,6 +1603,33 @@ def sanitize_doc(
     return SanitizedDoc(Doc(doc.kind, out_pages, doc.warnings), report)
 
 
+def cell_width(page: Page) -> int:
+    """Tenth-points per character cell. Shared by the renderer and the layout snapping."""
+    return max(page.width // 100, 10)
+
+
+def _place_tokens(kind: str, page: Page, line: Line, texts: list[str]) -> list[Token]:
+    """Tokens for the sanitized line, with geometry that carries no source glyph widths.
+
+    PDF tokens snap to the character-cell grid and take their width from the *sanitized* text
+    length. Amounts anchor on the snapped right edge (they are right-aligned in the source),
+    everything else on the snapped left edge. CSV and OFX positions are indexes, kept as-is.
+    """
+    if kind != "pdf":
+        return [Token(t.x0, t.x1, n) for t, n in zip(line.tokens, texts, strict=True)]
+    cw = cell_width(page)
+    placed: list[Token] = []
+    for tok, new in zip(line.tokens, texts, strict=True):
+        span = len(new) * cw
+        if AMOUNT_RE.fullmatch(new):
+            x1 = ((tok.x1 + cw // 2) // cw) * cw
+            placed.append(Token(max(x1 - span, 0), max(x1 - span, 0) + span, new))
+        else:
+            x0 = (tok.x0 // cw) * cw
+            placed.append(Token(x0, x0 + span, new))
+    return placed
+
+
 def render_text(doc: Doc) -> str:
     """Layout-preserving text. Pages are separated by a form feed."""
     if doc.kind == "csv":
@@ -1515,7 +1643,7 @@ def render_text(doc: Doc) -> str:
         return "\n".join(t.text for p in doc.pages for ln in p.lines for t in ln.tokens) + "\n"
     chunks: list[str] = []
     for page in doc.pages:
-        cw = max(page.width // 100, 10)  # tenth-points per character cell
+        cw = cell_width(page)
         gaps = [b.y - a.y for a, b in zip(page.lines, page.lines[1:], strict=False)]
         typical = sorted(gaps)[len(gaps) // 2] if gaps else 0
         rows: list[str] = []
@@ -1565,11 +1693,26 @@ def layout_json(doc: Doc) -> str:
 # Input gathering: safe zip extraction, symlink rejection, limits
 # ---------------------------------------------------------------------------------------------
 def _write_private(path: Path, data: bytes | str) -> None:
+    """Create ``path`` 0600. Never follows a symlink and never overwrites an existing file."""
     raw = data.encode() if isinstance(data, str) else data
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(raw)
-    path.chmod(0o600)
+        os.fchmod(fh.fileno(), 0o600)
+
+
+@dataclass
+class _Budget:
+    """One file and byte budget shared by every zip and plain file in a run."""
+
+    files: int = 0
+    bytes: int = 0
+
+
+# Raised by the zip, zlib and file layers on hostile or damaged input. The messages can carry
+# paths, so they are never propagated: callers map them to a fixed SanitizeError.
+_READ_ERRORS = (NotImplementedError, EOFError, zlib.error, OSError, RuntimeError)
 
 
 def _safe_member(name: str) -> bool:
@@ -1580,20 +1723,40 @@ def _safe_member(name: str) -> bool:
     return ".." not in Path(name).parts
 
 
-def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -> list[Path]:
-    """Extract supported members flat into ``dest`` under synthetic names."""
+def extract_zip(
+    zpath: Path,
+    dest: Path,
+    limits: Limits,
+    start_index: int = 0,
+    budget: _Budget | None = None,
+) -> list[Path]:
+    """Extract supported members flat into ``dest`` under synthetic names.
+
+    ``budget`` is shared across the whole run so several zips cannot each stay under a
+    per-zip limit while exceeding it together.
+    """
+    budget = budget if budget is not None else _Budget()
     out: list[Path] = []
     try:
         zf = zipfile.ZipFile(zpath)
     except zipfile.BadZipFile as exc:
         raise SanitizeError("input is not a valid zip") from exc
+    except _READ_ERRORS:
+        raise SanitizeError("input could not be read") from None
     with zf:
         infos = zf.infolist()
-        if len(infos) > limits.max_files:
+        budget.files += len(infos)
+        if len(infos) > limits.max_files or budget.files > limits.max_files:
             raise SanitizeError("zip has too many entries")
         if sum(i.file_size for i in infos) > limits.max_total_bytes:
             raise SanitizeError("zip uncompressed size exceeds limit")
-        total_written = 0
+        declared = sum(
+            i.file_size
+            for i in infos
+            if not i.is_dir() and Path(i.filename).suffix.lower() in SUPPORTED_SUFFIXES
+        )
+        if budget.bytes + declared > limits.max_total_bytes:
+            raise SanitizeError("zip uncompressed size exceeds limit")
         for info in infos:
             if not _safe_member(info.filename):
                 raise SanitizeError("zip entry path is unsafe (traversal or absolute)")
@@ -1619,10 +1782,10 @@ def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -
                 with os.fdopen(fd, "wb") as fh, zf.open(info) as src:
                     while chunk := src.read(1024 * 1024):
                         written += len(chunk)
-                        total_written += len(chunk)
+                        budget.bytes += len(chunk)
                         if written > limits.max_file_bytes:
                             raise SanitizeError("zip entry exceeds the per-file size limit")
-                        if total_written > limits.max_total_bytes:
+                        if budget.bytes > limits.max_total_bytes:
                             raise SanitizeError("zip uncompressed size exceeds limit")
                         fh.write(chunk)
                 if written > info.file_size:
@@ -1637,6 +1800,9 @@ def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -
             except SanitizeError:
                 target.unlink(missing_ok=True)
                 raise
+            except _READ_ERRORS:
+                target.unlink(missing_ok=True)
+                raise SanitizeError("zip entry could not be read") from None
             out.append(target)
     return out
 
@@ -1658,16 +1824,22 @@ def gather_inputs(src: Path, work: Path, limits: Limits) -> list[Path]:
                     raise SanitizeError("input directory contains a symlink")
             dirs.sort()
             candidates.extend(Path(root) / f for f in sorted(files))
-    total = 0
+    budget = _Budget()
     for p in candidates:
         suffix = p.suffix.lower()
         if suffix == ".zip":
-            found.extend(extract_zip(p, work, limits, start_index=len(found)))
+            found.extend(extract_zip(p, work, limits, start_index=len(found), budget=budget))
         elif suffix in SUPPORTED_SUFFIXES:
-            size = p.stat().st_size
-            total += size
-            if size > limits.max_file_bytes or total > limits.max_total_bytes:
+            try:
+                size = p.stat().st_size
+            except OSError:
+                raise SanitizeError("input could not be read") from None
+            budget.bytes += size
+            budget.files += 1
+            if size > limits.max_file_bytes or budget.bytes > limits.max_total_bytes:
                 raise SanitizeError("input exceeds the size limits")
+            if budget.files > limits.max_files:
+                raise SanitizeError("too many input files")
             found.append(p)
         if len(found) > limits.max_files:
             raise SanitizeError("too many input files")
@@ -1677,6 +1849,27 @@ def gather_inputs(src: Path, work: Path, limits: Limits) -> list[Path]:
 # ---------------------------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------------------------
+def _prepare_out(out: Path, *, clear: bool) -> None:
+    """Create or validate the output directory. Refuses symlinks and stale content."""
+    if out.is_symlink():
+        raise SanitizeError("output directory is a symlink")
+    try:
+        if out.exists():
+            if not out.is_dir():
+                raise SanitizeError("output path is not a directory")
+            stale = list(out.iterdir())
+            if stale and not clear:
+                raise SanitizeError("output directory is not empty (pass --clear-out to wipe it)")
+            for entry in stale:
+                if entry.is_dir() and not entry.is_symlink():
+                    raise SanitizeError("output directory contains a subdirectory")
+                entry.unlink()
+        out.mkdir(mode=0o700, parents=True, exist_ok=True)
+        out.chmod(0o700)
+    except OSError:
+        raise SanitizeError("output directory could not be prepared") from None
+
+
 def sanitize_path(
     src: Path,
     out: Path | None,
@@ -1684,18 +1877,21 @@ def sanitize_path(
     keep_words: Iterable[str] = (),
     seed: int | None = None,
     limits: Limits | None = None,
+    clear_out: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     """Sanitize ``src`` into ``out`` (or nothing when ``out`` is None). Returns (summary, texts)."""
     limits = limits or Limits()
     if out is not None:
-        out.mkdir(mode=0o700, parents=True, exist_ok=True)
-        out.chmod(0o700)
+        _prepare_out(out, clear=clear_out)
     work = Path(tempfile.mkdtemp(prefix="holdfast-sanitize-"))
     work.chmod(0o700)
     docs: list[dict[str, Any]] = []
     texts: list[str] = []
     try:
-        files = gather_inputs(src, work, limits)
+        try:
+            files = gather_inputs(src, work, limits)
+        except OSError:
+            raise SanitizeError("input could not be read") from None
         for n, path in enumerate(files, 1):
             name = f"doc-{n:04d}"
             entry: dict[str, Any] = {"doc": name, "suffix": path.suffix.lower()}
@@ -1754,6 +1950,11 @@ def main(argv: list[str] | None = None) -> int:
         "--review", action="store_true", help="print sanitized output only, write nothing"
     )
     ap.add_argument(
+        "--clear-out",
+        action="store_true",
+        help="empty an existing OUT first (a non-empty OUT is refused without this)",
+    )
+    ap.add_argument(
         "--keep",
         action="append",
         default=[],
@@ -1765,11 +1966,17 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("out is required unless --review is given")
     try:
         summary, texts = sanitize_path(
-            args.source, None if args.review else args.out, keep_words=args.keep
+            args.source,
+            None if args.review else args.out,
+            keep_words=args.keep,
+            clear_out=args.clear_out,
         )
     except SanitizeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:  # last resort: report the type only, never a message or traceback
+        print(f"error: unexpected {type(exc).__name__}", file=sys.stderr)
+        return 3
     if args.review:
         sys.stdout.write("\n".join(texts))
     print(
