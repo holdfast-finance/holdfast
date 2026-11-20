@@ -60,6 +60,7 @@ HOUSEHOLD_TABLES = (
     "agent_conversation",
     "agent_message",
     "agent_finding",
+    "job_run",
 )
 IDENTITY_TABLES = ("app_user", "webauthn_credential", "auth_session", "totp_recovery_code")
 REFERENCE_TABLES = ("institution", "security")
@@ -373,6 +374,15 @@ def seed_household(engine: Engine, label: str) -> Seed:
         finding = _insert(
             c, "agent_finding", **h, category="cashflow", title="Example", body_md="Synthetic."
         )
+        job_run = _insert(
+            c,
+            "job_run",
+            **h,
+            job_name="example.noop",
+            idempotency_key=f"seed-{label}",
+            payload={"household_id": str(hid)},
+            max_attempts=3,
+        )
 
     rows: dict[str, dict[str, Any]] = {
         "person": {"id": p1},
@@ -402,6 +412,7 @@ def seed_household(engine: Engine, label: str) -> Seed:
         "agent_conversation": {"id": convo},
         "agent_message": {"id": msg},
         "agent_finding": {"id": finding},
+        "job_run": {"id": job_run},
     }
     assert set(rows) == set(HOUSEHOLD_TABLES)
     return Seed(household_id=hid, person_ids=[p1, p2], rows=rows)

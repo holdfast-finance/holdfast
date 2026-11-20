@@ -50,7 +50,7 @@ $Help = [ordered]@{
     'ports'   = 'Assert no compose service publishes beyond the rules'
     'sync'    = 'Fast-forward main to origin/main; elsewhere print ahead/behind'
     'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
-    'test-locked' = 'test under an exclusive lock so parallel worktrees share the test DB safely'
+    'test-locked' = 'test under an exclusive lock (${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock) so parallel worktrees share the test DB safely'
     'ci-minutes'  = 'Billed Actions minutes this UTC month (used/2000)'
     'ci-local'    = 'Local merge gate for a PR head: dev.ps1 ci-local <n>'
 }
@@ -194,8 +194,39 @@ switch ($Target) {
         bash scripts/wt-new.sh $Service $Base
     }
     'test-locked' {
-        $lockPath = Join-Path ([System.IO.Path]::GetTempPath()) 'holdfast-make-test.lock'
-        $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        # Same path as `make test-locked`. FileShare.None fails at once on a sharing violation;
+        # retry until HOLDFAST_TEST_LOCK_WAIT seconds (default 1800), then error.
+        $lockDir = if ([string]::IsNullOrEmpty($env:XDG_RUNTIME_DIR)) { '/tmp' } else { $env:XDG_RUNTIME_DIR }
+        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+        $lockPath = Join-Path $lockDir 'holdfast-make-test.lock'
+        $waitSec = 1800
+        if (-not [string]::IsNullOrEmpty($env:HOLDFAST_TEST_LOCK_WAIT)) {
+            $parsed = 0
+            if (-not [int]::TryParse($env:HOLDFAST_TEST_LOCK_WAIT, [ref]$parsed) -or $parsed -lt 0) {
+                throw 'test-locked: HOLDFAST_TEST_LOCK_WAIT must be a non-negative integer number of seconds.'
+            }
+            $waitSec = $parsed
+        }
+        $lock = $null
+        $started = [DateTimeOffset]::UtcNow
+        while ($null -eq $lock) {
+            try {
+                $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+            } catch {
+                $ex = $_.Exception
+                $isIo = $false
+                while ($null -ne $ex) {
+                    if ($ex -is [System.IO.IOException]) { $isIo = $true; break }
+                    $ex = $ex.InnerException
+                }
+                if (-not $isIo) { throw }
+                $elapsed = ([DateTimeOffset]::UtcNow - $started).TotalSeconds
+                if ($elapsed -ge $waitSec) {
+                    throw "test-locked: timed out after ${waitSec}s waiting for lock ${lockPath}"
+                }
+                Start-Sleep -Milliseconds 200
+            }
+        }
         try { Invoke-Test } finally { $lock.Dispose() }
     }
     'ci-minutes' { & $Python scripts/ci_minutes.py }

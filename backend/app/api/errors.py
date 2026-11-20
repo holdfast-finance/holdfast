@@ -1,7 +1,7 @@
 """The API's one error shape: ``{"error": {"code": "...", "message": "..."}}``.
 
-Codes and statuses match ``web/src/api/types.ts`` ``ERROR_CODES`` exactly. Messages are short and
-human, and never echo user input, tokens or internals.
+Codes and statuses match ``ERROR_CODES`` in ``web/src/api/contracts.ts``. Messages are
+short and human, and never echo user input, tokens or internals.
 """
 
 from __future__ import annotations

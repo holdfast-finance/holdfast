@@ -1,31 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api } from '@/api/client'
-import type {
-  AuditPage,
-  Household,
-  HouseholdUpdate,
-  InviteRequest,
-  InviteResponse,
-  PeopleList,
-  Person,
-  PersonCreate,
-  PersonUpdate,
-} from '@/api/types'
+import { api, readData } from '@/api/client'
+import type { components } from '@/api/schema'
 import { queryKeys } from '@/app/queryClient'
 import { withReauth } from '@/stores/reauth'
+
+type Schemas = components['schemas']
 
 export function useHousehold() {
   return useQuery({
     queryKey: queryKeys.household,
-    queryFn: ({ signal }) => api<Household>('/household', { signal }),
+    queryFn: ({ signal }) => readData(api.GET('/api/household', { signal })),
   })
 }
 
 export function useRenameHousehold() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (body: HouseholdUpdate) => api<Household>('/household', { method: 'PATCH', body }),
+    mutationFn: (body: Schemas['HouseholdUpdate']) =>
+      readData(api.PATCH('/api/household', { body })),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: queryKeys.household, exact: true })
       await client.invalidateQueries({ queryKey: queryKeys.me })
@@ -36,16 +29,12 @@ export function useRenameHousehold() {
 export function usePeople() {
   return useQuery({
     queryKey: queryKeys.people,
-    queryFn: ({ signal }) => api<PeopleList>('/household/people', { signal }),
+    queryFn: ({ signal }) => readData(api.GET('/api/household/people', { signal })),
   })
 }
 
-function personPath(id: string): string {
-  return `/household/people/${encodeURIComponent(id)}`
-}
-
-export async function createPerson(body: PersonCreate): Promise<Person> {
-  return api<Person>('/household/people', { method: 'POST', body })
+export async function createPerson(body: Schemas['PersonCreate']) {
+  return readData(api.POST('/api/household/people', { body }))
 }
 
 export function useCreatePerson() {
@@ -59,8 +48,13 @@ export function useCreatePerson() {
 export function useUpdatePerson() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, body }: { id: string; body: PersonUpdate }) =>
-      api<Person>(personPath(id), { method: 'PATCH', body }),
+    mutationFn: ({ id, body }: { id: string; body: Schemas['PersonUpdate'] }) =>
+      readData(
+        api.PATCH('/api/household/people/{person_id}', {
+          body,
+          params: { path: { person_id: id } },
+        }),
+      ),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: queryKeys.people })
       await client.invalidateQueries({ queryKey: queryKeys.me })
@@ -71,22 +65,32 @@ export function useUpdatePerson() {
 export function useDeletePerson() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) => api<undefined>(personPath(id), { method: 'DELETE' }),
+    mutationFn: async (id: string) => {
+      await api.DELETE('/api/household/people/{person_id}', { params: { path: { person_id: id } } })
+    },
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.people }),
   })
 }
 
 export function useInvitePerson() {
   return useMutation({
-    mutationFn: ({ id, body }: { id: string; body: InviteRequest }) =>
-      withReauth(() => api<InviteResponse>(`${personPath(id)}/invite`, { method: 'POST', body })),
+    mutationFn: ({ id, body }: { id: string; body: Schemas['InviteIn'] }) =>
+      withReauth(() =>
+        readData(
+          api.POST('/api/household/people/{person_id}/invite', {
+            body,
+            params: { path: { person_id: id } },
+          }),
+        ),
+      ),
   })
 }
 
 export function useAudit(enabled: boolean, limit = 20) {
   return useQuery({
     queryKey: [...queryKeys.audit, limit],
-    queryFn: ({ signal }) => api<AuditPage>('/audit', { signal, query: { limit } }),
+    queryFn: ({ signal }) =>
+      readData(api.GET('/api/audit', { signal, params: { query: { limit } } })),
     enabled,
   })
 }

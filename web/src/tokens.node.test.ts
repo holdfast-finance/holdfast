@@ -130,17 +130,20 @@ describe.each(brandEntries)('%s: WCAG AA contrast', (_brand, t) => {
     light: mixed(t.raised.toward.light, t.raised.percent / 100, base.light),
     dark: mixed(t.raised.toward.dark, t.raised.percent / 100, base.dark),
   }
-  const mutedCases = THEMES.flatMap((theme) =>
-    [...grounds, raised].map(
-      (g, i) =>
-        [
-          `${theme} text-muted on ground ${String(i)}`,
-          contrast(hexToRgb(t.muted[theme]), hexToRgb(g[theme])),
-        ] as const,
-    ),
+  const foregroundCases = THEMES.flatMap((theme) =>
+    [...grounds, raised].flatMap((g, i) => [
+      [
+        `${theme} text on ground ${String(i)}`,
+        contrast(hexToRgb(t.foreground[theme]), hexToRgb(g[theme])),
+      ] as const,
+      [
+        `${theme} text-muted on ground ${String(i)}`,
+        contrast(hexToRgb(t.muted[theme]), hexToRgb(g[theme])),
+      ] as const,
+    ]),
   )
 
-  it.each(mutedCases)('%s >= 4.5 (got %f)', (_label, ratio) => {
+  it.each(foregroundCases)('%s >= 4.5 (got %f)', (_label, ratio) => {
     expect(ratio).toBeGreaterThanOrEqual(4.5)
   })
 })

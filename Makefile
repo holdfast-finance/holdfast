@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local api-types api-types-check api-types-test
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -79,7 +79,7 @@ test: ## Backend pytest (needs `make up` for the db) + web vitest
 	else echo "skip backend: no backend/pyproject.toml"; fi
 	@if [ -f web/package.json ]; then cd web && pnpm test --run; else echo "skip web: no web/package.json"; fi
 
-lint: ## ruff + ruff format --check + mypy + import-linter, eslint + tsc
+lint: api-types-check ## ruff + mypy + import-linter, OpenAPI drift, eslint + tsc
 	@if [ -f backend/pyproject.toml ]; then cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy app; else echo "skip backend: no backend/pyproject.toml"; fi
 	@$(MAKE) --no-print-directory lint-imports
 	@if [ -f web/package.json ]; then cd web && pnpm lint && pnpm typecheck; else echo "skip web: no web/package.json"; fi
@@ -108,7 +108,9 @@ sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
-	flock /tmp/holdfast-make-test.lock $(MAKE) test
+	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \
+	mkdir -p "$$(dirname "$$lock")"; \
+	flock "$$lock" $(MAKE) test
 
 health: ## GET /api/health through Caddy
 	curl -fsSk https://localhost/api/health; echo
@@ -129,3 +131,27 @@ ci-minutes: ## Billed Actions minutes this UTC month (used/2000)
 ci-local: ## Local merge gate for a PR head (make ci-local PR=<n>)
 	@test -n "$(PR)" || { echo "usage: make ci-local PR=<n>" >&2; exit 2; }
 	python3 scripts/ci_local.py "$(PR)"
+
+# Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).
+# This target also diffs the full openapi-typescript output. No workflow edit: Harbor owns CI.
+api-types api-types-check: ## Generate web API types, or fail if schema.d.ts drifted
+	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
+	  (cd backend && uv run --locked python -m scripts.dump_openapi) > "$$tmp/schema.json"; \
+	  pnpm --dir web exec openapi-typescript "$$tmp/schema.json" -o "$$tmp/schema.d.ts"; \
+	  checksum=$$(sha256sum "$$tmp/schema.json"); \
+	  { printf '// holdfast-schema-sha256: %s\n' "$${checksum%% *}"; \
+	    cat "$$tmp/schema.d.ts"; } > "$$tmp/out.d.ts"; \
+	  if [ "$@" = api-types ]; then \
+	    cp "$$tmp/out.d.ts" web/src/api/schema.d.ts; \
+	  else \
+	    diff -u web/src/api/schema.d.ts "$$tmp/out.d.ts"; \
+	  fi
+
+api-types-check: api-types-test
+
+api-types-test: ## Compile the generated types of a synthetic API money field
+	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf -- "$$tmp"' EXIT; \
+	  (cd backend && uv run --locked python -m tests.test_openapi_export) > "$$tmp/schema.json"; \
+	  pnpm --dir web exec openapi-typescript "$$tmp/schema.json" -o "$$tmp/schema.d.ts"; \
+	  cp backend/tests/fixtures/openapi-money.ts "$$tmp/openapi-money.ts"; \
+	  pnpm --dir web exec tsc --ignoreConfig --noEmit --strict "$$tmp/openapi-money.ts"

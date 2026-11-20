@@ -79,6 +79,19 @@ BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected")
 LIABILITY_KINDS = ("credit", "student", "mortgage", "auto", "personal", "other")
 FILING_STATUSES = ("single", "mfj", "mfs", "hoh", "qss")
 DOCUMENT_PARSE_STATUSES = ("pending", "parsed", "needs_review", "failed")
+JOB_RUN_STATUSES = ("queued", "running", "retrying", "succeeded", "failed")
+
+# Job framework (ADR 0016). Shared by the ``job_run`` CHECKs and the Python-side validation, so
+# both reject the same strings. POSIX and Python ``re`` read these identically.
+# ``<area>.<action>``: lowercase, at least one dot (so it can never shadow a cron like heartbeat).
+JOB_NAME_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$"
+JOB_NAME_MAX = 100
+# Caller-chosen dedupe key, e.g. ``sync:<item-uuid>:2026-11-20T06``. No spaces, quotes or slashes,
+# so a token or URL can't be passed off as a key by accident.
+IDEMPOTENCY_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9:._-]*$"
+IDEMPOTENCY_KEY_MAX = 200
+# Canonical lowercase UUID text, as ``str(uuid.UUID)`` renders it.
+UUID_TEXT_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 DOCUMENT_KINDS = (
     "statement",
     "w2",

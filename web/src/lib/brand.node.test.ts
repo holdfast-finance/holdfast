@@ -12,6 +12,12 @@ describe('resolveBrand', () => {
     expect(resolveBrand('holo')).toBe('holo')
   })
 
+  it('normalizes the build brand like the HTML transform', () => {
+    expect(resolveBrand('Holo')).toBe('holo')
+    expect(resolveBrand(' holo ')).toBe('holo')
+    expect(resolveBrand(' SIGNAL ')).toBe('signal')
+  })
+
   it('lets a household override win', () => {
     expect(resolveBrand('holo', 'signal')).toBe('signal')
     expect(resolveBrand('signal', 'holo')).toBe('holo')
