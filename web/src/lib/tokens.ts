@@ -108,6 +108,17 @@ export interface BrandTokens {
   chipTint: Record<string, number>
   /** Page ground and card surface, by CSS variable name. */
   grounds: Record<string, ThemePair>
+  /**
+   * Hover and popover surface (`--hull-raised`). CSS keeps the color-mix; the AA test
+   * resolves `percent` of `toward` over the `base` ground.
+   */
+  raised: { base: string; toward: ThemePair; percent: number }
+  /** Body text (`--text`). */
+  foreground: ThemePair
+  /** Labels and captions (`--text-muted`). Must reach 4.5:1 on grounds and raised. */
+  muted: ThemePair
+  /** Ink on a fill, by CSS variable name (`deepwater-ink`, `indigo-ink`, `lavender-ink`). */
+  inks: Record<string, ThemePair>
   focusRing: ThemePair
   inputBorder: ThemePair
   /** Button text on the primary and secondary fills: [hue, ink]. */
@@ -120,6 +131,10 @@ export const BRANDS = {
     text: TEXT,
     chipTint: CHIP_TINT,
     grounds: GROUND,
+    raised: { base: 'hull', toward: { light: '#0e1118', dark: '#ffffff' }, percent: 4 },
+    foreground: { light: '#0e1118', dark: '#e8ecf4' },
+    muted: { light: '#566074', dark: '#8a93a6' },
+    inks: { 'deepwater-ink': DEEPWATER_INK },
     focusRing: FOCUS_RING,
     inputBorder: INPUT_BORDER,
     buttons: [
@@ -132,6 +147,10 @@ export const BRANDS = {
     text: HOLO_TEXT,
     chipTint: HOLO_CHIP_TINT,
     grounds: HOLO_GROUND,
+    raised: { base: 'surface', toward: { light: '#12131a', dark: '#ffffff' }, percent: 4 },
+    foreground: { light: '#12131a', dark: '#eceef5' },
+    muted: { light: '#575c70', dark: '#9aa0b4' },
+    inks: { 'indigo-ink': HOLO_INDIGO_INK, 'lavender-ink': HOLO_LAVENDER_INK },
     focusRing: HOLO_FOCUS_RING,
     inputBorder: HOLO_INPUT_BORDER,
     buttons: [

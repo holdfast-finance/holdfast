@@ -127,12 +127,14 @@ servers. Source: brand PDF pages 9–12. Same logomark geometry, softened (round
 
 | Token | Fill | Text token (light) | Role |
 |---|---|---|---|
-| `--indigo` | `#4F46E5` | `--indigo-text` `#4338CA` | Primary buttons ("See the demo"), active nav, links, focus ring, "Watch-only" |
+| `--indigo` | `#4F46E5` | `--indigo-text` `#4338CA` | Primary buttons ("See the demo"), active nav, links, focus ring |
 | `--ink` | `#12131A` | (is text) | Body text, dark buttons, code blocks, dark-mode ground |
 | `--cloud` | `#F7F7FB` | | Page ground (light) |
 | `--grow` | `#059669` | `--grow-text` `#065F46` | Positive, "Synced", under-pace budget |
 | `--heads-up` | `#D97706` | `--heads-up-text` `#92400E` | Warning, "Relink needed", budget pace high |
 | `--alert` | `#DC2626` | `--alert-text` `#B91C1C` | Negative amounts, errors, over budget |
+
+Holo secondary is Lavender (`--lavender`), used for Watch-only; Indigo stays primary.
 
 **Holo gradient** (`--holo`): the iridescent cyan → lavender → pink → butter sweep from the board.
 Use it for the secondary pill button ("Get Holdfast"), the Holo hero orb, frosted-card corner
@@ -161,7 +163,7 @@ Self-hosted via `@fontsource/*`, same as Direction 01.
 ### Holo UI atoms
 
 - **Primary pill:** Indigo fill, white text ("See the demo", "Model it"). **Secondary pill:** Holo gradient, Ink text ("Get Holdfast"). **Tertiary:** white with a hairline ("Later").
-- **Status chips:** same dot + label + tint pattern as 01: Synced (Grow), Relink needed (Heads-up), Watch-only (Indigo).
+- **Status chips:** same dot + label + tint pattern as 01: Synced (Grow), Relink needed (Heads-up), Watch-only (Lavender, the semantic secondary).
 - **Frosted card:** white at ~80% with backdrop blur, 20px radius, a soft shadow, and one Holo bloom in a corner. Dashboard hero, Advisor card and marketing only.
 - **Charts:** actuals are a cyan → indigo → pink gradient line. The forecast is a soft lavender P10–P90 band.
 - **Budget bars:** per-category pastel gradients, with Heads-up when pace ≥ 90% and Alert when over.
