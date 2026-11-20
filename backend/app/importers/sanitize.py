@@ -7,9 +7,10 @@ date formats, label words and sign markers, and replaces everything else (defaul
 * names, addresses, merchants, any unknown word -> synthetic word of the same length and case
 * account / card / routing numbers and every other digit run -> random digits of the same length
 * emails -> synthetic ``@example.test`` addresses
-* dates -> shifted by one random per-document offset, format kept
-* amounts -> multiplied by one secret per-document integer (exact in ``Decimal``), so every linear
-  relation survives: opening + sum(txns) == closing, running balances, section totals.
+* dates -> a synthetic calendar that keeps format and order, not the original gaps or clock time
+* amounts -> independent synthetic figures (exact in ``Decimal``). Opening, running balances,
+  section totals and closing are recomputed so opening + sum(txns) == closing. A brokerage row
+  keeps quantity x price = value. Nothing is a scale of the original.
 
 Original values are never logged, printed or written to the report. Output files are 0600 and
 the output directory is 0700. See ``docs/ops/statement-sanitizer.md``.
@@ -37,7 +38,7 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,8 @@ class Limits:
     max_files: int = 500
     max_file_bytes: int = 50 * 1024 * 1024
     max_total_bytes: int = 500 * 1024 * 1024
-    max_ratio: int = 200  # uncompressed / compressed, for files over 1 MiB
+    max_ratio: int = 200  # bytes written / compressed size, for files over 1 MiB
+    max_pdf_pages: int = 50
 
 
 # ---------------------------------------------------------------------------------------------
@@ -66,16 +68,16 @@ class Limits:
 # ---------------------------------------------------------------------------------------------
 _LABEL_WORDS = """
 account accounts ach activity additions adjustment adjustments advance advances amount
-amounts and annual apr at atm available balance balances basis begin beginning billing bond
-bonds bonus brought by card carried cash cashback category change charge charged charges
+amounts and annual apr at atm available balance balances basis begin beginning billing
+bonds bonus brought by card carried cashback category change charge charged charges
 check checking checks class closing continued contribution contributions core cost cr credit
 credits current customer cycle daily date dates days debit debits deposit deposited deposits
 description detail details direct dividend dividends dr due earned electronic employee
-employer end ending etf fee fees for forward from fund funds gain gross holdings id
-important in income information interest last limit loss market mastercard member memo miles
+employer end ending etf fee fees for forward from fund funds gain holdings id
+important in income information interest last limit loss market mastercard member memo
 minimum mobile money month mutual name nav net new no note notes notice number of on online
-opening other overdraft overview page pages paid past payee payment payments pending
-percentage period periods points pos position positions post posted posting previous price
+opening other overdraft overview pages paid past payee payment payments pending
+percentage period periods points pos position positions posted posting previous
 promotional purchase purchases quantity quarter quarterly rate realized redeemed redemption
 ref reference refund refunds regular return returned reversal reward rewards routing running
 savings security service services settle settlement shares since standard start statement
@@ -92,13 +94,34 @@ for _i in range(1, 13):
     MONTHS[calendar.month_abbr[_i].lower()] = _i
 MONTHS["sept"] = 9
 
-AMOUNT_RE = re.compile(
+_NUM = (
+    r"\d{1,3}(?:\.\d{3})+(?:,\d+)"  # 1.234,56
+    r"|\d{1,3}(?:,\d{3})+(?:\.\d+)?"  # 1,234.56 or 1,234
+    r"|\d+\.\d+"
+    r"|\.\d+"
+    r"|\d+,\d+"  # 12,50
+)
+_AMT_BODY = (
     r"(?P<lp>\(?)(?P<neg>[-+]?)(?P<cur>[$£€]?)(?P<neg2>-?)"
-    r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+)"
+    r"(?P<num>" + _NUM + r")"
     r"(?P<rp>\)?)(?P<suf>-|CR|DR|Cr|Dr|cr|dr)?(?P<tail>[,;]?)"
 )
-INT_RE = re.compile(r"(?P<neg>[-+]?)(?P<cur>[$£€]?)(?P<num>\d+)")
+AMOUNT_RE = re.compile(_AMT_BODY)
+AMOUNT_SEARCH_RE = re.compile(_AMT_BODY)
+CUR_INT_RE = re.compile(
+    r"(?P<lp>\(?)(?P<neg>[-+]?)(?P<cur>[$£€])(?P<neg2>-?)"
+    r"(?P<num>\d+)(?P<rp>\)?)(?P<suf>-|CR|DR|Cr|Dr|cr|dr)?(?P<tail>[,;]?)"
+)
+INT_RE = re.compile(
+    r"(?P<lp>\(?)(?P<neg>[-+]?)(?P<cur>)(?P<neg2>)"
+    r"(?P<num>\d+)(?P<rp>\)?)(?P<suf>)(?P<tail>[,;]?)"
+)
 PERCENT_RE = re.compile(r"\d+(?:\.\d+)?%")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+GLUED_DATE_RE = re.compile(r"\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{4}|[A-Za-z]{3,9}[-/]\d{1,2}[-/,]\d{4}")
+NUMERIC_DATE_RE = re.compile(
+    r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\.\d{1,2}\.\d{2,4}"
+)
 EDGE_RE = re.compile(r"(?P<lead>[^\w]*)(?P<core>.*?)(?P<trail>[^\w]*)", re.DOTALL)
 PART_RE = re.compile(r"[A-Za-z]+|\d+|[^A-Za-z\d]+")
 DAY_RE = re.compile(r"(\d{1,2})([,;]?)")
@@ -129,6 +152,83 @@ OFX_ID_TAGS = frozenset(
 OFX_HEADER_KEEP = frozenset(
     {"OFXHEADER", "DATA", "VERSION", "SECURITY", "ENCODING", "CHARSET", "COMPRESSION"}
 )
+OFX_TXN_TAGS = frozenset({"TRNAMT"})
+OFX_BAL_TAGS = frozenset({"BALAMT", "AVAILCASH", "MARGINBALANCE"})
+_BROKER_QTY = frozenset({"quantity", "qty", "units", "shares"})
+_BROKER_PRICE = frozenset({"price", "unitprice", "unit price"})
+_BROKER_VALUE = frozenset({"value", "mktval", "marketvalue", "market value"})
+
+
+def _amount_match(text: str, *, int_ok: bool = False) -> re.Match[str] | None:
+    found = AMOUNT_RE.fullmatch(text) or CUR_INT_RE.fullmatch(text)
+    if found is None and int_ok:
+        found = INT_RE.fullmatch(text)
+        if found is not None and len(found.group("num") or "") >= 8:
+            return None
+    return found
+
+
+def _num_is_euro(num: str) -> bool:
+    if "," in num and "." in num:
+        return num.rfind(",") > num.rfind(".")
+    if "," in num and "." not in num:
+        parts = num.split(",")
+        return not all(len(part) == 3 for part in parts[1:])
+    return False
+
+
+def _num_decimals(num: str, *, euro: bool) -> int:
+    if euro:
+        return len(num.split(",")[-1]) if "," in num else 0
+    if num.startswith("."):
+        return len(num) - 1
+    if "." in num:
+        return len(num.split(".")[-1])
+    return 0
+
+
+def _parse_num(num: str, *, euro: bool) -> Decimal:
+    raw = num.replace(".", "").replace(",", ".") if euro else num.replace(",", "")
+    if raw.startswith("."):
+        raw = "0" + raw
+    return Decimal(raw)
+
+
+def _format_mag(mag: Decimal, decimals: int, *, grouped: bool, euro: bool, lead_dot: bool) -> str:
+    quantum = abs(mag)
+    text = f"{quantum:,.{decimals}f}" if grouped or euro else f"{quantum:.{decimals}f}"
+    if euro:
+        text = text.replace(",", "X").replace(".", ",").replace("X", ".")
+    if lead_dot and text.startswith("0."):
+        text = text[1:]
+    return text
+
+
+@dataclass
+class _Amt:
+    line: int
+    tok: int
+    raw: str
+    match: re.Match[str]
+    signed: Decimal
+    role: str
+
+
+def _render_signed(match: re.Match[str], signed: Decimal) -> str:
+    """Format ``signed`` in the currency and grouping style of ``match``."""
+    num = match.group("num") or "0"
+    euro = _num_is_euro(num)
+    decimals = _num_decimals(num, euro=euro)
+    grouped = ("," in num) and not euro
+    lead_dot = num.startswith(".")
+    body = _format_mag(abs(signed), decimals, grouped=grouped, euro=euro, lead_dot=lead_dot)
+    cur = match.group("cur") or ""
+    tail = match.group("tail") or ""
+    if signed < 0 and match.group("lp"):
+        return f"({cur}{body}){tail}"
+    if signed < 0:
+        return f"-{cur}{body}{tail}"
+    return f"{cur}{body}{tail}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -164,8 +264,11 @@ class Doc:
 # ---------------------------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------------------------
-def _extract_pdf(path: Path) -> Doc:
-    import pdfplumber  # imported lazily: only the PDF path needs it
+def _extract_pdf(path: Path, *, max_pages: int) -> Doc:
+    try:
+        import pdfplumber  # imported lazily: only the PDF path needs it
+    except ImportError as exc:
+        raise SanitizeError("pdf support is not installed") from exc
 
     # pdfminer logs decoded text at DEBUG. Pin it quiet so a debug root logger cannot leak content.
     for noisy in ("pdfminer", "pdfplumber", "PIL"):
@@ -174,6 +277,8 @@ def _extract_pdf(path: Path) -> Doc:
     pages: list[Page] = []
     warnings: list[str] = []
     with pdfplumber.open(path) as pdf:
+        if len(pdf.pages) > max_pages:
+            raise SanitizeError("pdf has too many pages")
         for page in pdf.pages:
             words = page.extract_words(x_tolerance=2, y_tolerance=3)
             rows: list[tuple[int, list[Token]]] = []
@@ -216,10 +321,11 @@ def _extract_ofx(path: Path) -> Doc:
     return Doc("ofx", [Page(0, len(lines), lines)])
 
 
-def extract(path: Path) -> Doc:
+def extract(path: Path, *, limits: Limits | None = None) -> Doc:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(path)
+        cap = limits.max_pdf_pages if limits is not None else Limits.max_pdf_pages
+        return _extract_pdf(path, max_pages=cap)
     if suffix == ".csv":
         return _extract_csv(path)
     return _extract_ofx(path)
@@ -241,21 +347,24 @@ def _is_mask(part: str) -> bool:
 
 
 class Sanitizer:
-    """One instance per document: owns the secret scale, date offset and replacement maps."""
+    """One instance per document: owns the synthetic calendar and replacement maps."""
 
     def __init__(self, seed: int | None = None, keep_words: Iterable[str] = ()) -> None:
         # Not cryptographic: the randomness only has to be unguessable per run, which a
         # SystemRandom-seeded Mersenne generator is. S311 does not apply to fixture noise.
         self._rng = random.Random(seed if seed is not None else secrets.randbits(64))  # noqa: S311
-        self.scale = self._rng.randint(3, 9)
-        offset = self._rng.randint(30, 540)
-        self.shift = timedelta(days=offset if self._rng.randint(0, 1) else -offset)
         self.ref_year = 2024
         self.keep = frozenset(w.lower() for w in keep_words)
         self.replaced: Counter[str] = Counter()
         self.kept: Counter[str] = Counter()
         self._words: dict[str, str] = {}
         self._digits: dict[str, str] = {}
+        self._seen_dates: list[date] = []
+        self._date_map: dict[date, date] = {}
+        self._dates_frozen = False
+        self._cell_plan: dict[tuple[int, int], str] = {}
+        self._ofx_plan: dict[tuple[int, int], str] = {}
+        self._ofx_used: Counter[int] = Counter()
 
     # -- generators --------------------------------------------------------------------------
     def _synth_word(self, original: str) -> str:
@@ -263,6 +372,7 @@ class Sanitizer:
             return self._words[original]
         n = len(original)
         low = original.lower()
+        cand = low
         for _ in range(50):
             letters = [
                 self._rng.choice("bcdfglmnprstvz" if i % 2 == 0 else "aeiou") for i in range(n)
@@ -282,8 +392,12 @@ class Sanitizer:
             out = "".join(self._rng.choice("0123456789") for _ in original)
             if len(original) >= 2 and out[0] == "0":
                 continue
-            if out != original or len(original) < 3:
+            if out != original:
                 break
+        if out == original and original:
+            chars = list(original)
+            chars[-1] = "0" if chars[-1] != "0" else "1"
+            out = "".join(chars)
         self._digits[original] = out
         return out
 
@@ -296,6 +410,191 @@ class Sanitizer:
                 years[parsed[0].year] += 1
         if years:
             self.ref_year = years.most_common(1)[0][0]
+
+    def observe_lines(self, rows: list[list[str]], *, kind: str) -> None:
+        """Learn every date before assigning the synthetic calendar."""
+        for texts in rows:
+            self._note_row_dates(texts, kind=kind, year_only=True)
+        if self._seen_dates:
+            years: Counter[int] = Counter(item.year for item in self._seen_dates)
+            self.ref_year = years.most_common(1)[0][0]
+        for texts in rows:
+            self._note_row_dates(texts, kind=kind, year_only=False)
+        self._freeze_dates()
+
+    def _note_row_dates(self, texts: list[str], *, kind: str, year_only: bool) -> None:
+        if kind == "ofx":
+            for raw in texts:
+                for found in re.finditer(r"<D[A-Z0-9.]*>(\d{8})", raw):
+                    parsed = self._parse_date(found.group(1))
+                    if parsed is not None:
+                        self._note_date(parsed[0])
+                if not year_only:
+                    self._note_glued(raw)
+            return
+        for raw in texts:
+            core = EDGE_RE.fullmatch(raw)
+            if core is not None:
+                parsed = self._parse_date(core.group("core"))
+                has_year = re.search(r"\d{4}", core.group("core"))
+                if parsed is not None and (not year_only or has_year):
+                    self._note_date(parsed[0])
+            if not year_only:
+                self._note_glued(raw)
+        if not year_only:
+            self._note_month_line(texts)
+
+    def _note_date(self, value: date) -> None:
+        if value not in self._seen_dates:
+            self._seen_dates.append(value)
+
+    def _note_glued(self, raw: str) -> None:
+        for found in GLUED_DATE_RE.finditer(raw):
+            parsed = self._glued_date(found.group(0))
+            if parsed is not None:
+                self._note_date(parsed)
+
+    def _glued_date(self, text: str) -> date | None:
+        dmy = re.fullmatch(r"(\d{1,2})[-/]([A-Za-z]{3,9})[-/](\d{4})", text)
+        mdy = re.fullmatch(r"([A-Za-z]{3,9})[-/](\d{1,2})[-/,](\d{4})", text)
+        if dmy is not None:
+            month = MONTHS.get(dmy.group(2).lower())
+            day, year = int(dmy.group(1)), int(dmy.group(3))
+        elif mdy is not None:
+            month = MONTHS.get(mdy.group(1).lower())
+            day, year = int(mdy.group(2)), int(mdy.group(3))
+        else:
+            return None
+        if month is None:
+            return None
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return date(year, month, 28)
+
+    def _note_month_line(self, texts: list[str]) -> None:
+        count = len(texts)
+        index = 0
+        while index < count:
+            month = MONTH_TOKEN_RE.fullmatch(texts[index])
+            day = DAY_RE.fullmatch(texts[index + 1]) if index + 1 < count else None
+            if (
+                month is not None
+                and month.group(1).lower() in MONTHS
+                and day is not None
+                and 1 <= int(day.group(1)) <= 31
+            ):
+                year_m = YEAR_RE.fullmatch(texts[index + 2]) if index + 2 < count else None
+                self._note_parts(int(day.group(1)), MONTHS[month.group(1).lower()], year_m)
+                index += 3 if year_m is not None else 2
+                continue
+            day = DAY_RE.fullmatch(texts[index])
+            month = MONTH_TOKEN_RE.fullmatch(texts[index + 1]) if index + 1 < count else None
+            if (
+                day is not None
+                and 1 <= int(day.group(1)) <= 31
+                and month is not None
+                and month.group(1).lower() in MONTHS
+            ):
+                year_m = YEAR_RE.fullmatch(texts[index + 2]) if index + 2 < count else None
+                self._note_parts(int(day.group(1)), MONTHS[month.group(1).lower()], year_m)
+                index += 3 if year_m is not None else 2
+                continue
+            index += 1
+
+    def _note_parts(self, day: int, month: int, year_m: re.Match[str] | None) -> None:
+        year = int(year_m.group(1)) if year_m is not None else self.ref_year
+        try:
+            self._note_date(date(year, month, day))
+        except ValueError:
+            self._note_date(date(year, month, 28))
+
+    def _freeze_dates(self) -> None:
+        if self._dates_frozen:
+            return
+        self._dates_frozen = True
+        ordered = sorted(set(self._seen_dates))
+        if not ordered:
+            return
+        anchor = date(2016, 6, 15)
+        for _ in range(20):
+            candidate = date(
+                self._rng.randint(2016, 2023),
+                self._rng.randint(1, 12),
+                self._rng.randint(1, 28),
+            )
+            if candidate != ordered[0] and candidate.day != ordered[0].day:
+                anchor = candidate
+                break
+        previous_original: date | None = None
+        previous_new: date | None = None
+        for original in ordered:
+            if previous_original is None or previous_new is None:
+                assigned = anchor
+                gap = 0
+            else:
+                gap = (original - previous_original).days
+                if gap <= 0:
+                    assigned = previous_new
+                else:
+                    choices = [step for step in range(1, max(gap * 3, 21)) if step != gap]
+                    assigned = previous_new + timedelta(days=self._rng.choice(choices))
+            if previous_new is not None and gap > 0:
+                assigned = self._separate(assigned, original, previous_new, gap)
+            elif assigned == original or assigned.day == original.day:
+                assigned = assigned + timedelta(days=3)
+            self._date_map[original] = assigned
+            previous_original = original
+            previous_new = assigned
+
+    def _separate(self, assigned: date, original: date, previous: date, gap: int) -> date:
+        for _ in range(6):
+            moved = (assigned - previous).days
+            if assigned != original and assigned.day != original.day and moved != gap and moved > 0:
+                return assigned
+            assigned = assigned + timedelta(days=1)
+        return assigned
+
+    def _map_date(self, original: date) -> date:
+        if not self._dates_frozen:
+            self._note_date(original)
+            self._freeze_dates()
+        mapped = self._date_map.get(original)
+        if mapped is not None:
+            return mapped
+        return self._insert_date(original)
+
+    def _insert_date(self, original: date) -> date:
+        keys = sorted(self._date_map)
+        if not keys:
+            assigned = date(2016, 6, 15)
+        else:
+            earlier = [key for key in keys if key < original]
+            later = [key for key in keys if key > original]
+            if earlier:
+                gap = (original - earlier[-1]).days
+                base = self._date_map[earlier[-1]]
+                choices = (
+                    [1]
+                    if gap <= 0
+                    else [step for step in range(1, max(gap * 3, 21)) if step != gap]
+                )
+                assigned = base + timedelta(days=self._rng.choice(choices))
+                if later and assigned >= self._date_map[later[0]]:
+                    assigned = base + timedelta(days=1)
+            else:
+                gap = (later[0] - original).days
+                limit = self._date_map[later[0]]
+                choices = (
+                    [1]
+                    if gap <= 0
+                    else [step for step in range(1, max(gap * 3, 21)) if step != gap]
+                )
+                assigned = limit - timedelta(days=self._rng.choice(choices))
+        if assigned == original or assigned.day == original.day:
+            assigned = assigned + timedelta(days=3)
+        self._date_map[original] = assigned
+        return assigned
 
     def _parse_date(self, core: str) -> tuple[date, str, tuple[str, ...]] | None:
         for kind, pat in _DATE_PATTERNS:
@@ -332,7 +631,7 @@ class Sanitizer:
         if parsed is None:
             return None
         d, kind, g = parsed
-        n = d + self.shift
+        n = self._map_date(d)
         if kind == "compact":
             return f"{n.year:04d}{n.month:02d}{n.day:02d}"
         sep = g[1]
@@ -423,7 +722,7 @@ class Sanitizer:
             orig = date(year, mo[0], day)
         except ValueError:
             orig = date(year, mo[0], 28)
-        new = orig + self.shift
+        new = self._map_date(orig)
         mi, di, yi = idx
         name = mo[1].group(1)
         full = name.lower() not in {calendar.month_abbr[k].lower() for k in range(1, 13)}
@@ -439,36 +738,47 @@ class Sanitizer:
         del texts
 
     # -- amounts -----------------------------------------------------------------------------
-    def _scale(self, num: str) -> str:
-        decimals = len(num.split(".")[1]) if "." in num else 0
-        val = Decimal(num.replace(",", "")) * self.scale
-        return f"{val:,.{decimals}f}" if "," in num else f"{val:.{decimals}f}"
+    def _draw_mag(self, decimals: int, *, forbid: Decimal | None = None) -> Decimal:
+        """A positive amount on the original's grid. Not a function of that amount."""
+        span = (10 ** (decimals + 4)) - 1 if decimals else 99_999
+        span = max(span, 2)
+        forbid_units: int | None = None
+        if forbid is not None:
+            forbid_units = int((abs(forbid) * (Decimal(10) ** decimals)).to_integral_value())
+        for _ in range(40):
+            units = self._rng.randint(1, span)
+            if forbid_units is not None and units == forbid_units:
+                continue
+            if decimals:
+                return Decimal(units) / (Decimal(10) ** decimals)
+            return Decimal(units)
+        return Decimal(1)
+
+    def _fresh_amount(self, text: str, *, int_ok: bool = False) -> str | None:
+        match = _amount_match(text, int_ok=int_ok)
+        if match is None:
+            return None
+        num = match.group("num") or "0"
+        euro = _num_is_euro(num)
+        decimals = _num_decimals(num, euro=euro)
+        original = _parse_num(num, euro=euro)
+        magnitude = self._draw_mag(decimals, forbid=original)
+        grouped = ("," in num) and not euro
+        body = _format_mag(
+            magnitude, decimals, grouped=grouped, euro=euro, lead_dot=num.startswith(".")
+        )
+        self.replaced["amount"] += 1
+        return text[: match.start("num")] + body + text[match.end("num") :]
 
     def scale_amount(self, text: str, *, int_ok: bool = False) -> str | None:
-        m = AMOUNT_RE.fullmatch(text)
-        if m:
-            self.replaced["amount"] += 1
-            return (
-                m["lp"]
-                + m["neg"]
-                + m["cur"]
-                + m["neg2"]
-                + self._scale(m["num"])
-                + m["rp"]
-                + (m["suf"] or "")
-                + m["tail"]
-            )
-        m2 = INT_RE.fullmatch(text) if int_ok else None
-        if m2 and len(m2["num"]) < 8:
-            self.replaced["amount"] += 1
-            return m2["neg"] + m2["cur"] + self._scale(m2["num"])
-        return None
+        """Backward-compatible name. Draws a fresh amount; it does not scale."""
+        return self._fresh_amount(text, int_ok=int_ok)
 
     # -- tokens ------------------------------------------------------------------------------
-    def text(self, t: str) -> str:
-        """Default-deny sanitize of free text with no amount/date structure."""
+    def _deny(self, text: str) -> str:
+        """Replace every word and every digit run. No length is exempt."""
         out: list[str] = []
-        for part in PART_RE.findall(t):
+        for part in PART_RE.findall(text):
             if part.isalpha():
                 low = part.lower()
                 if low in LABELS or low in self.keep:
@@ -481,110 +791,600 @@ class Sanitizer:
                     self.replaced["word"] += 1
                     out.append(self._synth_word(part))
             elif part.isdigit():
-                if len(part) <= 2:
-                    self.kept["small_number"] += 1
-                    out.append(part)
-                else:
-                    self.replaced["account" if len(part) >= 9 else "number"] += 1
-                    out.append(self._synth_digits(part))
+                self.replaced["account" if len(part) >= 9 else "number"] += 1
+                out.append(self._synth_digits(part))
             else:
                 if part.strip():
                     self.kept["punctuation"] += 1
                 out.append(part)
         return "".join(out)
 
-    def token(self, t: str, *, int_ok: bool = False) -> str:
+    def _spans(self, text: str) -> list[tuple[int, int, str, str]]:
+        found: list[tuple[int, int, int, str, str]] = []
+        rules = (
+            (0, EMAIL_RE, "email"),
+            (1, GLUED_DATE_RE, "date"),
+            (1, NUMERIC_DATE_RE, "date"),
+            (2, PERCENT_RE, "percent"),
+            (3, AMOUNT_SEARCH_RE, "amount"),
+            (3, CUR_INT_RE, "amount"),
+        )
+        for priority, pattern, kind in rules:
+            for match in pattern.finditer(text):
+                found.append(
+                    (match.start(), -(match.end() - match.start()), priority, kind, match.group(0))
+                )
+        found.sort()
+        chosen: list[tuple[int, int, str, str]] = []
+        cursor = 0
+        for start, neg_len, _priority, kind, piece in found:
+            end = start - neg_len
+            if start < cursor:
+                continue
+            chosen.append((start, end, kind, piece))
+            cursor = end
+        return chosen
+
+    def _rewrite_span(self, kind: str, piece: str) -> str:
+        if kind == "email":
+            self.replaced["email"] += 1
+            return f"user{self._rng.randint(100, 999)}@example.test"
+        if kind == "percent":
+            return self._fresh_percent(piece)
+        if kind == "date":
+            glued = self._format_glued(piece)
+            if glued is not None:
+                self.replaced["date"] += 1
+                return glued
+            shifted = self._shift_date(piece)
+            if shifted is not None:
+                self.replaced["date"] += 1
+                return shifted
+            return self._deny(piece)
+        fresh = self._fresh_amount(piece)
+        return fresh if fresh is not None else self._deny(piece)
+
+    def _fresh_percent(self, text: str) -> str:
+        body = text[:-1] if text.endswith("%") else text
+        decimals = len(body.split(".")[1]) if "." in body else 0
+        try:
+            forbid: Decimal | None = Decimal(body)
+        except InvalidOperation:
+            forbid = None
+        magnitude = self._draw_mag(decimals, forbid=forbid)
+        self.replaced["percent"] += 1
+        if decimals:
+            return f"{magnitude:.{decimals}f}%"
+        return f"{int(magnitude)}%"
+
+    def _format_glued(self, text: str) -> str | None:
+        dmy = re.fullmatch(r"(\d{1,2})([-/])([A-Za-z]{3,9})([-/])(\d{4})", text)
+        mdy = re.fullmatch(r"([A-Za-z]{3,9})([-/])(\d{1,2})([-,/])(\d{4})", text)
+        parsed = self._glued_date(text)
+        if parsed is None:
+            return None
+        mapped = self._map_date(parsed)
+        if dmy is not None:
+            month_text = dmy.group(3)
+            sep_a, sep_b = dmy.group(2), dmy.group(4)
+            day_src = dmy.group(1)
+            month_first = False
+        elif mdy is not None:
+            month_text = mdy.group(1)
+            sep_a, sep_b = mdy.group(2), mdy.group(4)
+            day_src = mdy.group(3)
+            month_first = True
+        else:
+            return None
+        full = month_text.lower() not in {calendar.month_abbr[k].lower() for k in range(1, 13)}
+        base = calendar.month_name[mapped.month] if full else calendar.month_abbr[mapped.month]
+        month = _style(base, month_text)
+        day = f"{mapped.day:02d}" if len(day_src) == 2 else str(mapped.day)
+        if month_first:
+            return f"{month}{sep_a}{day}{sep_b}{mapped.year:04d}"
+        return f"{day}{sep_a}{month}{sep_b}{mapped.year:04d}"
+
+    def text(self, t: str) -> str:
+        """Default-deny sanitize of free text. Amounts, dates and emails are rewritten first."""
         if t == "":
             return t
+        if not self._dates_frozen:
+            self.observe_lines([[t]], kind="pdf")
+        spans = self._spans(t)
+        if not spans:
+            return self._deny(t)
+        parts: list[str] = []
+        pos = 0
+        for start, end, kind, piece in spans:
+            if start > pos:
+                parts.append(self._deny(t[pos:start]))
+            parts.append(self._rewrite_span(kind, piece))
+            pos = end
+        if pos < len(t):
+            parts.append(self._deny(t[pos:]))
+        return "".join(parts)
+
+    def _keep_page_index(self, prev: str | None, text: str) -> bool:
+        if prev is None or not re.fullmatch(r"\d{1,4}", text):
+            return False
+        if prev.lower().rstrip(".:") != "page":
+            return False
+        return "page" in LABELS or "page" in self.keep
+
+    def token(self, t: str, *, int_ok: bool = False, prev: str | None = None) -> str:
+        if t == "":
+            return t
+        if not self._dates_frozen:
+            self.observe_lines([[t]], kind="pdf")
+        if self._keep_page_index(prev, t):
+            self.kept["page"] += 1
+            return t
         if "@" in t:
-            m = EDGE_RE.fullmatch(t)
-            lead, trail = (m["lead"], m["trail"]) if m else ("", "")
-            self.replaced["email"] += 1
-            return f"{lead}user{self._rng.randint(100, 999)}@example.test{trail}"
-        scaled = self.scale_amount(t, int_ok=int_ok)
-        if scaled is not None:
-            return scaled
-        m = EDGE_RE.fullmatch(t)
-        if m and m["core"]:
-            core = m["core"]
-            if PERCENT_RE.fullmatch(core):
-                self.kept["percent"] += 1
-                return t
+            edge = EDGE_RE.fullmatch(t)
+            core = edge.group("core") if edge is not None else t
+            if EMAIL_RE.fullmatch(core):
+                lead = edge.group("lead") if edge is not None else ""
+                trail = edge.group("trail") if edge is not None else ""
+                self.replaced["email"] += 1
+                return f"{lead}user{self._rng.randint(100, 999)}@example.test{trail}"
+        glued = self._format_glued(t)
+        if glued is not None:
+            self.replaced["date"] += 1
+            return glued
+        edge = EDGE_RE.fullmatch(t)
+        if edge is not None and edge.group("core"):
+            core = edge.group("core")
             shifted = self._shift_date(core)
             if shifted is not None:
                 self.replaced["date"] += 1
-                return m["lead"] + shifted + m["trail"]
+                return edge.group("lead") + shifted + edge.group("trail")
+            if PERCENT_RE.fullmatch(core):
+                return edge.group("lead") + self._fresh_percent(core) + edge.group("trail")
+        fresh = self._fresh_amount(t, int_ok=int_ok)
+        if fresh is not None:
+            return fresh
         return self.text(t)
 
-    def tokens(self, texts: list[str], *, int_ok: bool = False) -> list[str]:
+    def tokens(
+        self, texts: list[str], *, int_ok: bool = False, line_no: int | None = None
+    ) -> list[str]:
+        if not self._dates_frozen:
+            self.observe_lines([texts], kind="pdf")
         out = list(texts)
         used = [False] * len(texts)
         self._month_dates(texts, out, used)
-        for i, t in enumerate(texts):
-            if not used[i]:
-                out[i] = self.token(t, int_ok=int_ok)
+        previous: str | None = None
+        for index, original in enumerate(texts):
+            if used[index]:
+                previous = original
+                continue
+            planned = self._cell_plan.get((line_no, index)) if line_no is not None else None
+            if planned is not None:
+                out[index] = planned
+                self.replaced["amount"] += 1
+            else:
+                out[index] = self.token(original, int_ok=int_ok, prev=previous)
+            previous = original
         return out
 
+    def csv_cell(self, cell: str, line_no: int, tok: int) -> str:
+        planned = self._cell_plan.get((line_no, tok))
+        if planned is not None:
+            self.replaced["amount"] += 1
+            return planned
+        words = cell.split(" ")
+        return " ".join(self.tokens(words, int_ok=len(words) == 1))
+
+    # -- reconciliation plan -----------------------------------------------------------------
+    def plan(self, rows: list[list[str]], *, kind: str) -> None:
+        if kind == "ofx":
+            self._plan_ofx(rows)
+        else:
+            self._plan_table(rows, kind=kind)
+
+    def _plan_table(self, rows: list[list[str]], *, kind: str) -> None:
+        mode = False
+        if _check(rows, cr_negative=False) is not True and _check(rows, cr_negative=True) is True:
+            mode = True
+        header = _broker_header(rows[0]) if kind == "csv" and rows else {}
+        broker = {"qty", "price", "value"} <= set(header.values())
+        sites: list[_Amt] = []
+        seen_open = False
+        seen_close = False
+        int_ok = kind == "csv"
+        for line_no, texts in enumerate(rows):
+            if broker and line_no == 0:
+                continue
+            amounts = _amount_indexes(texts, int_ok=int_ok)
+            if broker and line_no > 0:
+                for column, role in header.items():
+                    if column >= len(texts):
+                        continue
+                    match = _amount_match(texts[column], int_ok=True)
+                    if match is None:
+                        continue
+                    signed = _signed(texts[column], cr_negative=mode) or Decimal(0)
+                    sites.append(_Amt(line_no, column, texts[column], match, signed, role))
+                    if column in amounts:
+                        amounts.remove(column)
+            if not amounts:
+                continue
+            low = " ".join(texts).lower()
+            dated = _starts_with_date(texts)
+            roles = _roles_for_line(
+                texts,
+                amounts,
+                low=low,
+                dated=dated,
+                seen_open=seen_open,
+                seen_close=seen_close,
+                mode=mode,
+            )
+            if "opening" in roles.values():
+                seen_open = True
+            if "closing" in roles.values():
+                seen_close = True
+            for column in amounts:
+                match = _amount_match(texts[column], int_ok=int_ok and " " not in texts[column])
+                if match is None:
+                    continue
+                nxt = texts[column + 1] if column + 1 < len(texts) else ""
+                signed = _signed(texts[column], nxt, cr_negative=mode) or Decimal(0)
+                sites.append(_Amt(line_no, column, texts[column], match, signed, roles[column]))
+        self._assign_table(rows, sites)
+
+    def _assign_table(self, rows: list[list[str]], sites: list[_Amt]) -> None:
+        txns = [site for site in sites if site.role == "txn"]
+        opening = next((site for site in sites if site.role == "opening"), None)
+        closing = next((site for site in sites if site.role == "closing"), None)
+        txn_values = [self._signed_draw(site) for site in txns]
+        if _is_uniform_scale([site.signed for site in txns], txn_values):
+            txn_values = [self._signed_draw(site) for site in txns]
+        txn_sum = sum(txn_values, Decimal(0))
+        close_signed: Decimal | None = None
+        if closing is not None:
+            close_signed = self._signed_draw(closing)
+        if opening is not None and close_signed is not None:
+            open_signed = close_signed - txn_sum
+        elif opening is not None:
+            open_signed = self._signed_draw(opening)
+        elif close_signed is not None:
+            open_signed = close_signed - txn_sum
+        else:
+            open_signed = self._draw_mag(2)
+        balance = open_signed
+        section = Decimal(0)
+        txn_at = 0
+        by_line: dict[int, list[_Amt]] = {}
+        for site in sites:
+            by_line.setdefault(site.line, []).append(site)
+        for line_no in range(len(rows)):
+            row_sites = by_line.get(line_no, [])
+            line_txns: list[tuple[_Amt, Decimal]] = []
+            for site in row_sites:
+                if site.role == "txn":
+                    line_txns.append((site, txn_values[txn_at]))
+                    txn_at += 1
+            for _site, signed in line_txns:
+                balance += signed
+                section += signed
+            balance_after = balance
+            qty = next((site for site in row_sites if site.role == "qty"), None)
+            price = next((site for site in row_sites if site.role == "price"), None)
+            qty_mag: Decimal | None = None
+            price_mag: Decimal | None = None
+            product: Decimal | None = None
+            if qty is not None and price is not None:
+                qty_mag = self._draw_mag(_match_decimals(qty.match), forbid=abs(qty.signed))
+                price_mag = self._draw_mag(_match_decimals(price.match), forbid=abs(price.signed))
+                product = qty_mag * price_mag
+            for site in row_sites:
+                if site.role == "txn":
+                    signed = next(value for item, value in line_txns if item is site)
+                    display = _inject(site, abs(signed))
+                elif site.role == "opening":
+                    display = _render_signed(site.match, open_signed)
+                elif site.role == "closing" and close_signed is not None:
+                    display = _render_signed(site.match, close_signed)
+                elif site.role == "running":
+                    display = _render_signed(site.match, balance_after)
+                elif site.role == "section":
+                    display = _render_signed(site.match, section)
+                    section = Decimal(0)
+                elif site.role == "qty" and qty_mag is not None:
+                    display = _inject(site, qty_mag)
+                elif site.role == "price" and price_mag is not None:
+                    display = _inject(site, price_mag)
+                elif site.role == "value" and product is not None:
+                    display = _render_product(site.match, product)
+                else:
+                    display = _inject(
+                        site,
+                        self._draw_mag(_match_decimals(site.match), forbid=abs(site.signed)),
+                    )
+                self._cell_plan[(site.line, site.tok)] = display
+
+    def _signed_draw(self, site: _Amt) -> Decimal:
+        sign = -1 if site.signed < 0 else 1
+        return sign * self._draw_mag(_match_decimals(site.match), forbid=abs(site.signed))
+
+    def _plan_ofx(self, rows: list[list[str]]) -> None:
+        events: list[tuple[int, int, str, Decimal, re.Match[str]]] = []
+        for line_no, texts in enumerate(rows):
+            raw = texts[0] if texts else ""
+            nth = 0
+            for found in re.finditer(r"<([A-Za-z0-9.]+)>([^<\r\n]*)", raw):
+                tag, value = found.group(1), found.group(2).strip()
+                if tag not in OFX_AMOUNT_TAGS:
+                    continue
+                match = _amount_match(value, int_ok=True)
+                if match is not None:
+                    events.append((line_no, nth, tag, _signed(value) or Decimal(0), match))
+                nth += 1
+        txns = [item for item in events if item[2] in OFX_TXN_TAGS]
+        bals = [item for item in events if item[2] in OFX_BAL_TAGS]
+        originals = [item[3] for item in txns]
+        drawn = [self._signed_ofx(item[3], item[4]) for item in txns]
+        if _is_uniform_scale(originals, drawn):
+            drawn = [self._signed_ofx(item[3], item[4]) for item in txns]
+        txn_sum = sum(drawn, Decimal(0))
+        original_sum = sum(originals, Decimal(0))
+        identity = (
+            len(bals) >= 2 and abs(bals[0][3] + original_sum - bals[-1][3]) <= RECONCILE_TOLERANCE
+        )
+        open_signed = Decimal(0)
+        close_signed: Decimal | None = None
+        if identity:
+            close_signed = self._signed_ofx(bals[-1][3], bals[-1][4])
+            open_signed = close_signed - txn_sum
+        balance = open_signed
+        txn_at = 0
+        seen_txn_before_bal = 0
+        for line_no, nth, tag, signed, match in events:
+            if tag in OFX_TXN_TAGS:
+                value = drawn[txn_at]
+                txn_at += 1
+                balance += value
+                seen_txn_before_bal += 1
+                display = _render_signed(match, value)
+            elif identity and bals and (line_no, nth) == (bals[0][0], bals[0][1]):
+                display = _render_signed(match, open_signed)
+            elif identity and bals and (line_no, nth) == (bals[-1][0], bals[-1][1]):
+                display = _render_signed(match, close_signed or Decimal(0))
+            elif tag in {"UNITS", "UNITPRICE", "MKTVAL"}:
+                display = _render_signed(match, self._signed_ofx(signed, match))
+                self._ofx_plan[(line_no, nth)] = display
+                continue
+            else:
+                display = _render_signed(match, self._signed_ofx(signed, match))
+            self._ofx_plan[(line_no, nth)] = display
+        self._tie_ofx_broker(rows)
+
+    def _signed_ofx(self, signed: Decimal, match: re.Match[str]) -> Decimal:
+        sign = -1 if signed < 0 else 1
+        return sign * self._draw_mag(_match_decimals(match), forbid=abs(signed))
+
+    def _tie_ofx_broker(self, rows: list[list[str]]) -> None:
+        """When UNITS, UNITPRICE and MKTVAL sit on one transaction, value is the product."""
+        pending: dict[str, tuple[int, int, re.Match[str]]] = {}
+        for line_no, texts in enumerate(rows):
+            raw = texts[0] if texts else ""
+            if raw.startswith(("<STMTTRN>", "<INVBUY>", "<INVSELL>")):
+                pending = {}
+            nth = 0
+            for found in re.finditer(r"<([A-Za-z0-9.]+)>([^<\r\n]*)", raw):
+                tag, value = found.group(1), found.group(2).strip()
+                if tag not in OFX_AMOUNT_TAGS:
+                    continue
+                match = _amount_match(value, int_ok=True)
+                if match is not None and tag in {"UNITS", "UNITPRICE", "MKTVAL"}:
+                    pending[tag] = (line_no, nth, match)
+                nth += 1
+            if {"UNITS", "UNITPRICE", "MKTVAL"} <= pending.keys():
+                units = pending["UNITS"]
+                price = pending["UNITPRICE"]
+                market = pending["MKTVAL"]
+                quantity = self._draw_mag(_match_decimals(units[2]))
+                unit_price = self._draw_mag(_match_decimals(price[2]))
+                product = quantity * unit_price
+                self._ofx_plan[(units[0], units[1])] = _render_signed(units[2], quantity)
+                self._ofx_plan[(price[0], price[1])] = _render_signed(price[2], unit_price)
+                self._ofx_plan[(market[0], market[1])] = _render_signed(market[2], product)
+                pending = {}
+
     # -- OFX ---------------------------------------------------------------------------------
-    def ofx_line(self, line: str) -> str:
+    def ofx_line(self, line: str, line_no: int = 0) -> str:
         head = re.fullmatch(r"([A-Z]+):(.*)", line)
         if head:
             if head[1] in OFX_HEADER_KEEP:
                 self.kept["ofx_header"] += 1
                 return line
-            return f"{head[1]}:{self.text(head[2])}"
+            return f"{head[1]}:{self.token(head[2])}"
+        cursor = 0
 
-        def sub(m: re.Match[str]) -> str:
-            slash, tag, value = m.group(1), m.group(2), m.group(3)
+        def sub(match: re.Match[str]) -> str:
+            nonlocal cursor
+            slash, tag, value = match.group(1), match.group(2), match.group(3)
             if slash or value.strip() == "":
-                return m.group(0)
+                return match.group(0)
+            if tag in OFX_AMOUNT_TAGS:
+                key = (line_no, cursor)
+                cursor += 1
+                planned = self._ofx_plan.get(key)
+                if planned is not None:
+                    self.replaced["amount"] += 1
+                    return f"<{tag}>{planned}"
             return f"<{tag}>{self._ofx_value(tag, value)}"
 
         return re.sub(r"<(/?)([A-Za-z0-9.]+)>([^<\r\n]*)", sub, line)
 
     def _ofx_value(self, tag: str, value: str) -> str:
-        v = value.strip()
+        stripped = value.strip()
         if tag in OFX_KEEP_TAGS:
             self.kept["ofx_enum"] += 1
             return value
         if tag in OFX_AMOUNT_TAGS:
-            scaled = self.scale_amount(v, int_ok=True)
-            return scaled if scaled is not None else self.text(value)
+            fresh = self._fresh_amount(stripped, int_ok=True)
+            return fresh if fresh is not None else self.token(value)
         if tag.startswith("DT"):
-            m = re.fullmatch(r"(\d{8})(.*)", v)
+            found = re.fullmatch(r"(\d{8})(.*)", stripped)
             if (
-                m
-                and (shifted := self._shift_date(m.group(1)))
-                and re.fullmatch(r"[\d.]*(\[[^\]]*\])?", m.group(2))
+                found
+                and (shifted := self._shift_date(found.group(1)))
+                and re.fullmatch(r"[\d.]*(\[[^\]]*\])?", found.group(2))
             ):
                 self.replaced["date"] += 1
-                return shifted + m.group(2)
-            return self.text(value)
+                suffix = re.sub(
+                    r"\d+",
+                    lambda piece: self._synth_digits(piece.group(0)),
+                    found.group(2),
+                )
+                return shifted + suffix
+            return self.token(value)
         if tag in OFX_ID_TAGS:
             self.replaced["account"] += 1
             return "".join(
                 self._rng.choice("0123456789")
-                if c.isdigit()
-                else _style(self._rng.choice("abcdefghjkmnpqrstuvwxyz"), c)
-                if c.isalpha()
-                else c
-                for c in v
+                if char.isdigit()
+                else _style(self._rng.choice("abcdefghjkmnpqrstuvwxyz"), char)
+                if char.isalpha()
+                else char
+                for char in stripped
             )
-        return self.text(value)
+        return self.token(value)
 
 
 # ---------------------------------------------------------------------------------------------
 # Reconciliation check (opening + sum(txns) == closing), run on original and sanitized text
 # ---------------------------------------------------------------------------------------------
+def _match_decimals(match: re.Match[str]) -> int:
+    num = match.group("num") or "0"
+    return _num_decimals(num, euro=_num_is_euro(num))
+
+
+def _inject(site: _Amt, magnitude: Decimal) -> str:
+    num = site.match.group("num") or "0"
+    euro = _num_is_euro(num)
+    body = _format_mag(
+        magnitude,
+        _num_decimals(num, euro=euro),
+        grouped=("," in num) and not euro,
+        euro=euro,
+        lead_dot=num.startswith("."),
+    )
+    return site.raw[: site.match.start("num")] + body + site.raw[site.match.end("num") :]
+
+
+def _render_product(match: re.Match[str], product: Decimal) -> str:
+    decimals = _match_decimals(match)
+    quantum = Decimal(10) ** -decimals if decimals else Decimal(1)
+    if product.quantize(quantum, rounding=ROUND_HALF_EVEN) == product:
+        return _render_signed(match, product)
+    cur = match.group("cur") or ""
+    sign = "-" if product < 0 else ""
+    return f"{sign}{cur}{format(product, 'f')}"
+
+
+def _broker_header(cells: list[str]) -> dict[int, str]:
+    roles: dict[int, str] = {}
+    for index, cell in enumerate(cells):
+        word = cell.strip().lower()
+        if word in _BROKER_QTY:
+            roles[index] = "qty"
+        elif word in _BROKER_PRICE:
+            roles[index] = "price"
+        elif word in _BROKER_VALUE:
+            roles[index] = "value"
+    return roles
+
+
+def _amount_indexes(texts: list[str], *, int_ok: bool) -> list[int]:
+    found: list[int] = []
+    for index, raw in enumerate(texts):
+        if " " in raw:
+            continue
+        if _amount_match(raw, int_ok=int_ok) is not None:
+            found.append(index)
+    return found
+
+
+def _looks_like_product(texts: list[str], amounts: list[int], mode: bool) -> bool:
+    values: list[Decimal] = []
+    for index in amounts[-3:]:
+        nxt = texts[index + 1] if index + 1 < len(texts) else ""
+        values.append(_signed(texts[index], nxt, cr_negative=mode) or Decimal(0))
+    qty, price, value = values
+    if qty == 0 or price == 0:
+        return False
+    return abs(abs(qty) * abs(price) - abs(value)) <= Decimal("0.05")
+
+
+def _roles_for_line(
+    texts: list[str],
+    amounts: list[int],
+    *,
+    low: str,
+    dated: bool,
+    seen_open: bool,
+    seen_close: bool,
+    mode: bool,
+) -> dict[int, str]:
+    other = {index: "other" for index in amounts}
+    if not dated and not seen_open and OPEN_RE.search(low):
+        other[amounts[-1]] = "opening"
+        return other
+    if not dated and not seen_close and CLOSE_RE.search(low):
+        other[amounts[-1]] = "closing"
+        return other
+    if not dated and re.search(r"\b(?:subtotal|total)\b", low):
+        other[amounts[-1]] = "section"
+        return other
+    if dated and len(amounts) >= 3 and _looks_like_product(texts, amounts, mode):
+        other[amounts[-3]] = "qty"
+        other[amounts[-2]] = "price"
+        other[amounts[-1]] = "value"
+        return other
+    if dated and len(amounts) >= 2:
+        other[amounts[-2]] = "txn"
+        other[amounts[-1]] = "running"
+        return other
+    if dated:
+        other[amounts[0]] = "txn"
+    return other
+
+
+def _is_uniform_scale(old: list[Decimal], new: list[Decimal]) -> bool:
+    if len(old) < 2 or len(old) != len(new):
+        return False
+    ratios: list[Decimal] = []
+    for before, after in zip(old, new, strict=True):
+        if before == 0:
+            return False
+        ratios.append(after / before)
+    first = ratios[0]
+    if any(ratio != first for ratio in ratios):
+        return False
+    if first != first.to_integral_value():
+        return False
+    return Decimal(2) <= first <= Decimal(30)
+
+
 def _signed(text: str, marker: str = "", *, cr_negative: bool = False) -> Decimal | None:
     """Signed value of an amount token. ``marker`` is a following CR/DR token, if any."""
-    m = AMOUNT_RE.fullmatch(text)
-    if not m:
+    match = _amount_match(text)
+    if match is None:
         return None
-    val = Decimal(m["num"].replace(",", ""))
-    if m["lp"] or m["neg"] == "-" or m["neg2"] or m["suf"] == "-":
+    num = match.group("num") or ""
+    val = _parse_num(num, euro=_num_is_euro(num))
+    negative = (
+        match.group("lp")
+        or match.group("neg") == "-"
+        or match.group("neg2")
+        or match.group("suf") == "-"
+    )
+    if negative:
         val = -val
-    tag = (m["suf"] or marker).lower().strip("-")
+    tag = (match.group("suf") or marker).lower().strip("-")
     if (tag == "cr" and cr_negative) or (tag == "dr" and not cr_negative):
         val = -val
     return val
@@ -663,21 +1463,25 @@ def sanitize_doc(
     doc: Doc, *, seed: int | None = None, keep_words: Iterable[str] = ()
 ) -> SanitizedDoc:
     s = Sanitizer(seed, keep_words)
-    s.prescan_years(t.text for p in doc.pages for ln in p.lines for t in ln.tokens)
+    rows = [[tok.text for tok in ln.tokens] for page in doc.pages for ln in page.lines]
+    s.observe_lines(rows, kind=doc.kind)
+    s.plan(rows, kind=doc.kind)
     before: list[list[str]] = []
     after: list[list[str]] = []
     out_pages: list[Page] = []
     n_tokens = 0
+    flat = 0
     for page in doc.pages:
         new_lines: list[Line] = []
         for ln in page.lines:
-            texts = [t.text for t in ln.tokens]
+            texts = rows[flat]
             if doc.kind == "ofx":
-                new = [s.ofx_line(texts[0])]
+                new = [s.ofx_line(texts[0], flat)] if texts else [""]
             elif doc.kind == "csv":
-                new = [_csv_cell(s, c) for c in texts]
+                new = [s.csv_cell(cell, flat, index) for index, cell in enumerate(texts)]
             else:
-                new = s.tokens(texts)
+                new = s.tokens(texts, line_no=flat)
+            flat += 1
             n_tokens += len(texts)
             before.append(texts)
             after.append(new)
@@ -701,11 +1505,6 @@ def sanitize_doc(
         "warnings": list(doc.warnings),
     }
     return SanitizedDoc(Doc(doc.kind, out_pages, doc.warnings), report)
-
-
-def _csv_cell(s: Sanitizer, cell: str) -> str:
-    words = cell.split(" ")
-    return " ".join(s.tokens(words, int_ok=len(words) == 1))
 
 
 def render_text(doc: Doc) -> str:
@@ -799,6 +1598,7 @@ def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -
             raise SanitizeError("zip has too many entries")
         if sum(i.file_size for i in infos) > limits.max_total_bytes:
             raise SanitizeError("zip uncompressed size exceeds limit")
+        total_written = 0
         for info in infos:
             if not _safe_member(info.filename):
                 raise SanitizeError("zip entry path is unsafe (traversal or absolute)")
@@ -817,19 +1617,29 @@ def extract_zip(zpath: Path, dest: Path, limits: Limits, start_index: int = 0) -
                 continue
             if info.file_size > limits.max_file_bytes:
                 raise SanitizeError("zip entry exceeds the per-file size limit")
-            if info.file_size > 1024 * 1024 and info.file_size > limits.max_ratio * max(
-                info.compress_size, 1
-            ):
-                raise SanitizeError("zip entry compression ratio is suspicious")
             target = dest / f"{start_index + len(out):04d}{suffix}"
             written = 0
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as fh, zf.open(info) as src:
-                while chunk := src.read(1024 * 1024):
-                    written += len(chunk)
-                    if written > limits.max_file_bytes:
-                        raise SanitizeError("zip entry exceeds the per-file size limit")
-                    fh.write(chunk)
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as fh, zf.open(info) as src:
+                    while chunk := src.read(1024 * 1024):
+                        written += len(chunk)
+                        total_written += len(chunk)
+                        if written > limits.max_file_bytes:
+                            raise SanitizeError("zip entry exceeds the per-file size limit")
+                        if total_written > limits.max_total_bytes:
+                            raise SanitizeError("zip uncompressed size exceeds limit")
+                        fh.write(chunk)
+                if written > 1024 * 1024 and written > limits.max_ratio * max(
+                    info.compress_size, 1
+                ):
+                    raise SanitizeError("zip entry compression ratio is suspicious")
+            except zipfile.BadZipFile as exc:
+                target.unlink(missing_ok=True)
+                raise SanitizeError("zip entry failed integrity check") from exc
+            except SanitizeError:
+                target.unlink(missing_ok=True)
+                raise
             out.append(target)
     return out
 
@@ -893,8 +1703,11 @@ def sanitize_path(
             name = f"doc-{n:04d}"
             entry: dict[str, Any] = {"doc": name, "suffix": path.suffix.lower()}
             try:
-                entry["sha256_12"] = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
-                result = sanitize_doc(extract(path), seed=seed, keep_words=keep_words)
+                result = sanitize_doc(
+                    extract(path, limits=limits), seed=seed, keep_words=keep_words
+                )
+            except SanitizeError:
+                raise
             except Exception as exc:
                 entry["error"] = type(exc).__name__
                 logger.warning("sanitize failed doc=%s error=%s", name, type(exc).__name__)
@@ -902,6 +1715,7 @@ def sanitize_path(
                 continue
             entry.update(result.report)
             text = render_text(result.doc)
+            entry["sha256_12"] = hashlib.sha256(text.encode()).hexdigest()[:12]
             texts.append(f"===== {name} ({result.doc.kind}) =====\n{text}")
             if out is not None:
                 _write_private(out / f"{name}.layout.json", layout_json(result.doc))

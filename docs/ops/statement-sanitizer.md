@@ -15,7 +15,7 @@ make sanitize IN=data/inbox/statements.zip OUT=data/outbox/run1
 Outputs per document: `doc-0001.txt` (layout text), `doc-0001.layout.json` (tokens with
 positions), `doc-0001.report.json`, plus a top-level `SUMMARY.json`. Output names are numbered;
 original file names are never copied. The report holds counts by kind and a 12-char SHA-256 of
-the source file, never any original value.
+the sanitized text, never a hash or any other value from the source file.
 
 Equivalent: `cd backend && uv run python -m app.importers.sanitize <in> <out>`.
 
@@ -27,13 +27,15 @@ words are left as-is, so only keep names that are not yours).
 
 - Default-deny: every word that is not a known label (Beginning Balance, Deposits, ...), a date,
   an amount or punctuation is replaced with a synthetic word of the same length and case.
-- Names, addresses, merchants, account/card/routing numbers and any other digit run are replaced
-  (same length). Emails become `userNNN@example.test`.
-- Dates keep their format and shift by one random offset per document.
-- Amounts keep their format and sign markers (`-`, parentheses, `CR`/`DR`) and are multiplied by
-  one secret per-document integer, exactly, in `Decimal`. Because the map is linear, opening +
-  sum of transactions = closing, running balances and section totals all still hold. The report
-  says `reconciled_before`, `reconciled_after` and `reconciliation_survived`.
+- Names, addresses, merchants, account/card/routing numbers and any other digit run are replaced.
+  Emails become `userNNN@example.test`.
+- Dates keep their format and their order. Each gap is redrawn, and a clock time is replaced, so
+  one known date does not translate the rest of the document.
+- Amounts keep their format and sign markers (`-`, parentheses, `CR`/`DR`). Each transaction is a
+  fresh `Decimal` on the cent grid, not a multiple of the original. Opening, running balances,
+  section totals and closing are recomputed so opening + sum of transactions = closing. On a
+  brokerage row, two of quantity, price and value are fresh and the third is their product.
+  The report says `reconciled_before`, `reconciled_after` and `reconciliation_survived`.
 - Nothing original is logged or printed.
 
 ## Review before anyone else sees it
@@ -42,10 +44,10 @@ words are left as-is, so only keep names that are not yours).
 make sanitize IN=data/inbox/statements.zip REVIEW=1 | less
 ```
 
-`REVIEW=1` prints only sanitized text and writes nothing. Read it yourself. Look for anything
-that still identifies you (a nickname, an employer, a rare merchant that happened to be a label
-word). If something slipped through, delete that output and tell Keel the word so it is removed
-from the label list. Do not paste originals into chat.
+`REVIEW=1` prints only sanitized text and writes nothing. Dollars in that text are synthetic.
+Read it for a leftover name: a nickname, an employer, a rare merchant. If something slipped
+through, delete that output and tell Keel the word so it is removed from the label list. Do not
+paste originals into chat.
 
 ## Where approved output goes
 
@@ -57,19 +59,20 @@ bank name to an agent and say the fixtures are ready. Never copy anything from `
 ## Safety limits
 
 Zip input rejects path traversal (`..`, absolute, backslash, drive letters), symlinks, special
-files and encrypted entries. Defaults: 500 files, 50 MiB per file, 500 MiB total, and a 200x
-compression-ratio guard. Extraction goes to a `0700` temp dir that is removed afterwards. Other
-file types are skipped.
+files and encrypted entries. Defaults: 500 files, 50 MiB per file, 500 MiB total counted from
+bytes the reader actually returns, a 200x guard on bytes written versus the compressed size, and
+50 PDF pages. Python's zip reader also stops at the declared uncompressed size; a header that
+does not match the payload fails an integrity check and the run aborts. Extraction goes to a
+`0700` temp dir that is removed afterwards, including a member rejected for size or ratio.
+Other file types are skipped.
 
 ## Known limits
 
 - Scanned or image-only PDFs have no text layer. They are flagged `no_text_layer_needs_ocr` in
   the report and emit nothing useful. OCR is not included.
-- Amounts are scaled, so ratios between amounts survive (a paycheck still looks like 20x a
-  coffee), and `quantity x price = value` does not survive in brokerage statements. Reconciliation
-  does.
-- Amount-looking numbers with decimals are scaled everywhere, including rates like `1.5000`.
-  Percentages (`19.99%`) are left alone.
+- Amount ratios do not survive. A paycheck does not stay a fixed multiple of a coffee.
+- Percentages such as an APR are replaced along with other amounts.
+- `quantity x price = value` is rebuilt from synthetic quantity and price.
 - Layout text uses positions from the PDF. Columns line up roughly, not pixel-exact.
 - Reconciliation checking is heuristic (it looks for Beginning/Opening/Previous and
   Ending/Closing/New Balance lines and date-led rows). It reports `null` when it cannot tell.

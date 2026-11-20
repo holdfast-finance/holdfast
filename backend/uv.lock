@@ -465,7 +465,6 @@ dependencies = [
     { name = "arq" },
     { name = "cryptography" },
     { name = "fastapi" },
-    { name = "pdfplumber" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -477,12 +476,18 @@ dependencies = [
     { name = "webauthn" },
 ]
 
+[package.optional-dependencies]
+sanitize = [
+    { name = "pdfplumber" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "import-linter" },
     { name = "mypy" },
+    { name = "pdfplumber" },
     { name = "pip-audit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -497,7 +502,7 @@ requires-dist = [
     { name = "arq", specifier = ">=0.26" },
     { name = "cryptography", specifier = ">=43" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "pdfplumber", specifier = ">=0.11.10" },
+    { name = "pdfplumber", marker = "extra == 'sanitize'", specifier = ">=0.11.10" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
@@ -508,6 +513,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "webauthn", specifier = ">=3.0.1" },
 ]
+provides-extras = ["sanitize"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -515,6 +521,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6.170.15" },
     { name = "import-linter", specifier = ">=2.17" },
     { name = "mypy", specifier = ">=1.13" },
+    { name = "pdfplumber", specifier = ">=0.11.10" },
     { name = "pip-audit", specifier = ">=2.7" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
