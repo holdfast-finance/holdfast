@@ -25,6 +25,7 @@ class FakeGH:
         self.compare_error = compare_error
         self.issues: list[tuple[str, str]] = []
         self.labels = 0
+        self.timeline_events: list[dict] = []
         self.compared = 0
 
     def compare(self, repo: str, before: str, after: str) -> dict:
@@ -38,6 +39,9 @@ class FakeGH:
 
     def check_runs(self, repo: str, sha: str) -> list:
         return self._runs[sha]
+
+    def timeline(self, repo: str, number: int) -> list:
+        return self.timeline_events
 
     def ensure_label(self, repo: str) -> None:
         self.labels += 1
@@ -211,6 +215,48 @@ class MainGuardTests(unittest.TestCase):
         code, out = self._gate([_job("review-gate", "success", "2026-11-19T01:00:00Z", pr=None)])
         self.assertEqual(code, 1, out)
         self.assertIn("missing", out)
+
+    def test_forged_ci_required_for_other_pr_or_base_is_ignored(self) -> None:
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "failure", "2026-11-19T01:00:00Z"),
+            _job("ci-required", "success", "2026-11-19T05:00:00Z", pr=3, base="x"),
+            _job("ci-required", "success", "2026-11-19T06:00:00Z", base="x"),
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("ci-required", out)
+        self.assertIn("failure", out)
+
+    def test_ci_required_empty_pull_requests_and_push_fail_closed(self) -> None:
+        for job in (
+            _job("ci-required", "success", "2026-11-19T01:00:00Z", pr=None),
+            _job("ci-required", "success", "2026-11-19T01:00:00Z", event="push"),
+        ):
+            runs = {HEAD: [_job("review-gate", "success", "2026-11-19T00:00:00Z"), job]}
+            gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+            code, out = _run(gh)
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing", out)
+
+    def test_base_ref_changed_fails(self) -> None:
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+            _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        gh.timeline_events = [{"event": "labeled"}, {"event": "base_ref_changed"}]
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
+        self.assertIn("base was changed", out)
+
+    def test_timeline_api_error_fails_closed(self) -> None:
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs={HEAD: []})
+        gh.timeline = lambda *_a, **_k: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            main_guard.ApiError("timeline", 1))
+        code, out = _run(gh)
+        self.assertEqual(code, 1, out)
 
     def test_workflow_path_must_equal_exactly(self) -> None:
         run = _job("ci-required", "success", "x", "evil/.github/workflows/ci.yml")

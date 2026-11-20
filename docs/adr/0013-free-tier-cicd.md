@@ -53,7 +53,12 @@
    (and a scrubbed env, since the steps need many tool variables).
    `main-guard` binds each check to its trusted trigger: `review-gate` counts only from a
    `pull_request_target` run that lists the merged PR with base `main` (empty list fails closed);
-   `ci-required` counts from `pull_request` or `push` runs of `ci.yml`.
+   `ci-required` counts only from `pull_request` runs of `ci.yml`, and those must also list the
+   merged PR with base `main` (a sibling PR against a crafted base cannot forge it). A
+   `base_ref_changed` event on the merged PR's timeline fails the push. `ci.yml` runs
+   `pull_request` only for base `main`.
+   **Accepted risk (L3):** `main-guard` detects, it does not prevent. A bad push to `main` is found
+   after the fact and reverted through a PR.
 5. **Later options (owner decisions, no cost):**
    - **Making the repo public** removes both limits: rulesets become available and Actions minutes are
      unlimited for public repos. It's an AGPL project going open source anyway. The cost is publishing

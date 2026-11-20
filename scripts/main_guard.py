@@ -26,14 +26,15 @@ CHECK_WORKFLOWS = {
 }
 # Trusted trigger per check. A PR can edit its own copy of any workflow that runs on
 # ``pull_request``, so review-gate counts only from ``pull_request_target`` (it runs the
-# base-branch file). ci-required has no base-branch twin: it counts from ``pull_request``
-# (or ``push``) and ci.yml is a protected path that review-gate makes Bulwark sign off.
+# base-branch file). ci-required has no base-branch twin: it counts only from
+# ``pull_request`` and ci.yml is a protected path that review-gate makes Bulwark sign off.
 CHECK_EVENTS = {
-    "ci-required": ("pull_request", "push"),
+    "ci-required": ("pull_request",),
     "review-gate": ("pull_request_target",),
 }
-# review-gate must also belong to the merged PR, with base ``main``.
-PR_BOUND_CHECKS = ("review-gate",)
+# Both must also belong to the merged PR, with base ``main``. Otherwise a sibling PR
+# from the same head against a crafted base branch can publish a forged green run.
+PR_BOUND_CHECKS = ("ci-required", "review-gate")
 BASE_BRANCH = "main"
 LABEL = "main-guard"
 Runner = Callable[..., tuple[int, str, str]]
@@ -52,6 +53,8 @@ class GitHub(Protocol):
     def pulls(self, repo: str, sha: str) -> list[dict[str, Any]]: ...
 
     def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]: ...
+
+    def timeline(self, repo: str, number: int) -> list[dict[str, Any]]: ...
 
     def ensure_label(self, repo: str) -> None: ...
 
@@ -155,6 +158,17 @@ class GhApi:
                 job["pull_requests"] = run.get("pull_requests") or []
                 rows.append(job)
         return rows
+
+    def timeline(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """Timeline event names for a PR (paginated). Used to spot a retargeted base."""
+        return self._lines(
+            [
+                "gh", "api", "--paginate",
+                f"repos/{repo}/issues/{number}/timeline?per_page=100",
+                "--header", "Accept: application/vnd.github+json",
+                "--jq", ".[] | {event}",
+            ]
+        )
 
     def ensure_label(self, repo: str) -> None:
         code, _out, _err = self._runner(["gh", "api", f"repos/{repo}/labels/{LABEL}"])
@@ -341,6 +355,17 @@ def reasons_from_compare(compare: dict[str, Any], gh: GitHub, repo: str) -> list
         merged = merged_prs(pulls, sha)
         runs: list[dict[str, Any]] = []
         if len(merged) == 1 and merged[0].get("head_sha"):
+            try:
+                events = gh.timeline(repo, int(merged[0]["number"]))
+            except (ApiError, KeyError, TypeError, ValueError):
+                reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
+                continue
+            if any(e.get("event") == "base_ref_changed" for e in events):
+                reasons.append(
+                    f"{sha}: PR #{merged[0]['number']} base was changed; "
+                    "a green run may belong to another base"
+                )
+                continue
             try:
                 runs = gh.check_runs(repo, str(merged[0]["head_sha"]))
             except ApiError:
