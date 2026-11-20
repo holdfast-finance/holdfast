@@ -1,7 +1,8 @@
 # Handoff queue: Anvil (Codex) and Helm (Grok)
 
-Rules are in `AGENTS.md` and ADR 0012. **Nothing here starts until the owner has finished
-`docs/process/EXTERNAL-AGENTS-SETUP.md`.** Take the first story in **your** column that has no open
+Rules are in `AGENTS.md` and ADR 0012. **Dispatch is suspended (Keel, 2026-11-20): nothing here starts
+until the machine-user isolation exists** (the `holdfast-agents` OS user and the Read-role GitHub machine user,
+`docs/process/EXTERNAL-AGENTS-SETUP.md`, an owner-queue item in `docs/STATUS.md`). Take the first story in **your** column that has no open
 PR. An open (draft) PR is the claim. Briefs are in `docs/planning/briefs/`. Keel reviews and merges
 on its next window and updates this file.
 
@@ -33,7 +34,11 @@ including the user config. If either is set, Codex ignores `default_permissions`
 `holdfast` denials never apply. Before the first run, check that the active policy is
 `holdfast`.
 
+Start sessions only through `scripts/external-agent-launch.sh`. It refuses unless `id -un` is
+`holdfast-agents` and `gh api repos/holdfast-finance/holdfast --jq .permissions.push` prints `false`, it
+rejects sandbox-override flags, and it starts the CLI from the repo root. Nothing else is a supported launch.
+
 ```sh
-codex exec -C ~/holdfast "You are Anvil. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
-grok --cwd ~/holdfast --permission-mode acceptEdits "You are Helm. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
+scripts/external-agent-launch.sh codex exec "You are Anvil. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
+scripts/external-agent-launch.sh grok --permission-mode acceptEdits "You are Helm. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
 ```

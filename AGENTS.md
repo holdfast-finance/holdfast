@@ -7,11 +7,11 @@ frontmatter matches it. If this file and `CLAUDE.md` disagree, `CLAUDE.md` wins.
 Anvil (Codex) uses `.codex/` and `.agents/skills/` (setup in `docs/process/CODEX-SETUP.md`). Helm (Grok)
 uses `.grok/` (agents, skills, hooks, the `/holdfast-review` workflow; setup in `docs/process/GROK-SETUP.md`).
 Both follow the current SDLC in `docs/process/SDLC.md`: story branches, a squash by Keel, phases as tags.
-Treat `CLAUDE.md` and `.claude/` as read-only.
+Treat `CLAUDE.md`, `.claude/`, `.codex/`, `.agents/`, `.grok/`, `AGENTS.md` and `.githooks/` as read-only; the guards enforce it.
 
 Agents from other vendors work here under ADR 0012 (`docs/adr/0012-external-coding-agents.md`).
 They're team members with their own names and lanes, and they go through the same merge gate as
-everyone else. **They don't start until the owner has finished `docs/process/EXTERNAL-AGENTS-SETUP.md`.**
+everyone else. **Dispatch is suspended (Keel, 2026-11-20) until the owner has created the `holdfast-agents` OS user and the Read-role machine user (`docs/process/EXTERNAL-AGENTS-SETUP.md`). The only supported launch is `scripts/external-agent-launch.sh`.**
 
 ## Backup mode (owner decision 2026-11-19)
 
@@ -21,12 +21,13 @@ Anvil and Helm are the team's **backups** for when Claude usage runs out. In bac
   `docs/process/GROK-SETUP.md`).
   The lane rules below still apply to every role.
 - **Reviews from a backup are advisory.** Post them as PR comments that name the head SHA and end
-  `— <Role> via Anvil|Helm, Holdfast`. Keel decides on return whether one counts. Protected paths
+  `— <Role> via Anvil|Helm (advisory)`. Keel decides on return whether one counts. Protected paths
   always wait for a Claude-team Bulwark verdict.
 - **Never merge, label, approve or edit someone else's PR.** Work queues as PRs until Keel is back.
-- Pick work in this order: `HANDOFF.md`, then any Sprint story in `docs/planning/SPRINTS.md` that
-  has a brief, no open PR and no forbidden path.
-- Neither Anvil nor Helm is launched until `docs/process/EXTERNAL-AGENTS-SETUP.md` is done.
+- Pick work only from **your own column** of `docs/planning/HANDOFF.md`, first story with no open PR. Nothing
+  else, and never a story with a forbidden path (see Lanes). The seats' external lane overrides ROSTER.
+- Neither Anvil nor Helm is launched until `docs/process/EXTERNAL-AGENTS-SETUP.md` is done, and then only through
+  `scripts/external-agent-launch.sh`, which refuses unless you are the `holdfast-agents` user with a Read-role GitHub identity.
 
 ## Who you are
 

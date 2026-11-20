@@ -1,10 +1,11 @@
 # Holdfast in Codex
 
-Anvil is the Codex contributor. Start a fresh local Codex session at the repo
-root so it can discover the agent definitions and skills. Review the project hook
+Anvil is the Codex contributor. **Dispatch is suspended** until the `holdfast-agents` OS user and the Read-role
+machine user exist (owner queue, ADR 0012). The only supported launch is `scripts/external-agent-launch.sh codex ...`,
+which refuses unless `id -un` is `holdfast-agents` and `gh api repos/holdfast-finance/holdfast --jq .permissions.push`
+prints `false`. It starts Codex at the repo root so it can discover the agent definitions and skills. Review the project hook
 commands before trusting them with `/hooks`. The hook commands use Git and
-Python 3. The Python and web formatters run when the local toolchains
-are available. See [Codex agent guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+Python 3. There is no post-edit formatter for Anvil; CI and `make lint` enforce formatting. See [Codex agent guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 and [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 
 | Claude Code setup | Codex setup |
@@ -12,15 +13,15 @@ and [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 | `CLAUDE.md` and nine `.claude/rules/` files | [AGENTS.md](../../AGENTS.md) points to the shared engineering contract and requires reading all matching path rules. Security applies to every task. |
 | Fifteen builders, specialists, and reviewer profiles | [Custom agents](../../.codex/agents/) preserve role names, instructions, and effort. Opus maps to GPT-6.2 Astra. Sonnet and Haiku map to GPT-6.2 Sol with the original effort. Keel remains the project coordinator. |
 | Six Markdown skills | [Skill entry points](../../.agents/skills/) reuse the source workflows. Phase operations follow the current SDLC and Anvil routes phase decisions to Keel. |
-| Pre-edit guard and post-edit formatter | [`.codex/hooks/patch.py`](../../.codex/hooks/patch.py), wired from [hooks.json](../../.codex/hooks.json), guards and formats Codex `apply_patch` events. It rejects a resolved path outside the repo, protected data, and `.claude` edits, and it scans additions for secrets. Claude's `guard-secrets.sh` does not run for Anvil. The formatter only touches repository files. |
-| Shell approvals and Plaid defaults | [Project config](../../.codex/config.toml) sets `PLAID_ENV=sandbox` for shell commands. [Command rules](../../.codex/rules/holdfast.rules) carry over the explicit approval prefixes and the two forbidden `cat` commands. |
+| Pre-edit guard | [`.codex/hooks/patch.py`](../../.codex/hooks.json) hands every `apply_patch` event to the shared [`scripts/agent_guard.py`](../../scripts/agent_guard.py), which fails closed. It resolves each target with realpath (symlinks and `..` included) and rejects paths outside the repo, `.env*`, `data/`, `secrets/`, `exports/`, and the agent and CI config (`.claude/`, `.codex/`, `.agents/`, `.grok/`, `CLAUDE.md`, `AGENTS.md`, `.githooks/`, `.gitleaks.toml`). It scans every string in the patch for secrets, SSNs and 12+ consecutive BIP39 words. Claude's `guard-secrets.sh` does not run for Anvil. |
+| Shell approvals and Plaid defaults | [Project config](../../.codex/config.toml) sets `PLAID_ENV=sandbox` for shell commands. [Command rules](../../.codex/rules/holdfast.rules) forbid secret reads, `gh` merge, review, edit, label, release, secret, ruleset, workflow and `api`, pushes to `upstream` and to `main` in the enumerated forms, `git tag`, `git commit -n/--no-verify`, `git -C`/`git -c` and `bash -c`, and prompt for the rest of the Claude approval list. Prefix rules match exact argv prefixes, so the GitHub Read role and the OS user stay the hard boundary. Verify with `codex execpolicy check --rules .codex/rules/holdfast.rules <command>`; `scripts/tests/test_agent_guard.py` does so. |
 | Plugin capabilities | Use the project's lint/type commands, review profiles, Git tooling, official library sources, and Playwright. Browser and documentation tools depend on the Codex surface and session. |
 
 The hook and command-rule scopes matter. The hooks cover Codex patch edits.
 Trusted local CLI sessions default to the `holdfast` permission profile. The
 profile denies reads of matching private files (`data/`, `secrets/`, `exports/`,
-`.aws/`, and `.env` files at any depth) and marks the Claude configuration
-read-only. These use globs so a fresh checkout can launch without those
+`.aws/`, and `.env` files at any depth) and marks `.claude`, `.codex`, `.agents`, `.grok`, `.githooks`,
+`CLAUDE.md` and `AGENTS.md` read-only. These use globs so a fresh checkout can launch without those
 directories. On Linux the deny globs match files present when a sandboxed
 command starts. Workspace-managed sessions apply their own policy. Claude's
 shell and domain allowlists have no direct project-wide equivalent here, so
@@ -68,4 +69,4 @@ scripts exit with a clear message and are scheduled for Phase 9.
 | Frontend `pnpm test --run` | 193 passed, two skipped. Lint, typecheck, and build passed. |
 | Browser `pnpm e2e` | Chromium passed first-run setup, passkey registration, adding a second person, sign-out, and passkey sign-in. The test used Vite preview as the local proxy. |
 | Compose overlays | Port checks passed for base, dev, and production. Production rendered `APP_ENV=prod` for API and worker. |
-| Codex setup | Validated all 15 agent TOMLs, six skill entry points, hook JSON, shell rule decisions, six guard cases, and formatter handoff from a subdirectory. Sandbox startup and deny rules were checked with synthetic files. |
+| Codex setup | Validated all 15 agent TOMLs, six skill entry points, hook JSON, shell rule decisions, and the shared guard payload matrix (`scripts/tests/test_agent_guard.py`). Sandbox startup and deny rules were checked with synthetic files. |

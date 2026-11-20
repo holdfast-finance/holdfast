@@ -36,4 +36,6 @@ As `holdfast-agents`: `cat /home/<you>/Documents/CODE/holdfast/.env` must fail w
 and `gh api repos/holdfast-finance/holdfast --jq .permissions.push` must print `false`.
 
 ## 4. Start them
-Use the commands at the bottom of `docs/planning/HANDOFF.md`.
+Use `scripts/external-agent-launch.sh` with the commands at the bottom of `docs/planning/HANDOFF.md`. It is the
+only supported launch: it refuses unless the OS user is `holdfast-agents` and the push check in step 3 prints
+`false`. Dispatch stays suspended until this whole page is done.

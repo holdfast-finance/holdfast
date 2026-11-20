@@ -35,6 +35,7 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 ## Owner to-do
 
+- [ ] **Before any Codex/Grok run:** create `holdfast-agents` OS user + Read-role GitHub machine user (ADR 0012). Dispatch of Anvil and Helm is suspended until then (Keel, 2026-11-20). Start them only with `scripts/external-agent-launch.sh`
 - [ ] Set up Anvil (Codex) and Helm (Grok): machine user + fork + separate OS user, `docs/process/EXTERNAL-AGENTS-SETUP.md` (ADR 0012). They don't start until this is done
 - [ ] Decide (no cost, optional): make the repo public before the OSS milestone. That unlocks rulesets on `main` and unlimited Actions minutes (ADR 0013). Until then: free tier, `main-guard` detection, 2,000 min/month
 - [ ] **First:** move the production Plaid keys out of the dev `.env` (keep only sandbox keys). Agents build Phase 2 fixture-first until then

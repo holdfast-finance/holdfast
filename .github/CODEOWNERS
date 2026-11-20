@@ -14,5 +14,7 @@
 #   .github/, infra/, docker-compose*.yml, Makefile, scripts/           Harbor -> Bulwark
 #   docs/                                                               Beacon -> Keel
 #
-# Protected (always a separate Bulwark verdict): .github/ .claude/ CLAUDE.md .githooks/
+# Protected (always a separate Bulwark verdict): .github/ .claude/ .codex/ .agents/ .grok/ CLAUDE.md AGENTS.md
+#   .githooks/ .gitleaks.toml scripts/agent_guard.py scripts/external-agent-launch.sh (full list: protected_re in scripts/check-protected-paths.sh)
+# Also protected:
 #   backend/app/security/ RLS migrations backend/app/agent/guardrails.py docker-compose*.yml infra/caddy/

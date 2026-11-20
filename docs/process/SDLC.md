@@ -34,7 +34,7 @@ Backlog (ROADMAP.md) ─► Sprint plan (Keel, per usage window)
 7. `review-gate`: Bulwark always for protected paths and new trust boundaries; Ledger (money), Tally (tax), Cipher (crypto), Prism (web) by path. Each sign-off names the head SHA; a later push invalidates it.
 8. Branch up to date with `main`; Conventional Commit title; agent attribution trailer.
 
-**Protected paths** need a separate Bulwark verdict even for one-line changes: `.github/`, `.claude/`, `.codex/`, `.agents/`, `CLAUDE.md`, `AGENTS.md`, `.githooks/`, `backend/app/security/`, RLS migrations, `agent/guardrails.py`, `docker-compose*.yml`, `infra/caddy/`.
+**Protected paths** need a separate Bulwark verdict even for one-line changes: `.github/`, `.claude/`, `.codex/`, `.agents/`, `.grok/`, `CLAUDE.md`, `AGENTS.md`, `.githooks/`, `backend/app/security/`, RLS migrations, `agent/guardrails.py`, `docker-compose*.yml`, `infra/caddy/`.
 
 Until the CI pieces exist (Sprint 1, F7), Keel runs the same list locally (`make test && make lint && make ports`, `gitleaks git` over the PR range, `uv run pip-audit` and `pnpm audit --audit-level high`) and dispatches the reviewer runs by hand. Protected-path sign-off comes from a **separate** Bulwark run that names the head SHA; F7 adds CODEOWNERS for protected paths and a required check for that sign-off.
 

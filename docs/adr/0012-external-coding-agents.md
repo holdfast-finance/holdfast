@@ -1,6 +1,6 @@
 # 0012. Coding agents from other vendors (Codex as Anvil, Grok as Helm)
 
-- Status: Accepted (agents start once the owner setup is done)
+- Status: Accepted. **Dispatch suspended** (Keel, 2026-11-20): no Codex or Grok run starts until the machine-user isolation exists (owner queue). `scripts/external-agent-launch.sh` is the only supported launch and refuses without it.
 - Date: 2026-11-19
 - Deciders: Keel; owner request ("prepare Codex and Grok to work while you're gone")
 
@@ -36,9 +36,14 @@ recorded here. `AGENTS.md` already said a new agent's lane has to be defined bef
 
 ## Consequences
 - More throughput when Claude windows are exhausted, at the cost of review load on Keel's next window.
-- The Claude hooks (`guard-secrets.sh`, `format.sh`) don't run for Anvil or Helm. The pre-commit
-  gitleaks hook, CI and `review-gate` still do.
+- Claude's own hook files don't run for Anvil or Helm. Their edits go through the shared
+  `scripts/agent_guard.py` instead (Codex via `.codex/hooks/patch.py`, Grok via `.grok/hooks/guard-secrets.sh`),
+  which fails closed and also blocks seed phrases. There is no post-edit formatting; CI and `make lint`
+  enforce it. The pre-commit gitleaks hook, CI and `review-gate` still run.
+- `scripts/external-agent-launch.sh` is the only supported way to start either CLI. It refuses unless the
+  OS user is `holdfast-agents` and `gh api repos/holdfast-finance/holdfast --jq .permissions.push` prints `false`.
+- Keel is a Claude-only seat. There is no Keel seat in `.codex/` or `.grok/`.
 - Agents can't run DB-backed tests locally (no docker group). CI is the source of truth for their PRs.
 - The owner pays for and configures each CLI. Usage isn't counted in the sprint token log.
 - If either agent breaks a lane rule, Keel closes its PRs and removes its column from `HANDOFF.md`.
-- Codex's own config (`.codex/`, `.agents/`) is a protected path and changes only through Keel and Bulwark.
+- The agents' own config (`.codex/`, `.agents/`, `.grok/`) and `AGENTS.md` are protected paths and change only through Keel and Bulwark. The guards and the Codex profile also refuse edits to them.
