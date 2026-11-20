@@ -22,6 +22,9 @@ dependencies = [
     "webauthn>=3.0.1",
 ]
 
+[project.optional-dependencies]
+sanitize = ["pdfplumber>=0.11.10"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
@@ -32,6 +35,8 @@ dev = [
     "pip-audit>=2.7",
     "hypothesis>=6.170.15",
     "import-linter>=2.17",
+    "reportlab>=5.1.0",
+    "pdfplumber>=0.11.10",
 ]
 
 [tool.uv]

@@ -98,6 +98,11 @@ migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` 
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
 
+.PHONY: sanitize
+sanitize: ## Sanitize real statements offline: make sanitize IN=data/inbox OUT=data/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
+	@test -n "$(IN)" || { echo "usage: make sanitize IN=<dir|zip|file> OUT=<dir> [REVIEW=1] [KEEP=Word]"; exit 2; }
+	@cd backend && uv run --extra sanitize python -m app.importers.sanitize "$(abspath $(IN))" $(if $(REVIEW),--review,"$(abspath $(OUT))") $(if $(CLEAR),--clear-out) $(foreach w,$(KEEP),--keep "$(w)")
+
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)
 	python3 scripts/gen-keys.py --write
 
