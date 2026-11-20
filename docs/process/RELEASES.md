@@ -11,6 +11,22 @@ The product uses [SemVer 2.0.0](https://semver.org/). The first product version 
 - From `1.0.0`, bump patch for compatible fixes, minor for compatible features or deprecations, and major for incompatible changes to the supported contract.
 - Publish each version once. Use a revert PR and a new release for a correction.
 
+## GitHub tags and Releases
+
+A public version release is two GitHub objects, and both point at the same commit on `main`.
+
+1. An annotated git tag named `v` plus the product SemVer: `v0.0.0-alpha`, `v1.2.3`. The tag object carries the message and the tagger. A lightweight tag is not a release.
+2. A GitHub Release created from that tag. `gh release create` sets `--target` to the commit SHA and passes `--verify-tag`, so the release cannot follow a branch that later moves. Pre-releases (`alpha`, `beta`, `rc`) pass `--prerelease` and `--latest=false`. The public Latest badge stays on the newest stable release. A stable release passes `--latest=true`.
+
+`phase-<n>` tags are milestones. `phase-0` and `phase-1` are already annotated tags. Leave them. Do not attach a GitHub Release to a phase tag.
+
+- One tag name, once. Do not move it and do not delete it. A correction is a new version.
+- Push only `refs/tags/<name>`. Do not use `--force` and do not use `--tags`.
+- Release notes live at `docs/releases/<tag>.md`. The plan refuses a missing file.
+- The Release is created on `holdfast-finance/holdfast`, not on a fork.
+- Changing `version` in a pull request does not create either object. `make release-check` only compares the two version strings. After that commit is on `main` and the stage evidence above is recorded, Keel runs `python3 scripts/cut_release.py plan --sha <sha>` and then those commands. Nobody else publishes.
+- The repository can be private when the tag is created. The release becomes public when the repository does (PLAN §17.6). Do not cut `v0.0.0-alpha` before that commit is on `main`.
+
 ## Compatibility and promotion
 
 Before `1.0.0`, each release names the upgrade paths tested for that version and documents breaking changes. The stable compatibility contract identifies the supported API and import/export formats, supported upgrade paths, and configuration or deployment interfaces that callers and operators can rely on. Release notes list changes to the contract, affected users, and required upgrade steps.

@@ -5,8 +5,9 @@ transaction: ``SELECT ... FOR UPDATE``, then a compare-and-swap ``UPDATE`` that 
 the column still equals the bytes just read. A failed swap is re-read once under a fresh lock; a
 second failure is a conflict. Plaintext from a lost snapshot is never written.
 
-The command runs as ``holdfast_app`` (no superuser, no BYPASSRLS). It walks households listed in
-``app_user`` (readable without a household context), sets the RLS context per household, and binds
+The command runs as ``holdfast_app`` (no superuser, no BYPASSRLS). It enumerates every household
+with ``list_household_ids()`` (SECURITY DEFINER, ids only; households with no user are included),
+sets the RLS context per household, and binds
 ``household_wide=True`` because a background job must see every person's rows. It logs and audits
 counts only. It exits non-zero unless every row is on the primary kid (failed, conflicted and the
 final residual scan are all zero).
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
-from app.db_context import scoped_session, unscoped_session
+from app.db_context import list_household_ids, scoped_session, unscoped_session
 from app.logging import configure_logging, get_logger
 from app.security import crypto
 from app.services import audit
@@ -146,8 +147,7 @@ async def _household_ids(
     factory: async_sessionmaker[AsyncSession], only: Collection[uuid.UUID] | None
 ) -> list[uuid.UUID]:
     async with unscoped_session(factory) as s:
-        rows = await s.execute(text("SELECT DISTINCT household_id FROM app_user ORDER BY 1"))
-        return [r[0] for r in rows if only is None or r[0] in only]
+        return [h for h in await list_household_ids(s) if only is None or h in only]
 
 
 async def _walk(
@@ -176,9 +176,13 @@ async def rotate(
     *,
     hook: Hook | None = None,
     only: Collection[uuid.UUID] | None = None,
+    counts: Counts | None = None,
 ) -> Counts:
-    """Rotate every row (``only`` limits to some households: tests, never the CLI)."""
-    counts = Counts()
+    """Rotate every row (``only`` limits to some households: tests, never the CLI).
+
+    Pass ``counts`` to keep the tallies if the run raises part-way (the CLI audits them).
+    """
+    counts = counts if counts is not None else Counts()
 
     async def rotate_one(s: AsyncSession, t: Target, ident: dict[str, Any]) -> None:
         try:
@@ -204,17 +208,48 @@ async def rotate(
     return counts
 
 
+async def _audit_failure(
+    factory: async_sessionmaker[AsyncSession], detail: dict[str, Any], reason: str
+) -> None:
+    """Best effort: a failed run still leaves a ``keys.rotate`` audit row (counts, reason)."""
+    try:
+        await audit.record(
+            factory,
+            "keys.rotate",
+            household_id=None,
+            outcome="failure",
+            detail={**detail, "reason": reason},
+        )
+    except Exception as exc:  # the audit write must never mask the original failure
+        log.error("keys.rotate.audit_failed", error=type(exc).__name__)
+
+
 async def _run() -> int:
     settings = get_settings()
-    try:
-        ring = crypto.load_ring(settings.fernet_key)
-    except crypto.CryptoError as exc:
-        log.error("keys.rotate.bad_ring", error=str(exc))
-        return 2
-    engine = create_engine(settings)
+    # hide_parameters: a chained SQLAlchemy error would otherwise carry ciphertext bind values.
+    engine = create_engine(settings, hide_parameters=True)
     factory = create_session_factory(engine)
+    counts = Counts()
     try:
-        counts = await rotate(factory, ring)
+        try:
+            ring = crypto.load_ring(settings.fernet_key)
+        except crypto.CryptoError as exc:
+            log.error("keys.rotate.bad_ring", error=str(exc))
+            await _audit_failure(factory, asdict(counts), "bad_ring")
+            return 2
+        aborted: str | None = None
+        try:
+            counts = await rotate(factory, ring, counts=counts)
+        except Exception as exc:
+            aborted = type(exc).__name__  # the type only: never the message or the chain
+        if aborted is not None:
+            log.error("keys.rotate.aborted", error=aborted)
+            await _audit_failure(factory, asdict(counts), f"aborted:{aborted}")
+            print(
+                "NOT CLEAN: rotation aborted. Keep every key in FERNET_KEY and run again.",
+                file=sys.stderr,
+            )
+            return 1
         detail = asdict(counts)
         await audit.record(
             factory,

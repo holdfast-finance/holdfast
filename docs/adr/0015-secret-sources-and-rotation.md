@@ -47,11 +47,11 @@ Operator key-change order. Do not skip or reorder:
 
 1. Prepend the new key to `FERNET_KEY` and keep every old key.
 2. Restart `api` and `worker` so every writer seals under the new key. A writer still on the old ring would keep minting old-kid rows.
-3. Run `make rotate-keys` (`./scripts/dev.ps1 rotate-keys`).
+3. Run `make rotate-keys-prod` on a prod host (`./scripts/dev.ps1 rotate-keys-prod`), or `make rotate-keys` (`./scripts/dev.ps1 rotate-keys`) in dev. Never use the dev target on a prod host: the dev overlay publishes the database port and joins the `frontend` network. Both targets use `run --rm --no-deps`, so they never recreate `db`.
 4. Run it again. Proceed only when it reports `rotated=0 failed=0 conflicted=0 residual=0`.
 5. Only then remove the retired key from `FERNET_KEY` and restart.
 
-The command refuses to report clean while any row, after its pass, is not an `hf1` envelope under the primary kid. After the rotation pass it re-reads every row of the three columns without decrypting, and counts as `residual` anything non-null that is not on the primary kid (failed rows, conflicts, rows an old-key writer added mid-run). It exits 0 only when failed, conflicted and residual are all zero; otherwise it exits 1 with a "keep every key" message. A bad or duplicate ring exits 2.
+The command refuses to report clean while any row, after its pass, is not an `hf1` envelope under the primary kid. After the rotation pass it re-reads every row of the three columns without decrypting, and counts as `residual` anything non-null that is not on the primary kid (failed rows, conflicts, rows an old-key writer added mid-run). It exits 0 only when failed, conflicted and residual are all zero; otherwise it exits 1 with a "keep every key" message. A bad or duplicate ring exits 2. An exception that escapes the pass exits 1. Every non-clean exit, including those two, makes a best-effort `keys.rotate` audit row with `outcome=failure`, the counts so far and a `reason`. The command enumerates households with `list_household_ids()` (migration 0005, SECURITY DEFINER, ids only), so a household with no user is still rotated and scanned. Its engine hides bound parameters, so an error chain never carries ciphertext. The `rotate-keys` service gets a minimal environment (`DATABASE_URL`, `POSTGRES_APP_PASSWORD`, `FERNET_KEY`, `APP_ENV`), not the backend secret set.
 
 Retired keys decrypt every backup taken before the rotation. Keep each retired key offline, outside the live `.env`, for as long as any backup that depends on it is retained, and destroy it with the last such backup.
 
@@ -108,7 +108,7 @@ Fernet has no associated data. Binding `household_id|column|name` inside the pla
 
 ## Consequences
 
-- Harbor's build (F5c) adds the envelope to `app.security.crypto`, `get_secret`, the rotator, `make rotate-keys` and the `rotate-keys` compose service (`tools` profile, `holdfast_app` role, backend network only, no ports), and the outbound validator. There is no migration and no new role.
+- Harbor's build (F5c) adds the envelope to `app.security.crypto`, `get_secret`, the rotator, `make rotate-keys` and the `rotate-keys` compose service (`tools` profile, `holdfast_app` role, backend network only, no ports), and the outbound validator. One small migration (0005) adds `list_household_ids()` and an owner-only SELECT policy on `household`; there is no new role.
 - Tests that have to land with the build: self-host returns the env canary when a different canary is in `household_setting`; hosted returns the row and does not use the env canary; hosted with no row and self-host with no env raise `SecretNotFound` whose text contains neither canary; `fernet_key` reads neither source; a null `totp_secret_enc` is not updated; a bare Fernet token becomes `hf1.<primary kid>....`; a broken `hf1` value is not trial-decrypted; two concurrent rotations leave one ciphertext and the plaintext of the bytes that won the lock; a second run writes nothing; a duplicate ring fails; an `hf1` value relabelled with another kid fails; the runtime role is still not a superuser and still has no `BYPASSRLS`.
 - Application writes to the three columns must seal as `hf1` in the same build, or rotation will keep finding fresh legacy rows.
 - `SecretToken` remains the F5a type (merged `9e16a5c`); F5c only makes it final. This ADR does not vendor another copy.

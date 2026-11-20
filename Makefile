@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys seed keys check health ports env-check sync test-locked
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys check health ports env-check sync test-locked release-check
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -96,7 +96,10 @@ migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` 
 	$(COMPOSE) run --rm migrate
 
 rotate-keys: env-check ## Re-encrypt stored secrets under the primary FERNET_KEY (ADR 0015); run twice
-	$(COMPOSE) run --rm rotate-keys
+	$(COMPOSE) run --rm --no-deps rotate-keys
+
+rotate-keys-prod: env-check ## rotate-keys against the prod stack (use this on a prod host)
+	$(COMPOSE_PROD) run --rm --no-deps rotate-keys
 
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
@@ -109,6 +112,9 @@ check: lint test ## lint + test
 sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@git fetch origin --quiet
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
+
+release-check: ## Compare product SemVer and Python version. Does not tag or publish.
+	python3 scripts/cut_release.py check
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
 	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \

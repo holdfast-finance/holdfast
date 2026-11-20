@@ -354,3 +354,152 @@ def test_runtime_role_is_still_not_superuser_and_has_no_bypassrls(app_engine: En
             text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
         ).one()
     assert tuple(row) == (False, False)
+
+
+async def test_household_with_no_user_is_rotated_not_skipped(
+    app_engine: Engine,
+    owner_engine: Engine,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """L1: enumeration goes through list_household_ids(), not app_user."""
+    old, new = crypto.generate_key(), crypto.generate_key()
+    ring = crypto.load_ring(SecretStr(f"{new},{old}"))
+    canary = f"orphan-{secrets.token_hex(10)}"
+    with app_engine.begin() as c:
+        hid = c.execute(text("SELECT create_household('Example Userless')")).scalar_one()
+        set_ctx(c, hid, wide=True)
+        c.execute(
+            text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
+            {"h": hid, "v": legacy(canary, old)},
+        )
+    try:
+        counts = await rotation.rotate(factory, ring, only=[hid])
+        assert (counts.rotated, counts.residual, counts.failed) == (1, 0, 0)
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            blob = bytes(
+                c.execute(
+                    text("SELECT value_enc FROM household_setting WHERE household_id = :h"),
+                    {"h": hid},
+                ).scalar_one()
+            )
+        assert crypto.is_current(blob, ring)
+        assert crypto.open_with(blob, ring).reveal() == canary
+    finally:
+        delete_household(owner_engine, hid)
+
+
+async def test_userless_household_with_an_unopenable_row_shows_as_failed_and_residual(
+    app_engine: Engine,
+    owner_engine: Engine,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ring = crypto.load_ring(SecretStr(crypto.generate_key()))
+    with app_engine.begin() as c:
+        hid = c.execute(text("SELECT create_household('Example Userless 2')")).scalar_one()
+        set_ctx(c, hid, wide=True)
+        c.execute(
+            text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
+            {"h": hid, "v": legacy("x", crypto.generate_key())},  # a key not in the ring
+        )
+    try:
+        counts = await rotation.rotate(factory, ring, only=[hid])
+        assert counts.failed == 1 and counts.residual == 1 and not counts.clean
+    finally:
+        delete_household(owner_engine, hid)
+
+
+async def test_rotator_engine_hides_bound_parameters(app_url: str) -> None:
+    """L3: a chained SQLAlchemy error must not carry ciphertext bind values."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.db import create_engine
+    from tests.conftest import make_settings
+
+    settings = make_settings(database_url=SecretStr(app_url))
+    canary = b"hf1.0123456789abcdef.gAAAACIPHERCANARY"
+    engine = create_engine(settings, hide_parameters=True)
+    try:
+        with pytest.raises(SQLAlchemyError) as ei:
+            async with engine.begin() as c:
+                await c.execute(
+                    text("UPDATE no_such_table SET x = :new WHERE x = :old"),
+                    {"new": canary, "old": b"gAAAAOLDCIPHERCANARY"},
+                )
+        assert "CIPHERCANARY" not in str(ei.value)
+        assert "CIPHERCANARY" not in repr(ei.value)
+    finally:
+        await engine.dispose()
+    loud = create_engine(settings)
+    try:
+        with pytest.raises(SQLAlchemyError) as ei2:
+            async with loud.begin() as c:
+                await c.execute(text("UPDATE no_such_table SET x = :new"), {"new": canary})
+        assert "CIPHERCANARY" in str(ei2.value)  # control: the default engine would leak
+    finally:
+        await loud.dispose()
+
+
+async def test_cli_audits_a_failure_row_when_rotate_raises(
+    app_url: str,
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.conftest import make_settings
+
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_record(factory: Any, action: str, **kw: Any) -> None:
+        recorded.append({"action": action, **kw})
+
+    async def boom(factory: Any, ring: Any, *, counts: rotation.Counts, **kw: Any) -> Any:
+        counts.rotated = 3
+        raise RuntimeError("db went away: ciphertext-should-not-be-printed")
+
+    settings = make_settings(
+        database_url=SecretStr(app_url), fernet_key=SecretStr(f"{world.new},{world.old}")
+    )
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(rotation, "rotate", boom)
+    monkeypatch.setattr(audit, "record", fake_record)
+    assert await rotation._run() == 1
+    assert recorded[0]["action"] == "keys.rotate" and recorded[0]["outcome"] == "failure"
+    assert recorded[0]["detail"]["rotated"] == 3
+    assert recorded[0]["detail"]["reason"] == "aborted:RuntimeError"
+    out = capsys.readouterr()
+    assert "should-not-be-printed" not in out.out + out.err
+
+
+async def test_cli_audits_a_failure_row_for_a_bad_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import make_settings
+
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_record(factory: Any, action: str, **kw: Any) -> None:
+        recorded.append({"action": action, **kw})
+
+    key = crypto.generate_key()
+    settings = make_settings(fernet_key=SecretStr(f"{key},{key}"))
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit, "record", fake_record)
+    assert await rotation._run() == 2
+    assert recorded[0]["outcome"] == "failure" and recorded[0]["detail"]["reason"] == "bad_ring"
+    assert recorded[0]["detail"]["rotated"] == 0
+
+
+async def test_audit_write_failure_does_not_mask_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import make_settings
+
+    async def broken(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("audit down")
+
+    key = crypto.generate_key()
+    settings = make_settings(fernet_key=SecretStr(f"{key},{key}"))
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit, "record", broken)
+    assert await rotation._run() == 2
