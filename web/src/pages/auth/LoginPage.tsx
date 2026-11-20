@@ -7,7 +7,7 @@ import { z } from 'zod'
 
 import { usePasskeyLogin, usePasswordLogin, useSetupStatus } from '@/api/auth'
 import { passkeysAvailable } from '@/api/client'
-import type { PasswordLoginRequest } from '@/api/types'
+import type { PasswordLoginRequest } from '@/api/contracts'
 import { RedirectIfSignedIn } from '@/app/guards'
 import { Field, FormError } from '@/components/forms/Field'
 import { AuthLayout } from '@/components/layout/AuthLayout'

@@ -1,26 +1,14 @@
-import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
+import {
+  startAuthentication,
+  startRegistration,
+  type PublicKeyCredentialCreationOptionsJSON,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from '@simplewebauthn/browser'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, ApiError } from '@/api/client'
-import type {
-  MeResponse,
-  PasskeyAssertionRequest,
-  PasskeyList,
-  PasskeyRegisterOptionsRequest,
-  PasskeyRegisterVerifyRequest,
-  PasskeyRegisterVerifyResponse,
-  PasswordLoginRequest,
-  PublicKeyCredentialCreationOptionsJSON,
-  PublicKeyCredentialRequestOptionsJSON,
-  SessionResponse,
-  SetPasswordRequest,
-  SetupRequest,
-  SetupStatus,
-  TotpEnableResponse,
-  TotpReauthRequest,
-  TotpSetupResponse,
-  UserResponse,
-} from '@/api/types'
+import { api, ApiError, readData } from '@/api/client'
+import type { MeResponse, PasswordLoginRequest } from '@/api/contracts'
+import type { components } from '@/api/schema'
 import { queryKeys } from '@/app/queryClient'
 import { withReauth } from '@/stores/reauth'
 
@@ -34,7 +22,7 @@ import { withReauth } from '@/stores/reauth'
 /** GET /auth/me. Resolves to `null` (not an error) when there is no session. */
 export async function fetchMe(signal?: AbortSignal): Promise<MeResponse | null> {
   try {
-    return await api<MeResponse>('/auth/me', { signal })
+    return await readData(api.GET('/api/auth/me', { signal }))
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) return null
     throw error
@@ -52,7 +40,7 @@ export function useMe() {
 export function useSetupStatus(enabled = true) {
   return useQuery({
     queryKey: queryKeys.setupStatus,
-    queryFn: ({ signal }) => api<SetupStatus>('/setup/status', { signal }),
+    queryFn: ({ signal }) => readData(api.GET('/api/setup/status', { signal })),
     enabled,
     staleTime: 60_000,
   })
@@ -71,7 +59,9 @@ function useAdoptSession() {
 export function useLogout() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api<undefined>('/auth/logout', { method: 'POST' }),
+    mutationFn: async () => {
+      await api.POST('/api/auth/logout')
+    },
     onSettled: () => {
       // Whatever the server said, forget everything this tab knew.
       client.clear()
@@ -83,36 +73,37 @@ export function useLogout() {
 // --- WebAuthn ceremonies -----------------------------------------------------------------------
 
 /** Options → browser ceremony → verify. Used by setup, invite accept and Security → Add passkey. */
-export async function registerPasskey(nickname?: string): Promise<PasskeyRegisterVerifyResponse> {
-  const body: PasskeyRegisterOptionsRequest = nickname ? { nickname } : {}
-  const optionsJSON = await api<PublicKeyCredentialCreationOptionsJSON>(
-    '/auth/passkey/register/options',
-    { method: 'POST', body },
+export async function registerPasskey(nickname?: string) {
+  const optionsJSON = await readData(
+    api.POST('/api/auth/passkey/register/options', { body: nickname ? { nickname } : {} }),
   )
-  const credential = await startRegistration({ optionsJSON })
-  const verify: PasskeyRegisterVerifyRequest = nickname ? { credential, nickname } : { credential }
-  return api<PasskeyRegisterVerifyResponse>('/auth/passkey/register/verify', {
-    method: 'POST',
-    body: verify,
+  // The OpenAPI response is an opaque dictionary from the backend's WebAuthn library.
+  const credential = await startRegistration({
+    optionsJSON: optionsJSON as unknown as PublicKeyCredentialCreationOptionsJSON,
   })
+  return readData(
+    api.POST('/api/auth/passkey/register/verify', {
+      body: { credential: { ...credential }, ...(nickname ? { nickname } : {}) },
+    }),
+  )
 }
 
-async function assertPasskey(prefix: '/auth/passkey/login' | '/auth/reauth/passkey') {
-  const optionsJSON = await api<PublicKeyCredentialRequestOptionsJSON>(`${prefix}/options`, {
-    method: 'POST',
-    body: {},
+async function assertPasskey(
+  optionsPath: '/api/auth/passkey/login/options' | '/api/auth/reauth/passkey/options',
+) {
+  const optionsJSON = await readData(api.POST(optionsPath))
+  const credential = await startAuthentication({
+    optionsJSON: optionsJSON as unknown as PublicKeyCredentialRequestOptionsJSON,
   })
-  const credential = await startAuthentication({ optionsJSON })
-  const body: PasskeyAssertionRequest = { credential }
-  return { body, verifyPath: `${prefix}/verify` }
+  return { credential: { ...credential } }
 }
 
 export function usePasskeyLogin() {
   const adopt = useAdoptSession()
   return useMutation({
     mutationFn: async () => {
-      const { body, verifyPath } = await assertPasskey('/auth/passkey/login')
-      return api<UserResponse>(verifyPath, { method: 'POST', body })
+      const body = await assertPasskey('/api/auth/passkey/login/options')
+      return readData(api.POST('/api/auth/passkey/login/verify', { body }))
     },
     onSuccess: adopt,
   })
@@ -122,19 +113,18 @@ export function usePasswordLogin() {
   const adopt = useAdoptSession()
   return useMutation({
     mutationFn: (body: PasswordLoginRequest) =>
-      api<UserResponse>('/auth/password/login', { method: 'POST', body }),
+      readData(api.POST('/api/auth/password/login', { body })),
     onSuccess: adopt,
   })
 }
 
 export async function reauthWithPasskey(): Promise<void> {
-  const { body, verifyPath } = await assertPasskey('/auth/reauth/passkey')
-  await api<unknown>(verifyPath, { method: 'POST', body })
+  const body = await assertPasskey('/api/auth/reauth/passkey/options')
+  await api.POST('/api/auth/reauth/passkey/verify', { body })
 }
 
 export async function reauthWithTotp(code: string): Promise<void> {
-  const body: TotpReauthRequest = { code }
-  await api<undefined>('/auth/reauth/totp', { method: 'POST', body })
+  await api.POST('/api/auth/reauth/totp', { body: { code } })
 }
 
 // --- First run and invites ---------------------------------------------------------------------
@@ -142,7 +132,8 @@ export async function reauthWithTotp(code: string): Promise<void> {
 export function useSetup() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (body: SetupRequest) => api<SessionResponse>('/setup', { method: 'POST', body }),
+    mutationFn: (body: components['schemas']['SetupIn']) =>
+      readData(api.POST('/api/setup', { body })),
     onSuccess: (data) => {
       // The wizard continues on /setup; don't let the guard bounce it before the passkey step.
       client.setQueryData(queryKeys.setupStatus, { needs_setup: false })
@@ -154,8 +145,7 @@ export function useSetup() {
 export function useAcceptInvite() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (token: string) =>
-      api<SessionResponse>('/invites/accept', { method: 'POST', body: { token } }),
+    mutationFn: (token: string) => readData(api.POST('/api/invites/accept', { body: { token } })),
     onSuccess: (data) => {
       client.setQueryData<MeResponse>(queryKeys.me, { ...data, reauth_fresh: true })
     },
@@ -167,7 +157,7 @@ export function useAcceptInvite() {
 export function usePasskeys(enabled = true) {
   return useQuery({
     queryKey: queryKeys.passkeys,
-    queryFn: ({ signal }) => api<PasskeyList>('/auth/passkeys', { signal }),
+    queryFn: ({ signal }) => readData(api.GET('/api/auth/passkeys', { signal })),
     enabled,
   })
 }
@@ -186,17 +176,18 @@ export function useRemovePasskey() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (id: string) =>
-      withReauth(() =>
-        api<undefined>(`/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-      ),
+      withReauth(async () => {
+        await api.DELETE('/api/auth/passkeys/{passkey_id}', {
+          params: { path: { passkey_id: id } },
+        })
+      }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.passkeys }),
   })
 }
 
 export function useTotpSetup() {
   return useMutation({
-    mutationFn: () =>
-      withReauth(() => api<TotpSetupResponse>('/auth/totp/setup', { method: 'POST', body: {} })),
+    mutationFn: () => withReauth(() => readData(api.POST('/api/auth/totp/setup'))),
   })
 }
 
@@ -204,9 +195,7 @@ export function useTotpEnable() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (code: string) =>
-      withReauth(() =>
-        api<TotpEnableResponse>('/auth/totp/enable', { method: 'POST', body: { code } }),
-      ),
+      withReauth(() => readData(api.POST('/api/auth/totp/enable', { body: { code } }))),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.me }),
   })
 }
@@ -215,7 +204,9 @@ export function useTotpDisable() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: () =>
-      withReauth(() => api<undefined>('/auth/totp/disable', { method: 'POST', body: {} })),
+      withReauth(async () => {
+        await api.POST('/api/auth/totp/disable')
+      }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.me }),
   })
 }
@@ -223,10 +214,10 @@ export function useTotpDisable() {
 export function useSetPassword() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (password: string) => {
-      const body: SetPasswordRequest = { password }
-      return withReauth(() => api<undefined>('/auth/password', { method: 'POST', body }))
-    },
+    mutationFn: (password: string) =>
+      withReauth(async () => {
+        await api.POST('/api/auth/password', { body: { password } })
+      }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.me }),
   })
 }

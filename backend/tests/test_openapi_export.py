@@ -1,0 +1,170 @@
+"""The client contract is reproducible from source, even on a configured dev machine."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import pkgutil
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, get_args, get_origin, get_type_hints
+
+import pytest
+from fastapi import FastAPI
+from pydantic import BaseModel
+from pydantic_settings.main import DotEnvSettingsSource
+
+import app.api as api_pkg
+import app.schemas as schemas_pkg
+from app.config import Settings
+from app.openapi_export import openapi_document, openapi_text
+from app.schemas.common import DECIMAL_STRING, DecimalStr, Model
+from scripts.dump_openapi import main
+
+ROOT = Path(__file__).resolve().parents[2]
+SCHEMA_DTS = ROOT / "web" / "src" / "api" / "schema.d.ts"
+# Keep in lockstep with the header `make api-types` writes.
+SCHEMA_HASH_PREFIX = "// holdfast-schema-sha256: "
+
+
+def _walk_models() -> list[type[BaseModel]]:
+    modules = [api_pkg, schemas_pkg]
+    for package in (api_pkg, schemas_pkg):
+        prefix = package.__name__ + "."
+        for info in pkgutil.walk_packages(package.__path__, prefix):
+            modules.append(importlib.import_module(info.name))
+    found: list[type[BaseModel]] = []
+    seen: set[type[BaseModel]] = set()
+    for module in modules:
+        for value in vars(module).values():
+            if (
+                isinstance(value, type)
+                and issubclass(value, BaseModel)
+                and value is not BaseModel
+                and value not in seen
+            ):
+                seen.add(value)
+                found.append(value)
+    return found
+
+
+def has_bare_decimal(annotation: object) -> bool:
+    """True when a field is ``Decimal`` instead of ``DecimalStr`` (or a container of one)."""
+    if annotation is Decimal:
+        return True
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Annotated:
+        base, *meta = args
+        if base is Decimal:
+            return DECIMAL_STRING not in meta
+        return has_bare_decimal(base)
+    return any(has_bare_decimal(arg) for arg in args)
+
+
+def assert_no_json_number(node: object, where: str = "openapi") -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "number":
+            raise AssertionError(f"{where} contains a JSON number schema")
+        for key, value in node.items():
+            assert_no_json_number(value, f"{where}.{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            assert_no_json_number(item, f"{where}[{index}]")
+
+
+def test_schema_export_is_offline_and_reproducible(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main()
+    expected = capsys.readouterr().out
+    assert expected == openapi_text()
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("E2E_HOOKS", "true")
+    monkeypatch.setenv("DATABASE_URL", "deliberately-invalid")
+    main()
+    assert capsys.readouterr().out == expected
+    paths = json.loads(expected)["paths"]
+    assert "/api/health" in paths
+    assert not any(path.startswith("/api/test/") for path in paths)
+
+
+def test_dump_does_not_read_dotenv_or_deployment_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real_init = DotEnvSettingsSource.__init__
+
+    def wrapped(self: DotEnvSettingsSource, *args: object, **kwargs: object) -> None:
+        calls.append("dotenv")
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(DotEnvSettingsSource, "__init__", wrapped)
+    openapi_text()
+    assert calls == []
+    Settings(_env_file=None)
+    assert calls == ["dotenv"]
+
+
+def test_generated_types_match_the_contract() -> None:
+    digest = hashlib.sha256(openapi_text().encode()).hexdigest()
+    first = SCHEMA_DTS.read_text(encoding="utf-8").splitlines()[0]
+    assert first == f"{SCHEMA_HASH_PREFIX}{digest}"
+
+
+def test_shipping_contract_has_no_json_number() -> None:
+    assert_no_json_number(openapi_document())
+
+
+def test_json_number_schema_is_rejected() -> None:
+    with pytest.raises(AssertionError, match="JSON number"):
+        assert_no_json_number({"properties": {"amount": {"type": "number"}}})
+
+
+def test_api_models_do_not_use_bare_decimal() -> None:
+    bare: list[str] = []
+    for model in _walk_models():
+        hints = get_type_hints(model, include_extras=True)
+        for name, annotation in hints.items():
+            if has_bare_decimal(annotation):
+                bare.append(f"{model.__module__}.{model.__name__}.{name}")
+    assert bare == []
+
+
+class _AmountIn(Model):
+    amount: DecimalStr
+
+
+class _Bare(Model):
+    amount: Decimal
+
+
+def money_openapi_document() -> dict[str, object]:
+    app = FastAPI()
+
+    @app.post("/amount", operation_id="money")
+    def _post(body: _AmountIn) -> _AmountIn:
+        return body
+
+    return app.openapi()
+
+
+def test_decimal_str_is_a_string_and_rejects_json_numbers() -> None:
+    parsed = _AmountIn.model_validate_json('{"amount": "-42.10"}')
+    assert parsed.amount == Decimal("-42.10")
+    assert parsed.model_dump(mode="json") == {"amount": "-42.10"}
+    with pytest.raises(ValueError):
+        _AmountIn.model_validate_json('{"amount": -42.10}')
+    with pytest.raises(ValueError):
+        _AmountIn.model_validate_json('{"amount": 1}')
+    bare_hints = get_type_hints(_Bare, include_extras=True)
+    good_hints = get_type_hints(_AmountIn, include_extras=True)
+    assert has_bare_decimal(bare_hints["amount"])
+    assert not has_bare_decimal(good_hints["amount"])
+
+    dumped = json.dumps(money_openapi_document())
+    assert '"type": "number"' not in dumped
+    assert '"type": "string"' in dumped
+
+
+if __name__ == "__main__":
+    print(json.dumps(money_openapi_document()))
