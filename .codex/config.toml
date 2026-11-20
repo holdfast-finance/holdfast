@@ -1,0 +1,33 @@
+default_permissions = "holdfast"
+
+[agents]
+max_concurrent_threads_per_session = 4
+
+[shell_environment_policy.set]
+PLAID_ENV = "sandbox"
+
+# Trusted local CLI sessions can select this profile for repository work.
+[permissions.holdfast]
+description = "Holdfast workspace with private financial data and environment files denied."
+extends = ":workspace"
+
+[permissions.holdfast.filesystem]
+glob_scan_max_depth = 5
+
+[permissions.holdfast.filesystem.":workspace_roots"]
+# Globs only for these. bwrap can't mount a deny over a missing path, and a fresh clone has no .env, data/, or secrets/.
+"data/**" = "deny"
+"secrets/**" = "deny"
+"exports/**" = "deny"
+".aws/**" = "deny"
+"**/*.env" = "deny"
+"**/.env" = "deny"
+"**/.env.*" = "deny"
+# Agent and CI config is read-only for Anvil: it must not rewrite its own guards (Keel and Bulwark only).
+".claude" = "read"
+".codex" = "read"
+".agents" = "read"
+".grok" = "read"
+".githooks" = "read"
+"CLAUDE.md" = "read"
+"AGENTS.md" = "read"

@@ -45,7 +45,7 @@ Process notes from W1:
 | F8 worktrees | #7 merged | DONE (Bulwark APPROVE-WITH-NOTES) | F8b: `--resume` must not `-B` reset, `git check-ref-format`, lock path under XDG_RUNTIME_DIR, pwsh lock waits |
 | F7 merge gate | #3 merged (fc5d0fa) | **DONE** (Bulwark APPROVE on aa07c9b). Round 3 fixes pushed (quoted paths, fetch auth, `edited`, digests). Bulwark re-review of 8598ea8..aa07c9b dispatched, may not have finished | Bulwark verdict → `bulwark-approved` → merge → `protect-main.sh` (needs paid plan, owner queue) |
 | F9 security lows | #9 merged (0186ad6) | **DONE**. Bulwark APPROVE on 8deb121 with low+nit; both fixed in a8b0675. Delta re-review dispatched, may not have finished | Bulwark delta verdict → merge |
-| Anvil/Flint onboarding | #8 · 49e024e | Bulwark BLOCK on 4621ba4; reworked to machine user + fork (owner choice). Re-review died on the limit | Bulwark re-review → merge. Owner runs docs/process/EXTERNAL-AGENTS-SETUP.md |
+| Anvil/Helm onboarding | #8 · 49e024e | Bulwark BLOCK on 4621ba4; reworked to machine user + fork (owner choice). Re-review died on the limit | Bulwark re-review → merge. Owner runs docs/process/EXTERNAL-AGENTS-SETUP.md |
 | F3 OpenAPI types | `feat/F3-openapi-types` (wt-new) | Lattice started, died on the limit; work may be partial in its worktree | Resume Lattice in that worktree |
 
 Notes: Codex ran its own setup in the main checkout (uncommitted `AGENTS.md` edit, `.codex/`, `.agents/`). Untouched by Keel; reconcile with #8 (which owns AGENTS.md) next window, and read `.codex/hooks/patch.py` before committing any of it.

@@ -26,7 +26,7 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 - **Operating model:** full autonomy, named agent team (`docs/team/ROSTER.md`), trunk-based flow (`docs/process/SDLC.md`).
 - **Plan:** `docs/planning/ROADMAP.md`. Q1 finish line = Phase 5 PASS on sandbox + synthetic data.
-- **Checkpoint 2026-11-19 08:30 (weekly limit hit):** resume from the 08:30 table in `docs/planning/SPRINTS.md`. Merged F1, F10, F8, F9, F7. Open: #8 Anvil/Flint onboarding, F3 partial. Next: F7b free-tier CI (ADR 0013: no paid plans).
+- **Checkpoint 2026-11-19 08:30 (weekly limit hit):** resume from the 08:30 table in `docs/planning/SPRINTS.md`. Merged F1, F10, F8, F9, F7. Open: #8 Anvil/Helm onboarding, F3 partial. Next: F7b free-tier CI (ADR 0013: no paid plans).
 - **Phase 1** is done: PASS, on `main`, tagged `phase-1`.
 - **Queued after Phase 1 (owner decision 2026-11-18, ADR 0009):** two brands. Holo for Holdfast Cloud + mainstream marketing, Direction 01 for self-host. First task after Phase 1: brand-theme plumbing (`data-brand`, Holo tokens/fonts, AA test for both themes). The Cloud marketing site comes when the hosted tier is scheduled.
 - **Carry into Phase 2 (money review):** dedupe Plaid against imported rows by `(account_id, posted_date, amount)` (Plaid wins); the import fingerprint hash includes a same-day ordinal; handle pending→posted via `transaction.pending_external_id`; save `tx_cursor` only after its batch commits; upsert on `(account_id, external_id)` and handle `removed`; parse Plaid JSON with `parse_float=Decimal`; negate Plaid signs once in `integrations/plaid/`, with a sign test per product; API amounts are strings, with an OpenAPI test; never sum across currencies; splits are written through one domain service; transfer pairing is service-enforced (2 legs, opposite signs, different accounts); metrics use `COALESCE(splits, parent)` and exclude `is_transfer`.
@@ -35,6 +35,8 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 
 ## Owner to-do
 
+- [ ] **Before any Codex/Grok run:** create `holdfast-agents` OS user + Read-role GitHub machine user (ADR 0012). Dispatch of Anvil and Helm is suspended until then (Keel, 2026-11-20). Start them only with `scripts/external-agent-launch.sh`
+- [ ] Set up Anvil (Codex) and Helm (Grok): machine user + fork + separate OS user, `docs/process/EXTERNAL-AGENTS-SETUP.md` (ADR 0012). They don't start until this is done
 - [ ] Decide (no cost, optional): make the repo public before the OSS milestone. That unlocks rulesets on `main` and unlimited Actions minutes (ADR 0013). Until then: free tier, `main-guard` detection, 2,000 min/month
 - [ ] **First:** move the production Plaid keys out of the dev `.env` (keep only sandbox keys). Agents build Phase 2 fixture-first until then
 - [ ] Read the weekly digest (`docs/digest/`) when convenient. Changes to `.github/`, `.claude/` and `CLAUDE.md` are listed there for veto

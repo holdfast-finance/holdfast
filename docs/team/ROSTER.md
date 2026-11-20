@@ -2,7 +2,7 @@
 
 Everyone here works for Holdfast. The owner is out of the loop by default (full autonomy, 2026-11-19). Agents plan, build, review, merge, push and release; the owner only sees the owner queue in `docs/STATUS.md`.
 
-Agent definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort:` frontmatter is the default routing; Keel can override per run (see `docs/process/MODEL-ROUTING.md`).
+Agent definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort:` frontmatter is the default routing; Keel can override per run (see `docs/process/MODEL-ROUTING.md`). Helm's Grok seats for the same roles live in `.grok/agents/<name>.md` and inherit the parent Grok model (`docs/process/GROK-SETUP.md`).
 
 | Agent | Role | Owns | Default model · effort | Gate it runs |
 |---|---|---|---|---|
@@ -20,6 +20,8 @@ Agent definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort
 | **Beacon** | Docs + sites | `docs/`, holdfast-site, holdfast-cloud-site, release notes | sonnet · low | — |
 | **Scout** | Recon | Fast codebase search, inventories, link checks | haiku · low | — |
 | **Gadfly** | Red-team challenger | Attacks plans and designs before they're built | opus · high | Plan challenge |
+| **Anvil** | Builder (OpenAI Codex CLI, ADR 0012) | Well-specified stories from `HANDOFF.md`; no protected paths | owner-configured | — |
+| **Helm** | Builder + researcher (xAI Grok Build, ADR 0012) | Config/data, sourced research, docs from `HANDOFF.md`; no protected paths | owner-configured | — |
 
 ## Attribution
 
@@ -38,7 +40,7 @@ PRs end with `— <Agent>, Holdfast`. One agent per commit; if Keel integrates o
 | `backend/app/integrations/{plaid,simplefin}`, `backend/app/importers/` | Tide | Ledger, Bulwark |
 | `backend/app/domain/`, `backend/app/services/` money paths | Ledger | Bulwark |
 | `backend/app/{api,security,auth}` | Lattice (design) / owner of the feature | Bulwark |
-| `backend/app/models/`, `backend/alembic/` | whoever holds the migration token (one at a time) | Ledger, Bulwark |
+| `backend/app/models/`, `backend/migrations/` | whoever holds the migration token (one at a time) | Ledger, Bulwark |
 | `backend/app/agent/`, redaction | Pilot | Bulwark |
 | `backend/app/tax/` | Tally | Ledger |
 | `backend/app/integrations/crypto/`, `web/src/features/crypto/` | Cipher | Bulwark |

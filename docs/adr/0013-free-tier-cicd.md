@@ -18,7 +18,7 @@
 1. **No paid plan, service or license** for CI/CD until the owner says there's money for it. Any
    proposal that needs one is rejected, or deferred with a free alternative.
 2. **Protect `main` by prevention where it's free, and by detection elsewhere:**
-   - *Prevention:* Anvil and Flint have Read-role GitHub access and push only to a fork (ADR 0012),
+   - *Prevention:* Anvil and Helm have Read-role GitHub access and push only to a fork (ADR 0012),
      so they can't touch `main` at all. Keel merges only with
      `gh pr merge --squash --match-head-commit <sha> --subject …` after the gate is green.
    - *Detection:* a `main-guard` workflow runs on every push to `main`. It checks each new commit

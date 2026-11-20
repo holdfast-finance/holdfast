@@ -66,7 +66,11 @@ class GateCase(unittest.TestCase):
     def test_protected_paths(self) -> None:
         for rel in [".github/workflows/ci.yml", "infra/postgres/init/00-roles.sh", ".gitleaks.toml",
                     ".gitleaksignore", "backend/pyproject.toml", "backend/tests/conftest.py",
-                    "conftest.py", "docker-compose.yml", "scripts/check-protected-paths.sh"]:
+                    "conftest.py", "docker-compose.yml", "scripts/check-protected-paths.sh",
+                    ".codex/hooks/patch.py", ".codex/rules/holdfast.rules", ".agents/skills/x/SKILL.md",
+                    ".grok/hooks/guard-secrets.sh", ".grok/config.toml", "AGENTS.md", ".githooks/pre-commit",
+                    "CLAUDE.md", ".claude/hooks/guard-secrets.sh", "scripts/agent_guard.py",
+                    "scripts/bip39_english.txt", "scripts/external-agent-launch.sh"]:
             with self.subTest(rel=rel):
                 self.blocked(lambda r, rel=rel: write(r, rel, "x\n"), f"protected path touched: {rel}")
 
