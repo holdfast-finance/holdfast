@@ -1,4 +1,4 @@
-import type { AuditEntry, FilingRole, UserRole } from '@/api/types'
+import type { AuditEntry, FilingRole, UserRole } from '@/api/contracts'
 
 /*
  * In-memory state behind the MSW handlers. Mirrors the shape of the Phase 1 tables closely enough

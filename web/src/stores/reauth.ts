@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 import { isApiError } from '@/api/client'
-import { ERROR_CODES } from '@/api/types'
+import { ERROR_CODES } from '@/api/contracts'
 
 /*
  * Step-up (re-auth) prompt state. Sensitive API calls answer 403 `reauth_required` when the

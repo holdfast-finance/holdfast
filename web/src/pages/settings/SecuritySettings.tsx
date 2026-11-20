@@ -15,7 +15,7 @@ import {
   useTotpSetup,
 } from '@/api/auth'
 import { useAudit } from '@/api/household'
-import type { Passkey } from '@/api/types'
+import type { Passkey } from '@/api/contracts'
 import { CopyButton } from '@/components/CopyButton'
 import { Field, FormError } from '@/components/forms/Field'
 import { QrCode } from '@/components/QrCode'

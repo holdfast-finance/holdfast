@@ -1,4 +1,4 @@
-import { FILING_ROLES, type FilingRole } from '@/api/types'
+import { FILING_ROLES, type FilingRole } from '@/api/contracts'
 
 export const FILING_ROLE_LABELS: Record<FilingRole, string> = {
   primary: 'Primary',
