@@ -325,14 +325,49 @@ def test_l4_non_empty_out_refused_unless_cleared(tmp_path: Path) -> None:
     (src / "a.csv").write_text("a,b\n")
     out = tmp_path / "out"
     out.mkdir()
-    (out / "stale.txt").write_text("old real data")
+    (out / "doc-0001.txt").write_text("old output")
     with pytest.raises(sz.SanitizeError, match="not empty"):
         sz.sanitize_path(src, out)
-    assert (out / "stale.txt").exists()
+    assert (out / "doc-0001.txt").read_text() == "old output"
     sz.sanitize_path(src, out, clear_out=True)
-    assert not (out / "stale.txt").exists()
-    assert (out / "doc-0001.txt").exists()
+    assert (out / "doc-0001.txt").read_text() != "old output"
     assert oct(os.stat(out).st_mode & 0o777) == "0o700"
+
+
+def test_m1b_clear_out_never_deletes_foreign_files(tmp_path: Path) -> None:
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.csv").write_text("a,b\n")
+    out = tmp_path / "inbox"
+    out.mkdir()
+    for name in ("real-statement-1.pdf", "notes.txt", "doc-0001.txt"):
+        (out / name).write_text("x")
+    (out / "zz-sub").mkdir()
+    with pytest.raises(sz.SanitizeError):
+        sz.sanitize_path(src, out, clear_out=True)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "doc-0001.txt",
+        "notes.txt",
+        "real-statement-1.pdf",
+        "zz-sub",
+    ]  # validated before any unlink: nothing was removed
+    out2 = tmp_path / "fixtures"
+    out2.mkdir()
+    (out2 / "conftest.py").write_text("x")
+    with pytest.raises(sz.SanitizeError):
+        sz.sanitize_path(src, out2, clear_out=True)
+    assert (out2 / "conftest.py").exists()
+
+
+def test_m1b_out_equal_or_nested_with_in_refused(tmp_path: Path) -> None:
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "stmt.csv").write_text("Date,Description,Amount\n2024-01-05,Foo,-1.00\n")
+    for out in (src, src / "sub", tmp_path):
+        with pytest.raises(sz.SanitizeError, match="overlap"):
+            sz.sanitize_path(src, out, clear_out=True)
+    assert (src / "stmt.csv").exists()
+    assert not (src / "sub").exists()
 
 
 def test_l4_cli_flag(tmp_path: Path) -> None:
@@ -348,3 +383,62 @@ def test_l4_cli_flag(tmp_path: Path) -> None:
 def test_regex_part_re_splits_unicode_letters() -> None:
     assert sz.PART_RE.findall("Иван,") == ["Иван", ","]
     assert re.fullmatch(r"[^\W\d_]+", "Café")
+
+
+# -- round 2: OFX closing-tag text, enum values, tag names, header values ---------------------
+def test_r2_text_after_closing_tag_is_sanitized() -> None:
+    s = sz.Sanitizer(seed=9)
+    for line in (
+        "<NAME>x</NAME>WALTER HENDERSON 021000021",
+        "</STMTTRN>acct 123456789 WALTER",
+    ):
+        out = s.ofx_line(line)
+        for leaked in ("WALTER", "HENDERSON", "021000021", "123456789"):
+            assert leaked not in out
+    assert s.ofx_line("</STMTTRN>") == "</STMTTRN>"
+
+
+def test_r2_keep_tag_values_validated() -> None:
+    s = sz.Sanitizer(seed=9)
+    for line in ("<TRNTYPE>WALTER HENDERSON 123456789", "<CURDEF>Walter 4821", "<TRNTYPE>WALTER"):
+        out = s.ofx_line(line)
+        assert "WALTER" not in out and "4821" not in out and "123456789" not in out
+    assert s.ofx_line("<TRNTYPE>DEBIT") == "<TRNTYPE>DEBIT"
+    assert s.ofx_line("<CURDEF>USD") == "<CURDEF>USD"
+    assert "ZZZ" not in s.ofx_line("<CURDEF>ZZZ")  # shaped right but not an ISO code
+
+
+def test_r2_unknown_tag_names_renamed_consistently() -> None:
+    s = sz.Sanitizer(seed=9)
+    one = s.ofx_line("<WALTERHENDERSON021000021>5")
+    two = s.ofx_line("<WALTERHENDERSON021000021>6</WALTERHENDERSON021000021>")
+    assert "WALTER" not in one + two
+    assert one.startswith("<X.TAG1>") and two.startswith("<X.TAG1>") and "</X.TAG1>" in two
+    assert s.renamed_tags == 1
+    assert s.ofx_line("<INTU.USERID>zed").startswith("<INTU.USERID>")
+    assert s.ofx_line("<STMTTRN>") == "<STMTTRN>"
+
+
+def test_r2_renamed_tags_in_report(tmp_path: Path) -> None:
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.ofx").write_text("<OFX>\n<WALTERX>1\n<STMTTRN>\n</STMTTRN>\n</OFX>\n")
+    summary, _ = sz.sanitize_path(src, tmp_path / "out", seed=1)
+    assert summary["docs"][0]["renamed_tags"] == 1
+
+
+def test_r2_header_values_restricted_to_spec() -> None:
+    s = sz.Sanitizer(seed=9)
+    assert s.ofx_line("OFXHEADER:100") == "OFXHEADER:100"
+    assert s.ofx_line("VERSION:102") == "VERSION:102"
+    assert s.ofx_line("CHARSET:1252") == "CHARSET:1252"
+    for line in ("OFXHEADER:123456", "VERSION:999999", "VERSION:102 WALTER", "SECURITY:WALTER"):
+        out = s.ofx_line(line)
+        assert out != line and "WALTER" not in out
+    assert "123456" not in s.ofx_line("OFXHEADER:123456")
+    xml = '<?xml version="1.0" encoding="WALTER-123456789"?>'
+    out = s.ofx_line(xml)
+    assert "WALTER" not in out and out.startswith('<?xml version="1.0"')
+    uid = '<?OFX OFXHEADER="200" VERSION="211" OLDFILEUID="WALTER" NEWFILEUID="123456789"?>'
+    out = s.ofx_line(uid)
+    assert "WALTER" not in out and "123456789" not in out and 'OFXHEADER="200"' in out

@@ -148,13 +148,66 @@ OFX_TAG_RE = re.compile(r"<(/?)([A-Za-z0-9.]+)>([^<\r\n]*)")
 OFX_PROLOG_RE = re.compile(r"<\?(xml|OFX)((?:\s+[A-Za-z]+=\"[^\"<>]*\")*)\s*\?>")
 OFX_ATTR_RE = re.compile(r'([A-Za-z]+)="([^"<>]*)"')
 OFX_WRAPPED_RE = re.compile(r"(<!\[CDATA\[|<!--)(.*?)(\]\]>|-->)", re.DOTALL)
-OFX_PROLOG_KEYS = frozenset(
-    {"OFXHEADER", "VERSION", "SECURITY", "ENCODING", "STANDALONE", "OLDFILEUID", "NEWFILEUID"}
+# Header and prolog values that may pass verbatim, per key (OFX 1.x/2.x and the XML prolog).
+# Everything else goes through the sanitizer.
+OFX_HEADER_VALUES: dict[str, frozenset[str]] = {
+    "OFXHEADER": frozenset({"100", "200"}),
+    "VERSION": frozenset(
+        {"102", "103", "151", "160", "200", "201", "202", "203", "210", "211", "220", "221"}
+    ),
+    "SECURITY": frozenset({"NONE", "TYPE1"}),
+    "ENCODING": frozenset({"USASCII", "UTF-8"}),
+    "CHARSET": frozenset({"1252", "NONE", "UTF-8", "ISO-8859-1"}),
+    "COMPRESSION": frozenset({"NONE"}),
+    "DATA": frozenset({"OFXSGML"}),
+    "OLDFILEUID": frozenset({"NONE"}),
+    "NEWFILEUID": frozenset({"NONE"}),
+    "STANDALONE": frozenset({"yes", "no"}),
+}
+XML_VERSIONS = frozenset({"1.0", "1.1"})
+_ISO_4217_TEXT = (
+    "AED ARS AUD BGN BRL CAD CHF CLP CNY COP CZK DKK EGP EUR GBP HKD HUF IDR ILS INR ISK JPY "
+    "KRW MXN MYR NGN NOK NZD PEN PHP PLN RON RUB SAR SEK SGD THB TRY TWD UAH USD VND ZAR"
 )
-# Header and prolog values that may pass verbatim. Everything else goes through the sanitizer.
-OFX_SAFE_WORDS = frozenset(
-    {"NONE", "OFXSGML", "USASCII", "UTF-8", "UNICODE", "TYPE1", "TYPE2", "XML", "YES", "NO"}
+_TRNTYPE_TEXT = (
+    "CREDIT DEBIT INT DIV FEE SRVCHG DEP ATM POS XFER CHECK PAYMENT CASH DIRECTDEP "
+    "DIRECTDEBIT REPEATPMT HOLD OTHER"
 )
+# Enumerated value tags. A kept value must also fully match [A-Z0-9]{1,12}.
+OFX_ENUMS: dict[str, frozenset[str]] = {
+    "TRNTYPE": frozenset(_TRNTYPE_TEXT.split()),
+    "ACCTTYPE": frozenset({"CHECKING", "SAVINGS", "MONEYMRKT", "CREDITLINE", "CD"}),
+    "INVACCTTYPE": frozenset({"INDIVIDUAL", "JOINT", "TRUST", "CORPORATE"}),
+    "SEVERITY": frozenset({"INFO", "WARN", "ERROR"}),
+    "CURDEF": frozenset(_ISO_4217_TEXT.split()),
+}
+OFX_KEEP_VALUE_RE = re.compile(r"[A-Z0-9]{1,12}")
+# OFX 1.x/2.x element names. Anything else is renamed (a tag name can carry text).
+_OFX_TAG_TEXT = """OFX SIGNONMSGSRSV1 SONRS STATUS CODE SEVERITY MESSAGE DTSERVER LANGUAGE DTPROFUP
+    DTACCTUP FI ORG FID INTU.BID BANKMSGSRSV1 STMTTRNRS TRNUID CLTCOOKIE STMTRS CURDEF
+    BANKACCTFROM BANKID BRANCHID ACCTID ACCTTYPE ACCTKEY BANKTRANLIST DTSTART DTEND STMTTRN
+    TRNTYPE DTPOSTED DTUSER DTAVAIL TRNAMT FITID CORRECTFITID CORRECTACTION SRVRTID CHECKNUM
+    REFNUM SIC PAYEEID NAME PAYEE EXTDNAME ADDR1 ADDR2 ADDR3 CITY STATE POSTALCODE COUNTRY
+    PHONE BANKACCTTO CCACCTTO MEMO INV401KSOURCE CURRENCY ORIGCURRENCY CURRATE CURSYM
+    LEDGERBAL BALAMT DTASOF AVAILBAL BALLIST BAL DESC BALTYPE VALUE DTTM CCSTMTTRNRS CCSTMTRS
+    CCACCTFROM CREDITCARDMSGSRSV1 INVSTMTMSGSRSV1 INVSTMTTRNRS INVSTMTRS DTASOF INVACCTFROM
+    BROKERID INVTRANLIST INVBANKTRAN SUBACCTFUND BUYSTOCK BUYMF BUYOPT BUYDEBT BUYOTHER
+    SELLSTOCK SELLMF SELLOPT SELLDEBT SELLOTHER INCOME REINVEST INVBUY INVSELL INVTRAN
+    SECID UNIQUEID UNIQUEIDTYPE UNITS UNITPRICE MKTVAL MARKUP COMMISSION TAXES FEES LOAD
+    TOTAL SUBACCTSEC SUBACCTFUND ACCRDINT INCOMETYPE INVPOSLIST POSSTOCK POSMF POSOPT
+    POSDEBT POSOTHER INVPOS HELDINSTRUMENT POSTYPE UNITSSTREET UNITSUSER DTPRICEASOF
+    MEMO INVBAL AVAILCASH MARGINBALANCE SHORTBALANCE BUYPOWER BALLIST SECLISTMSGSRSV1
+    SECLIST STOCKINFO MFINFO OPTINFO DEBTINFO OTHERINFO SECINFO SECNAME TICKER FIID RATING
+    ASSETCLASS FIASSETCLASS PARVALUE DEBTTYPE DEBTCLASS COUPONRT DTCOUPON COUPONFREQ
+    CALLPRICE YIELDTOCALL DTCALL CALLTYPE YIELDTOMAT DTMAT MFTYPE YIELD DTYIELDASOF
+    OPTTYPE STRIKEPRICE DTEXPIRE SHPERCTRCT SECID2 ASSETCLASSPORTION OPENBAL CLOSEBAL
+    TAXEXEMPT WITHHOLDING SELLREASON OPTBUYTYPE OPTSELLTYPE RELFITID LOANID GAIN LOSS
+       INVEXPENSE JRNLSEC JRNLFUND RETOFCAP SPLIT CLOSUREOPT
+    BANKMSGSRQV1 STMTTRNRQ STMTRQ INCTRAN INCLUDE INCPOS INCBAL SONRQ USERID USERPASS
+    DTCLIENT APPID APPVER GENUSERKEY TRNRS TRNRQ SIGNONMSGSRQV1 CCSTMTTRNRQ CCSTMTRQ
+    INVSTMTTRNRQ INVSTMTRQ  MKTGINFO  SUBACCTTO SUBACCTFROM """
+OFX_TAGS = frozenset(_OFX_TAG_TEXT.split())
+INTU_TAG_RE = re.compile(r"INTU\.[A-Z0-9]{1,16}")
 OFX_KEEP_TAGS = frozenset(
     {"TRNTYPE", "CURDEF", "CODE", "SEVERITY", "ACCTTYPE", "LANGUAGE", "CURRENCY", "INVACCTTYPE"}
 )
@@ -174,11 +227,21 @@ _BROKER_PRICE = frozenset({"price", "unitprice", "unit price"})
 _BROKER_VALUE = frozenset({"value", "mktval", "marketvalue", "market value"})
 
 
-def _safe_header_value(value: str) -> bool:
-    return (
-        value in OFX_SAFE_WORDS
-        or re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,3}){0,2}", value) is not None
-    )
+def _safe_header_value(key: str, value: str, *, xml: bool = False) -> bool:
+    """True when ``value`` is a spec value for header/prolog ``key``."""
+    if xml and key.upper() == "VERSION":
+        return value in XML_VERSIONS
+    allowed = OFX_HEADER_VALUES.get(key if key == "standalone" else key.upper())
+    if key.lower() == "standalone":
+        allowed = OFX_HEADER_VALUES["STANDALONE"]
+    return allowed is not None and value in allowed
+
+
+def _keep_value_ok(tag: str, value: str) -> bool:
+    if OFX_KEEP_VALUE_RE.fullmatch(value) is None:
+        return False
+    enum = OFX_ENUMS.get(tag)
+    return enum is None or value in enum
 
 
 def _amount_match(text: str, *, int_ok: bool = False) -> re.Match[str] | None:
@@ -390,6 +453,7 @@ class Sanitizer:
         self._cell_plan: dict[tuple[int, int], str] = {}
         self._ofx_plan: dict[tuple[int, int], str] = {}
         self._ofx_used: Counter[int] = Counter()
+        self._tag_map: dict[str, str] = {}
         self.grouped = False  # document-wide thousands grouping, set by observe_grouping
 
     # -- generators --------------------------------------------------------------------------
@@ -1266,26 +1330,30 @@ class Sanitizer:
     # -- OFX ---------------------------------------------------------------------------------
     def ofx_line(self, line: str, line_no: int = 0) -> str:
         head = re.fullmatch(r"([A-Z]+):(.*)", line)
-        if head and head[1] in OFX_HEADER_KEEP and _safe_header_value(head[2]):
+        if head and head[1] in OFX_HEADER_KEEP and _safe_header_value(head[1], head[2]):
             self.kept["ofx_header"] += 1
             return line
         if head and "<" not in line:
-            return f"{self.text(head[1])}:{self.token(head[2])}"
+            key = head[1] if head[1] in OFX_HEADER_KEEP else self.text(head[1])
+            return f"{key}:{self.token(head[2])}"
         cursor = 0
 
         def sub(match: re.Match[str]) -> str:
             nonlocal cursor
             slash, tag, value = match.group(1), match.group(2), match.group(3)
-            if slash or value.strip() == "":
-                return match.group(0)
+            shown = self._ofx_tag(tag)
+            if slash:
+                return f"</{shown}>" + self._ofx_gap(value)
+            if value.strip() == "":
+                return f"<{shown}>{value}"
             if tag in OFX_AMOUNT_TAGS:
                 key = (line_no, cursor)
                 cursor += 1
                 planned = self._ofx_plan.get(key)
                 if planned is not None:
                     self.replaced["amount"] += 1
-                    return f"<{tag}>{planned}"
-            return f"<{tag}>{self._ofx_value(tag, value)}"
+                    return f"<{shown}>{planned}"
+            return f"<{shown}>{self._ofx_value(tag, value)}"
 
         out: list[str] = []
         pos = 0
@@ -1298,6 +1366,18 @@ class Sanitizer:
             out.append(self._ofx_gap(line[pos:]))
         return "".join(out)
 
+    def _ofx_tag(self, tag: str) -> str:
+        """Known OFX element names pass. Anything else gets a stable synthetic name."""
+        if tag in OFX_TAGS or INTU_TAG_RE.fullmatch(tag):
+            return tag
+        if tag not in self._tag_map:
+            self._tag_map[tag] = f"X.TAG{len(self._tag_map) + 1}"
+        return self._tag_map[tag]
+
+    @property
+    def renamed_tags(self) -> int:
+        return len(self._tag_map)
+
     def _ofx_gap(self, gap: str) -> str:
         """Sanitize text the tag regex did not claim: prologs, CDATA, comments, bare lines."""
         if all(ch in " \t\r\n" for ch in gap):
@@ -1309,9 +1389,10 @@ class Sanitizer:
         if prolog is not None:
             attrs: list[str] = []
             for key, value in OFX_ATTR_RE.findall(prolog.group(2)):
-                if key.upper() not in OFX_PROLOG_KEYS:
+                if key.upper() not in OFX_HEADER_VALUES:
                     return lead + self.text(core) + trail
-                shown = value if _safe_header_value(value) else self._deny(value)
+                is_xml = prolog.group(1) == "xml"
+                shown = value if _safe_header_value(key, value, xml=is_xml) else self._deny(value)
                 attrs.append(f' {key}="{shown}"')
             self.kept["ofx_header"] += 1
             return f"{lead}<?{prolog.group(1)}{''.join(attrs)}?>{trail}"
@@ -1322,9 +1403,11 @@ class Sanitizer:
 
     def _ofx_value(self, tag: str, value: str) -> str:
         stripped = value.strip()
-        if tag in OFX_KEEP_TAGS:
+        if tag in OFX_KEEP_TAGS and _keep_value_ok(tag, stripped):
             self.kept["ofx_enum"] += 1
             return value
+        if tag in OFX_KEEP_TAGS:
+            return self.token(value)
         if tag in OFX_AMOUNT_TAGS:
             fresh = self._fresh_amount(stripped, int_ok=True)
             return fresh if fresh is not None else self.token(value)
@@ -1599,6 +1682,7 @@ def sanitize_doc(
         "reconciled_after": rec_after,
         "reconciliation_survived": survived,
         "warnings": list(doc.warnings),
+        "renamed_tags": s.renamed_tags,
     }
     return SanitizedDoc(Doc(doc.kind, out_pages, doc.warnings), report)
 
@@ -1849,11 +1933,22 @@ def gather_inputs(src: Path, work: Path, limits: Limits) -> list[Path]:
 # ---------------------------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------------------------
-def _prepare_out(out: Path, *, clear: bool) -> None:
-    """Create or validate the output directory. Refuses symlinks and stale content."""
+_OUR_OUTPUT_RE = re.compile(r"doc-\d{4}\.(?:txt|layout\.json|report\.json)|SUMMARY\.json")
+
+
+def _prepare_out(out: Path, *, clear: bool, src: Path | None = None) -> None:
+    """Create or validate the output directory. Refuses symlinks, overlap and stale content.
+
+    ``--clear-out`` only ever deletes this tool's own output names. Every entry is validated
+    before the first unlink, so a refusal leaves the directory untouched.
+    """
     if out.is_symlink():
         raise SanitizeError("output directory is a symlink")
     try:
+        if src is not None:
+            real_src, real_out = src.resolve(), out.resolve()
+            if real_src == real_out or real_out in real_src.parents or real_src in real_out.parents:
+                raise SanitizeError("output and input paths overlap")
         if out.exists():
             if not out.is_dir():
                 raise SanitizeError("output path is not a directory")
@@ -1861,8 +1956,11 @@ def _prepare_out(out: Path, *, clear: bool) -> None:
             if stale and not clear:
                 raise SanitizeError("output directory is not empty (pass --clear-out to wipe it)")
             for entry in stale:
-                if entry.is_dir() and not entry.is_symlink():
-                    raise SanitizeError("output directory contains a subdirectory")
+                if _OUR_OUTPUT_RE.fullmatch(entry.name) is None or not (
+                    entry.is_symlink() or entry.is_file()
+                ):
+                    raise SanitizeError("output directory holds files this tool did not write")
+            for entry in stale:
                 entry.unlink()
         out.mkdir(mode=0o700, parents=True, exist_ok=True)
         out.chmod(0o700)
@@ -1882,7 +1980,7 @@ def sanitize_path(
     """Sanitize ``src`` into ``out`` (or nothing when ``out`` is None). Returns (summary, texts)."""
     limits = limits or Limits()
     if out is not None:
-        _prepare_out(out, clear=clear_out)
+        _prepare_out(out, clear=clear_out, src=src)
     work = Path(tempfile.mkdtemp(prefix="holdfast-sanitize-"))
     work.chmod(0o700)
     docs: list[dict[str, Any]] = []

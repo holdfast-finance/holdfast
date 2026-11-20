@@ -14,8 +14,11 @@ make sanitize IN=data/inbox/statements.zip OUT=data/outbox/run1
 `IN` can be a zip, a directory, or one file. `OUT` is created `0700`; files are `0600`, created
 with `O_EXCL|O_NOFOLLOW`, so a planted symlink is never written through. A symlinked `OUT` is
 refused. A non-empty `OUT` is refused too, so stale output from an older run cannot mix with a new
-one. Add `CLEAR=1` (CLI: `--clear-out`) to empty an existing `OUT` first; it removes files only
-and refuses a subdirectory.
+one. Add `CLEAR=1` (CLI: `--clear-out`) to empty an existing `OUT` first. It only ever deletes this
+tool's own output names (`doc-NNNN.txt`, `.layout.json`, `.report.json`, `SUMMARY.json`). Every
+entry is checked before the first delete, and anything else (a PDF, a subdirectory, an unrelated
+file) makes it refuse and delete nothing. `OUT` may not equal `IN` or contain it or sit inside
+it, so `OUT=data/inbox CLEAR=1` is refused.
 Outputs per document: `doc-0001.txt` (layout text), `doc-0001.layout.json` (tokens with
 positions), `doc-0001.report.json`, plus a top-level `SUMMARY.json`. Output names are numbered;
 original file names are never copied. The report holds counts by kind and a 12-char SHA-256 of
@@ -52,9 +55,12 @@ labels, pass them back with `--keep mobile --keep card --keep stock`.
 - Thousands grouping (`1,234.56` versus `1234.56`) is one choice per document, applied to the
   synthetic value. It is never copied from the original token, so it does not reveal a magnitude.
 - OFX/QFX: every piece of text is sanitized, including bare lines, text before the first tag,
-  `<![CDATA[...]]>` bodies and `<!-- -->` comments. Only header lines with a known key and a plain
-  value (`VERSION:102`, `DATA:OFXSGML`) and a `<?xml?>` / `<?OFX?>` prolog with known keys pass
-  as-is. Anything else in them is sanitized.
+  `<![CDATA[...]]>` bodies, `<!-- -->` comments and text after a closing tag. Header lines and
+  `<?xml?>` / `<?OFX?>` prolog attributes pass only with a spec value for that key (for example
+  `OFXHEADER` 100 or 200, `VERSION` 102 to 221, `SECURITY` NONE or TYPE1). Anything else is
+  sanitized. Enum values (`TRNTYPE`, `ACCTTYPE`, `CURDEF`, ...) stay only when they match the spec
+  list or ISO 4217. Element names outside the OFX 1.x/2.x list (and the `INTU.` prefix) are
+  renamed `X.TAG<n>`, consistently within a document, and counted as `renamed_tags` in the report.
 - Nothing original is logged or printed. An unexpected error prints its type only, never a message
   or a path.
 
