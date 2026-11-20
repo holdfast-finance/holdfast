@@ -1,9 +1,11 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { build } from 'vite'
+import { describe, expect, it, vi } from 'vitest'
 
-import { defaultBrandEnv, rewriteDefaultBrand } from './lib/brand-html.ts'
+import { defaultBrandEnv } from './lib/brand-html.ts'
 
 const WEB = join(import.meta.dirname, '..')
 const SRC = join(WEB, 'src')
@@ -99,27 +101,44 @@ describe('brand guardrails', () => {
     expect(offenders).toEqual([])
   })
 
-  it('sets data-brand from VITE_BRAND before the module graph loads', () => {
-    const html = readFileSync(join(WEB, 'index.html'), 'utf8')
-    expect(html).toMatch(/<html[^>]*\sdata-brand="%VITE_BRAND%"/)
-    const viteConfig = readFileSync(join(WEB, 'vite.config.ts'), 'utf8')
-    expect(viteConfig).toMatch(/order:\s*'post'/)
-    expect(viteConfig).toContain('handler: rewriteDefaultBrand')
+  it.each([
+    [undefined, 'signal'],
+    ['holo', 'holo'],
+    ['Holo', 'holo'],
+    [' holo ', 'holo'],
+  ])('renders VITE_BRAND=%s as data-brand="%s"', async (input, expected) => {
+    const envDir = mkdtempSync(join(tmpdir(), 'holdfast-brand-'))
+    vi.stubEnv('VITE_BRAND', input)
+    try {
+      const result = await build({
+        root: WEB,
+        envDir,
+        logLevel: 'silent',
+        build: { write: false },
+      })
+      if (!('output' in result)) throw new Error('Expected a single Vite build output')
+      const html = result.output.find((file) => file.fileName === 'index.html')
+      expect(html?.type === 'asset' ? html.source : undefined).toMatch(
+        new RegExp(`<html[^>]* data-brand="${expected}"`),
+      )
+      expect(process.env.VITE_BRAND).toBe(input)
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(envDir, { recursive: true, force: true })
+    }
   })
 
-  it('leaves an explicit brand and rewrites an unset attribute to signal', () => {
-    expect(rewriteDefaultBrand('data-brand="holo"')).toBe('data-brand="holo"')
-    expect(rewriteDefaultBrand('data-brand="signal"')).toBe('data-brand="signal"')
-    expect(rewriteDefaultBrand('data-brand="%VITE_BRAND%"')).toBe('data-brand="signal"')
-    expect(rewriteDefaultBrand('data-brand=""')).toBe('data-brand="signal"')
-  })
-
-  it('defaults an unset build brand to signal and keeps holo', () => {
+  it('defaults blank values to signal silently and warns for an invalid brand', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     expect(defaultBrandEnv(undefined)).toBe('signal')
-    expect(defaultBrandEnv('holo')).toBe('holo')
-    expect(defaultBrandEnv('signal')).toBe('signal')
-    expect(defaultBrandEnv('')).toBe('')
+    expect(defaultBrandEnv('')).toBe('signal')
+    expect(defaultBrandEnv('  ')).toBe('signal')
+    expect(defaultBrandEnv(' SIGNAL ')).toBe('signal')
+    expect(warn).not.toHaveBeenCalled()
     expect(defaultBrandEnv('other')).toBe('signal')
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      'VITE_BRAND="other" is not signal or holo; using signal',
+    )
   })
 
   it('never loads fonts or scripts from a third-party CDN', () => {
