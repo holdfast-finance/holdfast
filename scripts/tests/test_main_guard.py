@@ -246,6 +246,47 @@ class MainGuardTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("targets base x", out)
 
+    def _one(self, head_prs: list, ref: str = "feat") -> tuple[int, str]:
+        merged = _merged()
+        merged["head_ref"] = ref
+        runs = {HEAD: [
+            _job("review-gate", "success", "2026-11-19T00:00:00Z", branch=ref),
+            _job("ci-required", "success", "2026-11-19T00:00:00Z", branch=ref),
+        ]}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [merged]}, runs=runs)
+        gh.head_prs = head_prs
+        return _run(gh)
+
+    def test_empty_head_listing_fails_closed(self) -> None:
+        code, out = self._one([])
+        self.assertEqual(code, 1, out)
+        self.assertIn("does not contain", out)
+
+    def test_head_listing_without_merged_pr_fails(self) -> None:
+        code, out = self._one([{"number": 9, "base_ref": "main"}])
+        self.assertEqual(code, 1, out)
+
+    def test_unsafe_head_ref_fails(self) -> None:
+        for ref in ("evil&base=main", "a#b", "a?b", "a%2Fb", "a+b", "a b"):
+            code, out = self._one([{"number": 4, "base_ref": "main"}], ref=ref)
+            self.assertEqual(code, 1, ref + out)
+            self.assertIn("unsafe", out)
+
+    def test_head_pulls_sends_head_as_encoded_field(self) -> None:
+        seen: list[list[str]] = []
+
+        def runner(cmd: list[str], input_text: str | None = None) -> tuple[int, str, str]:
+            seen.append(cmd)
+            return 0, "", ""
+
+        main_guard.GhApi(runner).head_pulls("o/r", "o/r", "evil&base=main")
+        cmd = seen[0]
+        self.assertIn("GET", cmd)
+        self.assertIn("head=o:evil&base=main", cmd)
+        self.assertEqual(cmd[cmd.index("head=o:evil&base=main") - 1], "-f")
+        self.assertNotIn("repos/o/r/pulls?state=all", " ".join(cmd))
+        self.assertTrue(all("?" not in part for part in cmd if part.startswith("repos/")))
+
     def test_null_head_repo_fails_closed(self) -> None:
         merged = _merged()
         merged["head_repo"] = None

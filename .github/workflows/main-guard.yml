@@ -210,8 +210,8 @@ jobs:
                   owner = head_repo.split("/", 1)[0]
                   return self._lines(
                       [
-                          "gh", "api", "--paginate",
-                          f"repos/{repo}/pulls?state=all&per_page=100&head={owner}:{head_ref}",
+                          "gh", "api", "-X", "GET", "--paginate", f"repos/{repo}/pulls",
+                          "-f", "state=all", "-f", "per_page=100", "-f", f"head={owner}:{head_ref}",
                           "--jq", ".[] | {number, base_ref: .base.ref}",
                       ]
                   )
@@ -257,6 +257,13 @@ jobs:
                   if not isinstance(parsed, dict) or not isinstance(parsed.get("number"), int):
                       raise ApiError(f"repos/{repo}/issues", 1)
                   return int(parsed["number"])
+
+
+          UNSAFE_REF_CHARS = set("&#?%+") | set(" \t\r\n")
+
+
+          def unsafe_ref(ref: str) -> bool:
+              return any(ch in UNSAFE_REF_CHARS or ch.isspace() for ch in ref)
 
 
           def is_null_sha(sha: str) -> bool:
@@ -427,10 +434,22 @@ jobs:
                       if not head_ref or not head_repo:
                           reasons.append(f"{sha}: merged PR head branch or repo is unknown; refusing to pass")
                           continue
+                      if unsafe_ref(str(head_ref)):
+                          reasons.append(f"{sha}: head branch name has unsafe characters; refusing to pass")
+                          continue
                       try:
                           siblings = gh.head_pulls(repo, str(head_repo), str(head_ref))
                       except ApiError:
                           reasons.append(f"{sha}: head PR listing API failed; refusing to pass")
+                          continue
+                      if not any(
+                          p.get("number") == merged[0].get("number") and p.get("base_ref") == BASE_BRANCH
+                          for p in siblings
+                      ):
+                          reasons.append(
+                              f"{sha}: head PR listing does not contain PR #{merged[0].get('number')} "
+                              f"with base {BASE_BRANCH}; refusing to pass"
+                          )
                           continue
                       odd = [p for p in siblings if p.get("base_ref") != BASE_BRANCH]
                       if odd:
