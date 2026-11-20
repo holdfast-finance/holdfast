@@ -8,9 +8,14 @@ export function isBrand(value: unknown): value is Brand {
   return value === 'signal' || value === 'holo'
 }
 
-/** Household override wins over the build default; anything unrecognised falls back to signal. */
+/**
+ * Household override wins over the build default; anything unrecognised falls back to signal.
+ * The build value is trimmed and lowercased like the HTML transform (defaultBrandEnv), so
+ * `VITE_BRAND="Holo"` can't paint holo and then flip to signal at runtime.
+ */
 export function resolveBrand(buildBrand?: string, householdBrand?: string | null): Brand {
   if (isBrand(householdBrand)) return householdBrand
-  if (isBrand(buildBrand)) return buildBrand
+  const build = buildBrand?.trim().toLowerCase()
+  if (isBrand(build)) return build
   return DEFAULT_BRAND
 }
