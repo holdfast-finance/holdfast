@@ -31,7 +31,8 @@ export function applyBrand(brand: Brand): void {
 
 /**
  * Household-setting override hook. Stubbed: the settings API does not carry a brand yet, so this
- * only re-applies. Wire it to the household settings query when Settings -> Appearance lands.
+ * only re-applies.
+ * TODO(Settings/Appearance): wire the household settings query when that story lands.
  */
 export function setHouseholdBrand(householdBrand: Brand | null): Brand {
   const brand = resolveBrand(import.meta.env.VITE_BRAND, householdBrand)

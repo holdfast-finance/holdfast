@@ -7,7 +7,7 @@ export interface MoneyProps extends FormatMoneyOptions {
   className?: string
 }
 
-/** Renders an amount in JetBrains Mono with tabular figures. Negative amounts use Breach. */
+/** Renders an amount in the theme mono with tabular figures. Negative amounts use destructive. */
 export function Money({ amount, className, ...options }: MoneyProps) {
   const { text, negative } = formatMoney(amount, options)
   return (
