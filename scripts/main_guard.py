@@ -24,6 +24,17 @@ CHECK_WORKFLOWS = {
     "ci-required": ".github/workflows/ci.yml",
     "review-gate": ".github/workflows/review-gate.yml",
 }
+# Trusted trigger per check. A PR can edit its own copy of any workflow that runs on
+# ``pull_request``, so review-gate counts only from ``pull_request_target`` (it runs the
+# base-branch file). ci-required has no base-branch twin: it counts from ``pull_request``
+# (or ``push``) and ci.yml is a protected path that review-gate makes Bulwark sign off.
+CHECK_EVENTS = {
+    "ci-required": ("pull_request", "push"),
+    "review-gate": ("pull_request_target",),
+}
+# review-gate must also belong to the merged PR, with base ``main``.
+PR_BOUND_CHECKS = ("review-gate",)
+BASE_BRANCH = "main"
 LABEL = "main-guard"
 Runner = Callable[..., tuple[int, str, str]]
 
@@ -118,7 +129,8 @@ class GhApi:
             [
                 "gh", "api", "--paginate", runs_path,
                 "--jq",
-                ".workflow_runs[] | {id, path, event, created_at, name, conclusion}",
+                ".workflow_runs[] | {id, path, event, created_at, name, conclusion,"
+                " pull_requests: [(.pull_requests // [])[] | {number, base_ref: .base.ref}]}",
             ]
         )
         rows: list[dict[str, Any]] = []
@@ -139,6 +151,8 @@ class GhApi:
             )
             for job in jobs:
                 job["workflow"] = path
+                job["event"] = run.get("event")
+                job["pull_requests"] = run.get("pull_requests") or []
                 rows.append(job)
         return rows
 
@@ -222,12 +236,39 @@ def workflow_matches(name: str, run: dict[str, Any]) -> bool:
     if wanted is None:
         return False
     path = workflow_path(run)
-    return path == wanted or path.endswith("/" + wanted)
+    return path == wanted
 
 
-def latest_run(runs: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    """Latest run of this job from its own workflow file, not the latest same-named job."""
-    matching = [run for run in runs if run.get("name") == name and workflow_matches(name, run)]
+def event_matches(name: str, run: dict[str, Any]) -> bool:
+    return run.get("event") in CHECK_EVENTS.get(name, ())
+
+
+def pr_matches(name: str, run: dict[str, Any], pr_number: int | None) -> bool:
+    """review-gate: the run must list the merged PR with base main. Empty fails closed."""
+    if name not in PR_BOUND_CHECKS:
+        return True
+    prs = run.get("pull_requests")
+    if pr_number is None or not isinstance(prs, list):
+        return False
+    return any(
+        isinstance(pr, dict)
+        and pr.get("number") == pr_number
+        and pr.get("base_ref") == BASE_BRANCH
+        for pr in prs
+    )
+
+
+def latest_run(
+    runs: list[dict[str, Any]], name: str, pr_number: int | None = None,
+) -> dict[str, Any] | None:
+    """Latest run of this job from its own workflow file and trusted event (and PR)."""
+    matching = [
+        run for run in runs
+        if run.get("name") == name
+        and workflow_matches(name, run)
+        and event_matches(name, run)
+        and pr_matches(name, run, pr_number)
+    ]
     if not matching:
         return None
     return max(matching, key=lambda run: str(run.get("started_at") or run.get("completed_at") or ""))
@@ -251,7 +292,7 @@ def commit_failure(
         return f"{sha}: merged PR has no head SHA"
     problems: list[str] = []
     for name in CHECK_NAMES:
-        run = latest_run(runs, name)
+        run = latest_run(runs, name, merged[0].get("number"))
         conclusion = None if run is None else run.get("conclusion")
         if conclusion != "success":
             shown = "missing" if run is None else conclusion

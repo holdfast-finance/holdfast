@@ -77,17 +77,24 @@ def _merged() -> dict:
     }
 
 
-def _job(name: str, conclusion: str, started: str, workflow: str | None = None) -> dict:
+def _job(
+    name: str, conclusion: str, started: str, workflow: str | None = None,
+    event: str | None = None, pr: int | None = 4, base: str = "main",
+) -> dict:
     if workflow is None:
         workflow = (
             ".github/workflows/ci.yml" if name == "ci-required"
             else ".github/workflows/review-gate.yml"
         )
+    if event is None:
+        event = "pull_request_target" if name == "review-gate" else "pull_request"
     return {
         "name": name,
         "conclusion": conclusion,
         "started_at": started,
         "workflow": workflow,
+        "event": event,
+        "pull_requests": [{"number": pr, "base_ref": base}] if pr is not None else [],
     }
 
 
@@ -179,6 +186,36 @@ class MainGuardTests(unittest.TestCase):
         self.assertIn("failure", body)
         self.assertNotIn("fork-ci.yml", body)
 
+    def _gate(self, jobs: list[dict]) -> tuple[int, str]:
+        runs = {HEAD: [_job("ci-required", "success", "2026-11-19T00:00:00Z")] + jobs}
+        gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+        return _run(gh)
+
+    def test_forged_pull_request_event_review_gate_cannot_override(self) -> None:
+        code, out = self._gate([
+            _job("review-gate", "failure", "2026-11-19T01:00:00Z"),
+            _job("review-gate", "success", "2026-11-19T05:00:00Z", event="pull_request"),
+        ])
+        self.assertEqual(code, 1, out)
+        self.assertIn("failure", out)
+
+    def test_review_gate_for_other_pr_or_base_is_ignored(self) -> None:
+        code, out = self._gate([
+            _job("review-gate", "failure", "2026-11-19T01:00:00Z"),
+            _job("review-gate", "success", "2026-11-19T05:00:00Z", pr=5),
+            _job("review-gate", "success", "2026-11-19T06:00:00Z", base="other"),
+        ])
+        self.assertEqual(code, 1, out)
+
+    def test_review_gate_empty_pull_requests_fails_closed(self) -> None:
+        code, out = self._gate([_job("review-gate", "success", "2026-11-19T01:00:00Z", pr=None)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("missing", out)
+
+    def test_workflow_path_must_equal_exactly(self) -> None:
+        run = _job("ci-required", "success", "x", "evil/.github/workflows/ci.yml")
+        self.assertFalse(main_guard.workflow_matches("ci-required", run))
+
     def test_check_runs_jq_keeps_workflow_path(self) -> None:
         seen: list[list[str]] = []
 
@@ -230,7 +267,7 @@ class MainGuardTests(unittest.TestCase):
     def test_workflow_embeds_script_and_does_not_checkout(self) -> None:
         wf = (ROOT / ".github/workflows/main-guard.yml").read_text()
         script = (ROOT / "scripts/main_guard.py").read_text()
-        start = wf.index("python3 - <<'PY'\n") + len("python3 - <<'PY'\n")
+        start = wf.index("python3 -I - <<'PY'\n") + len("python3 -I - <<'PY'\n")
         end = wf.index("\n          PY\n", start)
         lines: list[str] = []
         for line in wf[start:end].split("\n"):

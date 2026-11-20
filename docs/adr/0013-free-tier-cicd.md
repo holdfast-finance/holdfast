@@ -47,6 +47,13 @@
    PR diff). It does not run the pull request's Makefile, and it does not read or symlink the
    operator `.env`; throwaway keys are written into the temp worktree only. Keel posts the output
    as a PR comment naming the head SHA, and merges only on a clean result. SDLC §2 already allows this.
+   **Trust limit:** `ci-local` runs the PR's code (tests, linters, installs) with the operator's
+   privileges. Use it only for PRs from trusted in-org lane agents, never fork PRs, until it is
+   sandboxed. Follow-up story F7c: run it in a container with an allowlisted env and no network
+   (and a scrubbed env, since the steps need many tool variables).
+   `main-guard` binds each check to its trusted trigger: `review-gate` counts only from a
+   `pull_request_target` run that lists the merged PR with base `main` (empty list fails closed);
+   `ci-required` counts from `pull_request` or `push` runs of `ci.yml`.
 5. **Later options (owner decisions, no cost):**
    - **Making the repo public** removes both limits: rulesets become available and Actions minutes are
      unlimited for public repos. It's an AGPL project going open source anyway. The cost is publishing
