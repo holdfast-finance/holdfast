@@ -1,18 +1,7 @@
-/**
- * First-paint brand on `<html>`. Vite substitutes `%VITE_BRAND%` only when the
- * variable is in its env map. Explicit signal and holo stay; a missing or empty
- * attribute is signal (Direction 01), never holo.
- */
-export function rewriteDefaultBrand(html: string): string {
-  return html.replace(/data-brand="(?:%VITE_BRAND%|)"/, 'data-brand="signal"')
-}
-
-/**
- * Value to put in Vite's env map. `holo` stays holo. An empty string stays empty
- * so the HTML post hook can rewrite `data-brand=""`. Anything else, including
- * unset, is signal.
- */
-export function defaultBrandEnv(current: string | undefined): 'signal' | 'holo' | '' {
-  if (current === 'holo' || current === '') return current
+/** Normalize the first-paint brand for the HTML transform. */
+export function defaultBrandEnv(current: string | undefined): 'signal' | 'holo' {
+  const brand = current?.trim().toLowerCase()
+  if (brand === 'signal' || brand === 'holo') return brand
+  if (brand) console.warn(`VITE_BRAND="${current}" is not signal or holo; using signal`)
   return 'signal'
 }

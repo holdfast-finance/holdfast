@@ -2,8 +2,10 @@
 
 - 32-byte random token, shown once in the URL fragment (``{APP_BASE_URL}/invite#{token}``) so it
   never reaches proxy access logs. The base URL comes from settings, never the Host header.
-- Redis holds ``sha256(token)`` -> invite for 24h. Accepting is GETDEL: one use, race-free.
-- A new invite for the same person replaces the previous one.
+- Redis holds ``sha256(token)`` -> invite for 24h. The token itself is never stored or logged.
+- Replacing and accepting are each one Lua script. Two creates for the same person cannot both
+  leave a live token key. Accept deletes the person index only when it still names the digest
+  just consumed, so a newer invite keeps its index.
 """
 
 from __future__ import annotations
@@ -28,10 +30,55 @@ from app.services.sessions import Principal
 from app.services.users import session_out
 
 INVITE_TTL_SECONDS = 24 * 3600
-_KEY = "hf:invite:{}"
-_PERSON_KEY = "hf:invite:person:{}"
+_INVITE_PREFIX = "hf:invite:"
+_PERSON_PREFIX = "hf:invite:person:"
 INVALID = "This invite link is used, expired or wrong."
 INVITE_UNUSABLE = "This invite can't be used. Ask for a new one."
+
+# KEYS[1] person index, KEYS[2] new token key.
+# ARGV: digest, payload, ttl seconds, token-key prefix.
+# One script so two creates cannot both store a token key.
+_REPLACE_INVITE = """
+local digest = ARGV[1]
+local previous = redis.call('GET', KEYS[1])
+if type(previous) == 'string' and previous ~= digest and #previous == 64
+    and string.match(previous, '^%x+$') then
+  redis.call('DEL', ARGV[4] .. previous)
+end
+local ttl = math.floor(tonumber(ARGV[3]))
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
+redis.call('SET', KEYS[1], digest, 'EX', ttl)
+return 1
+"""
+
+# KEYS[1] token key. ARGV: digest, person-key prefix.
+# Redis turns a missing key into false inside Lua. The person index is removed only when it
+# still names this digest: a create that stored a newer invite must keep its index.
+_CONSUME_INVITE = """
+local digest = ARGV[1]
+local raw = redis.call('GETDEL', KEYS[1])
+if not raw then return false end
+local ok, invite = pcall(cjson.decode, raw)
+if ok and type(invite) == 'table' then
+  local person_id = invite['person_id']
+  local uuid = '^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$'
+  if type(person_id) == 'string' and string.match(person_id, uuid) then
+    local person_key = ARGV[2] .. person_id
+    if redis.call('GET', person_key) == digest then
+      redis.call('DEL', person_key)
+    end
+  end
+end
+return raw
+"""
+
+
+def _token_key(digest: str) -> str:
+    return f"{_INVITE_PREFIX}{digest}"
+
+
+def _person_key(person_id: uuid.UUID) -> str:
+    return f"{_PERSON_PREFIX}{person_id}"
 
 
 async def create_invite(
@@ -64,12 +111,10 @@ async def create_invite(
                 "invited_by": str(principal.user_id),
             }
         )
-        previous = await ctx.redis.getdel(_PERSON_KEY.format(person_id))
-        if previous is not None:
-            old = previous.decode() if isinstance(previous, bytes) else str(previous)
-            await ctx.redis.delete(_KEY.format(old))
-        await ctx.redis.set(_KEY.format(digest), payload, ex=INVITE_TTL_SECONDS)
-        await ctx.redis.set(_PERSON_KEY.format(person_id), digest, ex=INVITE_TTL_SECONDS)
+        await ctx.redis.register_script(_REPLACE_INVITE)(
+            keys=[_person_key(person_id), _token_key(digest)],
+            args=[digest, payload, str(INVITE_TTL_SECONDS), _INVITE_PREFIX],
+        )
         audit.add(
             s,
             "household.invite.created",
@@ -90,8 +135,12 @@ async def accept_invite(ctx: RequestContext, token: str) -> tuple[str, SessionOu
         raise ApiError(
             "rate_limited", attempt.message, headers={"Retry-After": str(attempt.retry_after)}
         )
-    raw = await ctx.redis.getdel(_KEY.format(token_hash_hex(token)))
-    if raw is None:
+    digest = token_hash_hex(token)
+    raw: object = await ctx.redis.register_script(_CONSUME_INVITE)(
+        keys=[_token_key(digest)],
+        args=[digest, _PERSON_PREFIX],
+    )
+    if not isinstance(raw, (bytes, str)):
         # The reserved attempt stays counted as the failure.
         await audit.record(
             ctx.factory,
@@ -106,7 +155,6 @@ async def accept_invite(ctx: RequestContext, token: str) -> tuple[str, SessionOu
     invite = json.loads(raw)
     household_id = uuid.UUID(invite["household_id"])
     person_id = uuid.UUID(invite["person_id"])
-    await ctx.redis.delete(_PERSON_KEY.format(person_id))
     try:
         async with scoped_session(ctx.factory, household_id, person_id) as s:
             person = (

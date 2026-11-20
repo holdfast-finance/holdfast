@@ -4,9 +4,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig, loadEnv, type Plugin, type UserConfig } from 'vite'
+import { defineConfig, type Plugin, type UserConfig } from 'vite'
 
-import { defaultBrandEnv, rewriteDefaultBrand } from './src/lib/brand-html.ts'
+import { defaultBrandEnv } from './src/lib/brand-html.ts'
 
 // In Docker the edge Caddy serves the app and routes /api/* to api:8000 on the same origin.
 // Outside Docker, `pnpm dev` proxies /api to a locally running backend instead.
@@ -62,28 +62,17 @@ function mockServiceWorker(): Plugin {
   }
 }
 
-// `%VITE_BRAND%` is absent from Vite's env map when the variable is unset, so the
-// HTML env hook warns on every dev request and production build. Self-host leaves
-// it unset: the default is signal, never holo. An empty string stays empty; the
-// post hook rewrites `data-brand=""` and a leftover placeholder.
-const envDir = fileURLToPath(new URL('.', import.meta.url))
-
-function applyBrandEnv(mode: string): void {
-  const current =
-    process.env.VITE_BRAND !== undefined
-      ? process.env.VITE_BRAND
-      : loadEnv(mode, envDir, 'VITE_').VITE_BRAND
-  const next = defaultBrandEnv(current)
-  if (current === next) return
-  process.env.VITE_BRAND = next
-}
-
 function defaultBrandAttribute(): Plugin {
+  let brand: ReturnType<typeof defaultBrandEnv> = 'signal'
   return {
     name: 'holdfast-default-brand',
+    configResolved({ env }) {
+      const current: unknown = env.VITE_BRAND
+      brand = defaultBrandEnv(typeof current === 'string' ? current : undefined)
+    },
     transformIndexHtml: {
       order: 'post',
-      handler: rewriteDefaultBrand,
+      handler: (html) => html.replace(/(<html\b[^>]*\sdata-brand=")signal(")/, `$1${brand}$2`),
     },
   }
 }
@@ -124,7 +113,4 @@ const config = {
   },
 } satisfies UserConfig
 
-export default defineConfig(({ mode }) => {
-  applyBrandEnv(mode)
-  return config
-})
+export default defineConfig(config)

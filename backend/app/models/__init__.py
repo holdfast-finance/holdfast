@@ -14,6 +14,7 @@ from app.models.documents import Document, ParsedField
 from app.models.household import Household, HouseholdSetting, Person
 from app.models.identity import AppUser, AuthSession, TotpRecoveryCode, WebauthnCredential
 from app.models.investments import Holding, InvestmentTxn, Liability, Security
+from app.models.jobs import JobRun
 from app.models.tax import EstimateSnapshot, TaxItem, TaxScenario, TaxYear
 from app.models.transactions import Category, Rule, Transaction, TransactionSplit
 
@@ -40,6 +41,7 @@ __all__ = [
     "HouseholdSetting",
     "Institution",
     "InvestmentTxn",
+    "JobRun",
     "Liability",
     "ParsedField",
     "Person",
