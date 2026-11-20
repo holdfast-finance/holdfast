@@ -20,6 +20,7 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "pyotp>=2.12.0",
     "webauthn>=3.0.1",
+    "pdfplumber>=0.11.10",
 ]
 
 [dependency-groups]
@@ -32,6 +33,7 @@ dev = [
     "pip-audit>=2.7",
     "hypothesis>=6.170.15",
     "import-linter>=2.17",
+    "reportlab>=5.1.0",
 ]
 
 [tool.uv]
