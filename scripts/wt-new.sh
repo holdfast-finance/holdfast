@@ -15,6 +15,17 @@ fi
 branch="${args[0]}"
 base="${args[1]:-origin/main}"
 
+# Reject before fetch or worktree add. --branch also expands shorthand (@{-1}); require the
+# name unchanged so resume cannot attach a different ref than the one requested.
+if ! canon="$(git check-ref-format --branch "$branch" 2>/dev/null)"; then
+  echo "wt-new: branch name '${branch}' is not a valid refname." >&2
+  exit 1
+fi
+if [ "$canon" != "$branch" ]; then
+  echo "wt-new: branch name '${branch}' is not a valid refname." >&2
+  exit 1
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 common="$(git rev-parse --path-format=absolute --git-common-dir)"
 main_root="$(dirname "$common")"
@@ -35,11 +46,19 @@ if [ -e "$path" ]; then
 fi
 
 if [ "$resume" = 1 ]; then
-  if [ "$remote_exists" = 0 ]; then
-    echo "wt-new: --resume but '${branch}' is not on origin." >&2
+  local_exists=0
+  if git show-ref --verify --quiet "refs/heads/${branch}"; then local_exists=1; fi
+  if [ "$local_exists" = 0 ] && [ "$remote_exists" = 0 ]; then
+    echo "wt-new: --resume but '${branch}' is neither local nor on origin." >&2
     exit 1
   fi
-  git worktree add -B "$branch" "$path" "origin/${branch}" >/dev/null
+  # Attach the existing local tip. -B would move it to origin/$branch and drop unpushed commits.
+  # Create from origin only when this repo has no local branch yet, and never with -B.
+  if [ "$local_exists" = 1 ]; then
+    git worktree add "$path" "$branch" >/dev/null
+  else
+    git worktree add -b "$branch" "$path" "origin/${branch}" >/dev/null
+  fi
   behind="$(git -C "$path" rev-list --count "HEAD..origin/main")"
   echo "wt-new: resumed ${branch}; ${behind} commit(s) behind origin/main (no ff applied)." >&2
 else

@@ -108,7 +108,9 @@ sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
-	flock /tmp/holdfast-make-test.lock $(MAKE) test
+	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \
+	mkdir -p "$$(dirname "$$lock")"; \
+	flock "$$lock" $(MAKE) test
 
 health: ## GET /api/health through Caddy
 	curl -fsSk https://localhost/api/health; echo
