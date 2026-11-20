@@ -514,7 +514,7 @@ class MainGuardTests(unittest.TestCase):
         self.assertNotIn("actions/checkout", wf)
         self.assertNotIn("/rulesets", wf)
         self.assertNotIn("git revert", wf)
-        for key in ("contents: read", "issues: write", "checks: read", "pull-requests: read"):
+        for key in ("contents: read", "issues: write", "actions: read", "pull-requests: read"):
             self.assertIn(key, wf)
         self.assertNotIn("contents: write", wf)
 

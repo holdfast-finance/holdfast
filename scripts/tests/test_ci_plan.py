@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -256,7 +257,7 @@ class PlanTests(unittest.TestCase):
                 "class CompletedProcess:\n"
                 "    def __init__(self):\n"
                 "        self.returncode = 0\n"
-                "        self.stdout = 'M\\tREADME.md\\n'\n"
+                "        self.stdout = 'M\\0README.md\\0'\n"
                 "        self.stderr = ''\n"
                 "def run(*_a, **_k):\n"
                 "    return CompletedProcess()\n",
@@ -336,6 +337,103 @@ class PlanTests(unittest.TestCase):
             )
             self.assertNotEqual(trusted_eval.returncode, 0)
             self.assertIn("failure", trusted_eval.stdout + trusted_eval.stderr)
+
+
+class QuotedPathTests(unittest.TestCase):
+    """Non-ASCII and quote characters must not hide a path from the planner."""
+
+    NAMES = ["\u00e9.py", 'a"b.py']
+
+    def _repo(self, tmp: str) -> Path:
+        repo = Path(tmp)
+        git(repo, "init", "-q", "-b", "main")
+        write(repo, "README.md", "o\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "o")
+        return repo
+
+    def test_added_quoted_names_are_listed_raw_and_plan_the_right_job(self) -> None:
+        for top, kind in (("backend/migrations/versions", "backend"), ("web/src", "web")):
+            for name in self.NAMES:
+                with self.subTest(top=top, name=name), tempfile.TemporaryDirectory() as tmp:
+                    repo = self._repo(tmp)
+                    base = git(repo, "rev-parse", "HEAD")
+                    write(repo, f"{top}/{name}", "x\n")
+                    git(repo, "add", "-A")
+                    git(repo, "commit", "-qm", "q")
+                    paths = ci_plan.name_status_paths(repo, f"{base}..HEAD")
+                    self.assertEqual(paths, [f"{top}/{name}"])
+                    self.assertTrue(ci_plan.affected(paths or [], kind))
+
+    def test_rename_and_copy_list_both_sides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            write(repo, "docs/\u00e9.md", "same content\nline two\nline three\n")
+            write(repo, "docs/src.md", "copy me content\nline two\nline three\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "seed")
+            base = git(repo, "rev-parse", "HEAD")
+            (repo / "backend").mkdir()
+            git(repo, "mv", "docs/\u00e9.md", "backend/\u00e9.py")
+            write(repo, "web/src/a\"b.ts", "copy me content\nline two\nline three\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "rc")
+            paths = ci_plan.name_status_paths(repo, f"{base}..HEAD")
+            assert paths is not None
+            self.assertIn("docs/\u00e9.md", paths)
+            self.assertIn("backend/\u00e9.py", paths)
+            self.assertTrue(ci_plan.affected(paths, "backend"))
+            self.assertTrue(ci_plan.affected(paths, "web"))
+            self.assertFalse(any(p.startswith('"') for p in paths))
+
+    def test_copy_entry_parses_two_paths(self) -> None:
+        fake = subprocess.CompletedProcess([], 0, "C100\0docs/a.md\0backend/b.py\0M\0README.md\0", "")
+        with unittest.mock.patch.object(ci_plan, "_git", return_value=fake):
+            self.assertEqual(
+                ci_plan.name_status_paths(Path("."), "x"),
+                ["docs/a.md", "backend/b.py", "README.md"],
+            )
+
+    def test_unparseable_entries_mean_unknown(self) -> None:
+        for out in ("Z\0a\0", "R100\0only-one\0", "M\0", "M\0\0"):
+            with self.subTest(out=out):
+                fake = subprocess.CompletedProcess([], 0, out, "")
+                with unittest.mock.patch.object(ci_plan, "_git", return_value=fake):
+                    self.assertIsNone(ci_plan.name_status_paths(Path("."), "x"))
+
+    def test_quoted_path_always_affects_both_jobs(self) -> None:
+        for kind in ("backend", "web"):
+            self.assertTrue(ci_plan.affected(['"docs/\\303\\251.md"'], kind))
+        self.assertFalse(ci_plan.affected(["docs/x.md"], "backend"))
+
+
+class HeredocParityTests(unittest.TestCase):
+    """Each inline workflow copy must be byte-identical to the tested script."""
+
+    def test_ci_yml_heredocs(self) -> None:
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        docs = workflow_heredocs(text)
+        self.assertEqual(
+            docs[0], (ROOT / "scripts/ci_plan.py").read_text(), "ci.yml planner drifted from ci_plan.py"
+        )
+        self.assertEqual(
+            docs[1],
+            (ROOT / "scripts/ci_required_eval.py").read_text(),
+            "ci.yml evaluator drifted from ci_required_eval.py",
+        )
+
+    def test_main_guard_heredoc(self) -> None:
+        text = (ROOT / ".github/workflows/main-guard.yml").read_text()
+        docs = workflow_heredocs(text)
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(
+            docs[0], (ROOT / "scripts/main_guard.py").read_text(), "main-guard.yml drifted from main_guard.py"
+        )
+
+    def test_main_guard_permissions(self) -> None:
+        text = (ROOT / ".github/workflows/main-guard.yml").read_text()
+        self.assertIn("  actions: read\n", text)
+        self.assertNotIn("checks: read", text)
 
 
 if __name__ == "__main__":

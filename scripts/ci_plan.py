@@ -46,7 +46,10 @@ class Plan:
 def affected(paths: list[str], kind: str) -> bool:
     exact = BACKEND_EXACT if kind == "backend" else WEB_EXACT
     prefixes = BACKEND_PREFIXES if kind == "backend" else WEB_PREFIXES
-    return any(path in exact or path.startswith(prefixes) for path in paths)
+    # A path that still starts with a quote was C-quoted by git: never trust it, run the job.
+    return any(
+        path.startswith('"') or path in exact or path.startswith(prefixes) for path in paths
+    )
 
 
 def plan(*, event: str, ref: str, paths: list[str] | None, uptodate: bool | None) -> Plan:
@@ -88,6 +91,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+        errors="surrogateescape",
     )
 
 
@@ -103,14 +107,40 @@ def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool | None:
 
 
 def name_status_paths(repo: Path, range_expr: str) -> list[str] | None:
-    proc = _git(repo, "diff", "--name-status", "--find-renames", range_expr)
+    """Changed paths (both sides of renames and copies); None when git or parsing fails.
+
+    ``-z`` with ``core.quotePath=false`` gives raw NUL-separated names, so non-ASCII
+    and quote characters cannot hide a path from ``affected``. ``None`` means unknown,
+    which plans both jobs.
+    """
+    proc = _git(
+        repo,
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "-z",
+        "--name-status",
+        "--find-renames",
+        "--find-copies",
+        range_expr,
+    )
     if proc.returncode != 0:
         return None
+    tokens = proc.stdout.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
     paths: list[str] = []
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            paths.extend(parts[1:])
+    i = 0
+    while i < len(tokens):
+        status = tokens[i]
+        n = 2 if status[:1] in ("R", "C") else 1
+        if not status or status[0] not in "ACDMRTUX":
+            return None
+        group = tokens[i + 1 : i + 1 + n]
+        if len(group) != n or not all(group):
+            return None
+        paths.extend(group)
+        i += 1 + n
     return paths
 
 

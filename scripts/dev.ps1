@@ -11,7 +11,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
         'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked',
-        'ci-minutes', 'ci-local')]
+        'ci-minutes', 'ci-local', 'release-check')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -53,6 +53,7 @@ $Help = [ordered]@{
     'test-locked' = 'test under an exclusive lock (${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock) so parallel worktrees share the test DB safely'
     'ci-minutes'  = 'Billed Actions minutes this UTC month (used/2000)'
     'ci-local'    = 'Local merge gate for a PR head: dev.ps1 ci-local <n>'
+    'release-check' = 'Compare product SemVer and Python version. Does not tag or publish.'
 }
 
 function Assert-Env {
@@ -192,6 +193,10 @@ switch ($Target) {
     'wt-new' {
         if (-not $Service) { Write-Error 'usage: dev.ps1 wt-new <branch> [base]' }
         bash scripts/wt-new.sh $Service $Base
+    }
+    'release-check' {
+        & $Python scripts/cut_release.py check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     'test-locked' {
         # Same path as `make test-locked`. FileShare.None fails at once on a sharing violation;

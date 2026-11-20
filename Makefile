@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local api-types api-types-check api-types-test
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local release-check api-types api-types-check api-types-test
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -106,6 +106,9 @@ check: lint test ## lint + test
 sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@git fetch origin --quiet
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
+
+release-check: ## Compare product SemVer and Python version. Does not tag or publish.
+	python3 -I scripts/cut_release.py check
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
 	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \
