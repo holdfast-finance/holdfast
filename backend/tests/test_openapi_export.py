@@ -166,5 +166,65 @@ def test_decimal_str_is_a_string_and_rejects_json_numbers() -> None:
     assert '"type": "string"' in dumped
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "1e9",
+        "+1",
+        "1_000",
+        " 1 ",
+        "1.",
+        ".5",
+        "01",
+        "1\n",
+        "1.٢",
+        "1" * 30,
+        "100000000000000",
+        "0.123456789",
+        "NaN",
+        "Infinity",
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1e50000000"),
+        Decimal("1e-50000000"),
+        Decimal("100000000000000"),
+        Decimal("1.000000000"),
+    ],
+)
+def test_decimal_str_rejects_invalid_syntax_and_out_of_bounds_values(
+    value: str | Decimal,
+) -> None:
+    with pytest.raises(ValueError):
+        _AmountIn.model_validate({"amount": value})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", "0"),
+        ("-0", "-0"),
+        ("-12.34", "-12.34"),
+        ("123.45678901", "123.45678901"),
+        ("-99999999999999.99999999", "-99999999999999.99999999"),
+        (Decimal("1E+13"), "10000000000000"),
+        (Decimal("1E-8"), "0.00000001"),
+    ],
+)
+def test_decimal_str_serializes_bounded_fixed_point_strings(
+    value: str | Decimal,
+    expected: str,
+) -> None:
+    assert _AmountIn.model_validate({"amount": value}).model_dump(mode="json") == {
+        "amount": expected
+    }
+
+
+def test_decimal_str_openapi_publishes_bounded_pattern() -> None:
+    schema = json.loads(json.dumps(money_openapi_document()))
+    amount = schema["components"]["schemas"]["_AmountIn"]["properties"]["amount"]
+    assert amount["type"] == "string"
+    assert amount["pattern"] == r"^-?(?:0|[1-9][0-9]{0,13})(?:\.[0-9]{1,8})?$"
+
+
 if __name__ == "__main__":
     print(json.dumps(money_openapi_document()))
