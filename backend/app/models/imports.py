@@ -53,22 +53,30 @@ class ImportRun(Base):
     - A succeeded run has left ``pending``: ``reconcile_status`` is ``reconciled``,
       ``needs_review``, or ``accepted``.
 
+    - Rows join a run only while it is ``running`` and ``pending`` (see ``Transaction``). Once
+      a run has rows, its account and document can't change. A run that moves to ``failed``
+      with rows still ``pending`` becomes ``needs_review``, so the document latches.
+
     Flagging a run sets the document's ``parse_status`` to ``needs_review`` and latches that
     flag. The latch clears only when a run is accepted and no sibling still needs review.
     Deleting the run leaves the latch set.
 
-    **Visibility.** A run with an account follows that account like ``balance_snapshot`` (its
-    balances are summary data): hidden from others when the account is private, writable only by
-    the owner, for joint accounts, or by household-wide jobs. A run with no account (a
-    multi-account export) holds no balances and no transaction sum (CHECK) and is
-    household-visible.
+    **Visibility.** A run is visible only with its document. A run with an account follows that
+    account like ``balance_snapshot`` (its balances are summary data): hidden from others when
+    the account is private, writable only by the owner, for joint accounts, or by household-wide
+    jobs. A run with no account (a multi-account export) holds no balances and no transaction
+    sum (CHECK). Writing any run also needs its document to be the writer's or the household's
+    (``person_id`` NULL), unless it's a household-wide job: one person can't flag, accept or
+    add rows to a run on another person's statement.
 
     **Counts.** ``rows_parsed`` counts every row read from the file. Of those, ``rows_inserted``
     became new transactions and ``rows_duplicate`` matched an existing fingerprint (re-import).
     ``rows_superseded`` of the inserted rows were superseded on arrival by an existing Plaid row.
 
     ``reviewed_by_user_id`` has no FK, like ``audit_log.user_id``: deleting a user must not
-    rewrite review history. The accept action is also audit-logged by the service.
+    rewrite review history. It is advisory: the database can't tell who the session's user is,
+    so the audit log is the record of who accepted. The accept service must take the id from
+    the authenticated session, never from the request.
     """
 
     __tablename__ = "import_run"

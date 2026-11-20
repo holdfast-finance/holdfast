@@ -10,20 +10,25 @@ see them:
   ``bank_connection``).
 - CHECKs on the existing ``document`` and ``transaction`` tables (autogenerate misses CHECKs on
   existing tables): document size, relative storage path, profile id; imported rows carry a hex
-  fingerprint, provenance only on imports, no self-supersession.
+  fingerprint and a run, provenance only on imports, no self-supersession.
 - ``import_run_guard``: reconciliation is final once out of ``pending``; ``needs_review`` leaves
-  only to ``accepted``; ``accepted`` is never inserted; a review can't be rewritten. The status
-  error is a fixed string.
+  only to ``accepted``; ``accepted`` is never inserted; a review can't be rewritten; a run with
+  rows keeps its account and document; a run that fails with rows becomes ``needs_review``.
+  The status error is a fixed string.
 - ``import_run_flag_document`` / ``import_run_accept_document`` / ``document_review_guard``: a
   flagged run latches its document. The latch clears only when a run is accepted and no sibling
   run still needs review. Deleting the run does not clear it.
-- ``transaction_import_run_guard``: ``import_run_id``, once set, cannot be changed or cleared.
+- ``transaction_import_run_guard``: a row joins a run only on insert, only while the run is
+  running and pending, only in the run's account, and only if the writer may write the run
+  (read in the writer's RLS context). Then the link and the row's account are final.
 - ``transaction_supersession_guard``: no supersession chains. The winner and any row this one
   already replaces are locked before the check.
 
-The functions that read or write another table switch ``app.household_wide`` on for their
-own query and restore the caller's value, like ``transaction_split_balance`` (0002), so a
-person-scoped policy can never make them see less and fail open.
+The functions that read or write another table switch ``app.household_wide`` on for their own
+query and restore the caller's value, like ``transaction_split_balance`` (0002), so a
+person-scoped policy can never make them see less and fail open. The exception is
+``transaction_import_run_guard``: it must see only the runs the writer may write, and a run it
+can't see is refused, so it fails closed.
 
 Grants come from the owner's default privileges (SELECT/INSERT/UPDATE/DELETE for holdfast_app).
 ``document.size_bytes`` is NOT NULL with no default: no code writes documents before Phase 3, so
@@ -54,15 +59,22 @@ PROFILE_ID_PATTERN = "^[a-z0-9][a-z0-9_.-]*$"
 STORAGE_PATH_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 SHA256_HEX_PATTERN = "^[0-9a-f]{64}$"
 
-# import_run: read follows the account (summary_only viewers see balances, like
-# balance_snapshot); write needs a writable account (owner, joint) or a household-wide job.
+# import_run: read needs the document visible and follows the account (summary_only viewers see
+# balances, like balance_snapshot). Write needs the document to be the writer's or the
+# household's (a person's statement is reviewed by that person) and a writable account (owner,
+# joint), unless it's a household-wide job. The document and account subqueries are themselves
+# filtered by RLS.
 IMPORT_RUN_READ = (
-    "account_id IS NULL OR EXISTS (SELECT 1 FROM account a WHERE a.id = import_run.account_id)"
+    "EXISTS (SELECT 1 FROM document d WHERE d.id = import_run.document_id)"
+    " AND (account_id IS NULL"
+    " OR EXISTS (SELECT 1 FROM account a WHERE a.id = import_run.account_id))"
 )
 IMPORT_RUN_WRITE = (
-    "account_id IS NULL OR app_household_wide() OR EXISTS (SELECT 1 FROM account a"
+    "EXISTS (SELECT 1 FROM document d WHERE d.id = import_run.document_id"
+    " AND (app_household_wide() OR d.person_id IS NULL OR d.person_id = app_person_id()))"
+    " AND (account_id IS NULL OR app_household_wide() OR EXISTS (SELECT 1 FROM account a"
     " WHERE a.id = import_run.account_id"
-    " AND (a.owner_person_id IS NULL OR a.owner_person_id = app_person_id()))"
+    " AND (a.owner_person_id IS NULL OR a.owner_person_id = app_person_id())))"
 )
 
 # Messages carry ids and status names only, never amounts.
@@ -71,6 +83,9 @@ CREATE FUNCTION import_run_guard() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
+DECLARE
+    prev_wide text := current_setting('app.household_wide', true);
+    has_rows boolean := false;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.reconcile_status = 'accepted' THEN
@@ -106,11 +121,35 @@ BEGIN
         RAISE EXCEPTION 'the review of import run % is final', OLD.id
             USING ERRCODE = '23514';
     END IF;
+    -- Rows already landed: count them household-wide, so a person-scoped policy can't hide
+    -- any and fail open.
+    IF NEW.account_id IS DISTINCT FROM OLD.account_id
+       OR NEW.document_id IS DISTINCT FROM OLD.document_id
+       OR (NEW.status = 'failed' AND NEW.reconcile_status = 'pending')
+    THEN
+        PERFORM set_config('app.household_wide', 'on', true);
+        SELECT EXISTS (
+            SELECT 1 FROM public."transaction" t WHERE t.import_run_id = OLD.id
+        ) INTO has_rows;
+        PERFORM set_config('app.household_wide', coalesce(prev_wide, ''), true);
+    END IF;
+    IF has_rows AND (NEW.account_id IS DISTINCT FROM OLD.account_id
+                     OR NEW.document_id IS DISTINCT FROM OLD.document_id) THEN
+        RAISE EXCEPTION 'import run % has transactions; its account and document are final',
+            OLD.id
+            USING ERRCODE = '23514';
+    END IF;
+    -- A run that failed after landing rows never reconciled them: flag it (and so latch the
+    -- document) instead of leaving those rows looking finished (hard rule 6, ADR 0017).
+    IF has_rows AND NEW.status = 'failed' AND NEW.reconcile_status = 'pending' THEN
+        NEW.reconcile_status := 'needs_review';
+    END IF;
     RETURN NEW;
 END
 $$;
 COMMENT ON FUNCTION import_run_guard() IS
-    'Reconciliation is final once decided; needs_review leaves only via an attributed accept.';
+    'Reconciliation is final once decided; needs_review leaves only via an attributed accept;'
+    ' a run that fails with rows is flagged.';
 CREATE TRIGGER import_run_guard
     BEFORE INSERT OR UPDATE ON import_run
     FOR EACH ROW EXECUTE FUNCTION import_run_guard();
@@ -134,8 +173,10 @@ END
 $$;
 COMMENT ON FUNCTION import_run_flag_document() IS
     'A needs_review run flags its document and latches that flag (PLAN 8.1 step 4).';
+-- No column list: import_run_guard sets needs_review itself when a run fails with rows, and an
+-- UPDATE OF trigger would miss a column changed by a BEFORE trigger. Repeats are no-ops.
 CREATE TRIGGER import_run_flag_document
-    AFTER INSERT OR UPDATE OF reconcile_status ON import_run
+    AFTER INSERT OR UPDATE ON import_run
     FOR EACH ROW WHEN (NEW.reconcile_status = 'needs_review')
     EXECUTE FUNCTION import_run_flag_document();
 
@@ -218,26 +259,68 @@ CREATE TRIGGER document_review_guard
     EXECUTE FUNCTION document_review_guard();
 """
 
-# Once set, the link to the run that created a row is final. Clearing it would let that
-# run be deleted while its rows stayed. The document latch still blocks a parsed status.
+# A row joins a run only when it is inserted, only while the run is running and unreconciled,
+# only in the run's account (when it has one), and only if the writer may write the run.
+# After that the link and the row's account are final: changing either would let a run be
+# reconciled, undone or deleted around rows it never covered.
+#
+# The run is read in the writer's own RLS context, not household-wide. FOR SHARE applies the
+# run's SELECT and UPDATE policies, so a run the writer can't write is "not found", which fails
+# closed. A hidden run and a missing one raise the same error with the same SQLSTATE before the
+# FK runs, so the FK can't serve as an existence oracle. The row lock makes a concurrent
+# reconcile or fail wait for this insert, and makes this insert see that change if it came
+# first. Messages carry ids only.
 IMPORT_RUN_LINK_SQL = """
 CREATE FUNCTION transaction_import_run_guard() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
+DECLARE
+    run_account uuid;
+    run_status text;
+    run_reconcile text;
 BEGIN
-    IF OLD.import_run_id IS NOT NULL
-       AND NEW.import_run_id IS DISTINCT FROM OLD.import_run_id THEN
-        RAISE EXCEPTION 'transaction % import run link is final', OLD.id
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.import_run_id IS DISTINCT FROM OLD.import_run_id THEN
+            RAISE EXCEPTION 'transaction % import run link is final; it is set on insert',
+                OLD.id
+                USING ERRCODE = '23514';
+        END IF;
+        IF OLD.import_run_id IS NOT NULL AND NEW.account_id IS DISTINCT FROM OLD.account_id THEN
+            RAISE EXCEPTION 'transaction % came from an import run; its account is final',
+                OLD.id
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.import_run_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT r.account_id, r.status, r.reconcile_status
+      INTO run_account, run_status, run_reconcile
+      FROM public.import_run r
+     WHERE r.id = NEW.import_run_id AND r.household_id = NEW.household_id
+       FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'import run % is not open to this writer', NEW.import_run_id
+            USING ERRCODE = '23503';
+    END IF;
+    IF run_account IS NOT NULL AND run_account IS DISTINCT FROM NEW.account_id THEN
+        RAISE EXCEPTION 'import run % covers another account', NEW.import_run_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF run_status <> 'running' OR run_reconcile <> 'pending' THEN
+        RAISE EXCEPTION 'import run % is not running; start a new run', NEW.import_run_id
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END
 $$;
 COMMENT ON FUNCTION transaction_import_run_guard() IS
-    'import_run_id, once set, cannot be changed or cleared (ADR 0017).';
+    'A row joins only a running, unreconciled run the writer may write, in its account;'
+    ' the link and account are then final (ADR 0017).';
 CREATE TRIGGER transaction_import_run_guard
-    BEFORE UPDATE OF import_run_id ON "transaction"
+    BEFORE INSERT OR UPDATE OF import_run_id, account_id ON "transaction"
     FOR EACH ROW EXECUTE FUNCTION transaction_import_run_guard();
 """
 
@@ -393,6 +476,12 @@ def upgrade() -> None:
         "transaction",
         "import_run_id IS NULL OR source = 'import'",
     )
+    # Every imported row belongs to a run, so it is covered by that run's reconciliation.
+    op.create_check_constraint(
+        op.f("ck_transaction_import_has_run"),
+        "transaction",
+        "source <> 'import' OR import_run_id IS NOT NULL",
+    )
     op.create_check_constraint(
         op.f("ck_transaction_import_fingerprinted"),
         "transaction",
@@ -426,6 +515,7 @@ def downgrade() -> None:
     for name in (
         "import_fingerprint_hex",
         "import_fingerprinted",
+        "import_has_run",
         "import_run_source",
         "not_self_superseded",
     ):

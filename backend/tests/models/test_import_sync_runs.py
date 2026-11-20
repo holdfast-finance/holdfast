@@ -205,12 +205,17 @@ def test_supersession_stays_one_to_one_inside_the_account(
     try:
         with app_engine.begin() as c:
             set_ctx(c, hid, wide=True)
+            run_id = _open_run(c, hid, seed.rows["document"]["id"], acct)
             winner = _txn(c, hid, acct, Decimal("-5.00"), "plaid")
-            loser = _txn(c, hid, acct, Decimal("-5.00"), "import", fingerprint=_fp(1))
+            loser = _txn(
+                c, hid, acct, Decimal("-5.00"), "import", fingerprint=_fp(1), import_run_id=run_id
+            )
             c.execute(txn.update().where(txn.c.id == loser).values(superseded_by_id=winner))
         with app_engine.begin() as c:
             set_ctx(c, hid, wide=True)
-            other = _txn(c, hid, acct, Decimal("-5.00"), "import", fingerprint=_fp(2))
+            other = _txn(
+                c, hid, acct, Decimal("-5.00"), "import", fingerprint=_fp(2), import_run_id=run_id
+            )
         with (
             app_engine.begin() as c,
             pytest.raises(IntegrityError, match="uq_transaction_superseded_by_id"),
@@ -245,6 +250,7 @@ def test_import_run_cannot_be_deleted_while_its_rows_exist(
     try:
         with app_engine.begin() as c:
             set_ctx(c, seed.household_id, wide=True)
+            _start(c, run_id)
             row = _txn(
                 c,
                 seed.household_id,
@@ -276,6 +282,7 @@ def test_household_delete_removes_a_run_and_its_rows(
     try:
         with app_engine.begin() as c:
             set_ctx(c, seed.household_id, wide=True)
+            _start(c, seed.rows["import_run"]["id"])
             _txn(
                 c,
                 seed.household_id,
@@ -457,6 +464,7 @@ def test_import_run_link_cannot_be_cleared(app_engine: Engine, owner_engine: Eng
     try:
         with app_engine.begin() as c:
             set_ctx(c, seed.household_id, wide=True)
+            _start(c, run_id)
             row = _txn(
                 c,
                 seed.household_id,
@@ -559,3 +567,519 @@ def _txn(
         )
         .returning(txn.c.id)
     ).scalar_one()
+
+
+def _start(conn: Connection, run_id: uuid.UUID) -> None:
+    run = table("import_run")
+    conn.execute(run.update().where(run.c.id == run_id).values(status="running", started_at=WHEN))
+
+
+def _open_run(
+    conn: Connection,
+    household_id: uuid.UUID,
+    document_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+) -> uuid.UUID:
+    """A running, unreconciled run: the only kind a row may join."""
+    run = table("import_run")
+    return conn.execute(
+        run.insert()
+        .values(
+            household_id=household_id,
+            document_id=document_id,
+            account_id=account_id,
+            status="running",
+            started_at=WHEN,
+        )
+        .returning(run.c.id)
+    ).scalar_one()
+
+
+def _account(
+    conn: Connection,
+    household_id: uuid.UUID,
+    owner: uuid.UUID | None,
+    visibility: str,
+    mask: str,
+) -> uuid.UUID:
+    acct = table("account")
+    return conn.execute(
+        acct.insert()
+        .values(
+            household_id=household_id,
+            owner_person_id=owner,
+            source="manual",
+            name=f"Example {mask}",
+            mask=mask,
+            type="depository",
+            visibility=visibility,
+        )
+        .returning(acct.c.id)
+    ).scalar_one()
+
+
+def _document(conn: Connection, household_id: uuid.UUID, person_id: uuid.UUID | None) -> uuid.UUID:
+    doc = table("document")
+    return conn.execute(
+        doc.insert()
+        .values(
+            household_id=household_id,
+            person_id=person_id,
+            kind="statement",
+            filename="statement.pdf",
+            sha256=uuid.uuid4().hex * 2,
+            storage_path=f"statements/{uuid.uuid4()}.pdf",
+            mime="application/pdf",
+            size_bytes=10,
+        )
+        .returning(doc.c.id)
+    ).scalar_one()
+
+
+def _undo(conn: Connection, run_id: uuid.UUID) -> int:
+    """What the import service's undo does: the run's rows (under RLS), then the run."""
+    txn = table("transaction")
+    run = table("import_run")
+    rows = conn.execute(txn.delete().where(txn.c.import_run_id == run_id)).rowcount
+    conn.execute(run.delete().where(run.c.id == run_id))
+    return rows
+
+
+# --------------------------------------------------------------- reconciliation can't be bypassed
+
+
+def test_imported_row_needs_a_run(app_engine: Engine, owner_engine: Engine) -> None:
+    seed = seed_household(app_engine, "no-run")
+    try:
+        with app_engine.begin() as c, pytest.raises(IntegrityError, match="import_has_run"):
+            set_ctx(c, seed.household_id, wide=True)
+            _txn(
+                c,
+                seed.household_id,
+                seed.rows["account"]["id"],
+                Decimal("-999.00"),
+                "import",
+                fingerprint=_fp(90),
+            )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_rows_join_only_a_running_unreconciled_run(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "closed-run")
+    hid = seed.household_id
+    acct = seed.rows["account"]["id"]
+    doc = seed.rows["document"]["id"]
+    run = table("import_run")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            reconciled = c.execute(
+                run.insert()
+                .values(
+                    household_id=hid,
+                    document_id=doc,
+                    account_id=acct,
+                    status="succeeded",
+                    finished_at=WHEN,
+                    reconcile_status="reconciled",
+                    opening_balance=Decimal("5.00"),
+                    txn_sum=Decimal("-1.00"),
+                    closing_balance=Decimal("4.00"),
+                )
+                .returning(run.c.id)
+            ).scalar_one()
+            flagged = _open_run(c, hid, doc, acct)
+            c.execute(
+                run.update().where(run.c.id == flagged).values(reconcile_status="needs_review")
+            )
+        # A finished, reconciled run; a queued run; a running run already flagged.
+        for n, run_id in enumerate((reconciled, seed.rows["import_run"]["id"], flagged)):
+            with app_engine.begin() as c, pytest.raises(IntegrityError, match="is not running"):
+                set_ctx(c, hid, wide=True)
+                _txn(
+                    c,
+                    hid,
+                    acct,
+                    Decimal("-500.00"),
+                    "import",
+                    fingerprint=_fp(91 + n),
+                    import_run_id=run_id,
+                )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_failed_run_with_rows_is_flagged_and_latches_the_document(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "crash")
+    hid = seed.household_id
+    acct = seed.rows["account"]["id"]
+    run = table("import_run")
+    doc = table("document")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            # A run that fails before landing a row stays pending and flags nothing.
+            empty_doc = _document(c, hid, None)
+            empty = _open_run(c, hid, empty_doc, acct)
+            c.execute(
+                run.update()
+                .where(run.c.id == empty)
+                .values(status="failed", finished_at=WHEN, error_class="ValueError")
+            )
+            state = c.execute(
+                select(doc.c.parse_status, doc.c.import_review_latched).where(doc.c.id == empty_doc)
+            ).one()
+            assert tuple(state) == ("pending", False)
+            assert (
+                c.execute(select(run.c.reconcile_status).where(run.c.id == empty)).scalar_one()
+                == "pending"
+            )
+
+            crashed_doc = _document(c, hid, None)
+            crashed = _open_run(c, hid, crashed_doc, acct)
+            _txn(
+                c,
+                hid,
+                acct,
+                Decimal("-42.00"),
+                "import",
+                fingerprint=_fp(92),
+                import_run_id=crashed,
+            )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            c.execute(
+                run.update()
+                .where(run.c.id == crashed)
+                .values(
+                    status="failed",
+                    finished_at=WHEN,
+                    error_class="ValueError",
+                    rows_parsed=1,
+                    rows_inserted=1,
+                )
+            )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            status = c.execute(
+                select(run.c.status, run.c.reconcile_status).where(run.c.id == crashed)
+            ).one()
+            assert tuple(status) == ("failed", "needs_review")
+            state = c.execute(
+                select(doc.c.parse_status, doc.c.import_review_latched).where(
+                    doc.c.id == crashed_doc
+                )
+            ).one()
+            assert tuple(state) == ("needs_review", True)
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_run_with_rows_keeps_its_account_and_document(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "rows-final")
+    hid = seed.household_id
+    acct = seed.rows["account"]["id"]
+    run = table("import_run")
+    txn = table("transaction")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            other_acct = _account(c, hid, None, "shared", "0009")
+            other_doc = _document(c, hid, None)
+            run_id = _open_run(c, hid, seed.rows["document"]["id"], acct)
+            row = _txn(
+                c, hid, acct, Decimal("-3.00"), "import", fingerprint=_fp(93), import_run_id=run_id
+            )
+        for values in ({"account_id": other_acct}, {"document_id": other_doc}):
+            with (
+                app_engine.begin() as c,
+                pytest.raises(IntegrityError, match="account and document are final"),
+            ):
+                set_ctx(c, hid, wide=True)
+                c.execute(run.update().where(run.c.id == run_id).values(**values))
+        with (
+            app_engine.begin() as c,
+            pytest.raises(IntegrityError, match="its account is final"),
+        ):
+            set_ctx(c, hid, wide=True)
+            c.execute(txn.update().where(txn.c.id == row).values(account_id=other_acct))
+        with app_engine.begin() as c:
+            # Rewriting the row with the same link (an ORM full-row update) is not a change.
+            set_ctx(c, hid, wide=True)
+            c.execute(
+                txn.update()
+                .where(txn.c.id == row)
+                .values(import_run_id=run_id, account_id=acct, merchant_name="Example Mart")
+            )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_reconcile_waits_for_a_row_joining_the_run(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "join-lock")
+    hid = seed.household_id
+    acct = seed.rows["account"]["id"]
+    run = table("import_run")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            run_id = _open_run(c, hid, seed.rows["document"]["id"], acct)
+        with app_engine.connect() as joining, joining.begin():
+            set_ctx(joining, hid, wide=True)
+            _txn(
+                joining,
+                hid,
+                acct,
+                Decimal("-7.00"),
+                "import",
+                fingerprint=_fp(94),
+                import_run_id=run_id,
+            )
+            # The joining row holds the run until it commits, so the reconcile can't slip in
+            # between the guard's check and the insert.
+            with app_engine.begin() as c, pytest.raises(DBAPIError, match="lock timeout"):
+                set_ctx(c, hid, wide=True)
+                c.exec_driver_sql("SET LOCAL lock_timeout = '200ms'")
+                c.execute(
+                    run.update()
+                    .where(run.c.id == run_id)
+                    .values(
+                        reconcile_status="reconciled",
+                        opening_balance=Decimal("10.00"),
+                        txn_sum=Decimal("0.00"),
+                        closing_balance=Decimal("10.00"),
+                    )
+                )
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+# ------------------------------------------------------------ one person can't use another's run
+
+
+def test_person_cannot_link_rows_into_another_persons_private_run(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "private-link")
+    hid = seed.household_id
+    alex, sam = seed.person_ids
+    txn = table("transaction")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            alex_private = _account(c, hid, alex, "private", "0001")
+            sam_private = _account(c, hid, sam, "private", "0002")
+            joint = _account(c, hid, None, "shared", "0003")
+            alex_doc = _document(c, hid, alex)
+        with app_engine.begin() as c:
+            set_ctx(c, hid, alex)
+            alex_run = _open_run(c, hid, alex_doc, alex_private)
+            alex_row = _txn(
+                c,
+                hid,
+                alex_private,
+                Decimal("-10.00"),
+                "import",
+                fingerprint=_fp(1),
+                import_run_id=alex_run,
+            )
+        for n, acct in enumerate((joint, sam_private)):
+            with app_engine.begin() as c, pytest.raises(IntegrityError, match="not open"):
+                set_ctx(c, hid, sam)
+                _txn(
+                    c,
+                    hid,
+                    acct,
+                    Decimal("-1.00"),
+                    "import",
+                    fingerprint=_fp(70 + n),
+                    import_run_id=alex_run,
+                )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, alex)
+            assert _undo(c, alex_run) == 1
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            assert count(c, "import_run", {"id": alex_run}) == 0
+            assert count(c, "transaction", {"id": alex_row}) == 0
+            assert count(c, "transaction", {"import_run_id": alex_run}) == 0
+            assert c.execute(select(txn.c.id).where(txn.c.account_id == sam_private)).all() == []
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_joint_account_rows_cannot_join_another_persons_run(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "joint-link")
+    hid = seed.household_id
+    alex, sam = seed.person_ids
+    txn = table("transaction")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            joint = _account(c, hid, None, "shared", "0003")
+            alex_private = _account(c, hid, alex, "private", "0001")
+            alex_doc = _document(c, hid, alex)
+        with app_engine.begin() as c:
+            set_ctx(c, hid, alex)
+            # Alex's statement for the joint account: Sam can see this run, not write it.
+            joint_run = _open_run(c, hid, alex_doc, joint)
+            private_run = _open_run(c, hid, alex_doc, alex_private)
+            _txn(
+                c,
+                hid,
+                joint,
+                Decimal("-4.00"),
+                "import",
+                fingerprint=_fp(1),
+                import_run_id=joint_run,
+            )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, sam)
+            sam_row = _txn(c, hid, joint, Decimal("-2.00"), "manual")
+            assert count(c, "import_run", {"id": joint_run}) == 1
+        for run_id in (joint_run, private_run):
+            with app_engine.begin() as c, pytest.raises(IntegrityError, match="not open"):
+                set_ctx(c, hid, sam)
+                _txn(
+                    c,
+                    hid,
+                    joint,
+                    Decimal("-2.00"),
+                    "import",
+                    fingerprint=_fp(2),
+                    import_run_id=run_id,
+                )
+        # An existing row can't be pulled into a run later, by anyone.
+        for person, wide in ((sam, False), (None, True)):
+            with app_engine.begin() as c, pytest.raises(IntegrityError, match="link is final"):
+                set_ctx(c, hid, person, wide=wide)
+                c.execute(
+                    txn.update()
+                    .where(txn.c.id == sam_row)
+                    .values(source="import", import_fingerprint=_fp(3), import_run_id=joint_run)
+                )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, alex)
+            assert _undo(c, joint_run) == 1
+            assert _undo(c, private_run) == 0
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            assert count(c, "transaction", {"id": sam_row}) == 1
+    finally:
+        delete_household(owner_engine, seed.household_id)
+
+
+def test_hidden_run_and_missing_run_fail_the_same_way(
+    app_engine: Engine, owner_engine: Engine
+) -> None:
+    seed = seed_household(app_engine, "oracle")
+    other = seed_household(app_engine, "oracle-other")
+    hid = seed.household_id
+    alex, sam = seed.person_ids
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            alex_private = _account(c, hid, alex, "private", "0001")
+            sam_private = _account(c, hid, sam, "private", "0002")
+            alex_run = _open_run(c, hid, _document(c, hid, alex), alex_private)
+        with app_engine.begin() as c:
+            set_ctx(c, other.household_id, wide=True)
+            _start(c, other.rows["import_run"]["id"])
+        outcomes = []
+        for n, run_id in enumerate((uuid.uuid4(), alex_run, other.rows["import_run"]["id"])):
+            with app_engine.begin() as c, pytest.raises(IntegrityError) as caught:
+                set_ctx(c, hid, sam)
+                _txn(
+                    c,
+                    hid,
+                    sam_private,
+                    Decimal("-1.00"),
+                    "import",
+                    fingerprint=_fp(80 + n),
+                    import_run_id=run_id,
+                )
+            sqlstate = getattr(caught.value.orig, "sqlstate", None)
+            outcomes.append((sqlstate, _db_message(caught.value).replace(str(run_id), "<run>")))
+        assert outcomes[0][0] == "23503"
+        assert outcomes[0] == outcomes[1] == outcomes[2]
+        assert "fk_transaction_import_run_id" not in outcomes[0][1]
+    finally:
+        delete_household(owner_engine, seed.household_id)
+        delete_household(owner_engine, other.household_id)
+
+
+def test_runs_follow_their_document(app_engine: Engine, owner_engine: Engine) -> None:
+    seed = seed_household(app_engine, "doc-run")
+    hid = seed.household_id
+    alex, sam = seed.person_ids
+    run = table("import_run")
+    doc = table("document")
+    try:
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            joint = _account(c, hid, None, "shared", "0003")
+            alex_doc = _document(c, hid, alex)
+            household_doc = _document(c, hid, None)
+            alex_export = _open_run(c, hid, alex_doc, None)
+        # Sam can't start, flag or accept a run on Alex's statement, with or without an account.
+        for acct in (None, joint):
+            with app_engine.begin() as c, pytest.raises(DBAPIError, match=RLS_VIOLATION):
+                set_ctx(c, hid, sam)
+                c.execute(
+                    run.insert().values(
+                        household_id=hid,
+                        document_id=alex_doc,
+                        account_id=acct,
+                        reconcile_status="needs_review",
+                    )
+                )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, sam)
+            flagged = c.execute(
+                run.update().where(run.c.id == alex_export).values(reconcile_status="needs_review")
+            )
+            assert flagged.rowcount == 0
+        # Nor add rows to Alex's multi-account export, even in an account Sam may write.
+        with app_engine.begin() as c, pytest.raises(IntegrityError, match="not open"):
+            set_ctx(c, hid, sam)
+            _txn(
+                c,
+                hid,
+                joint,
+                Decimal("-1.00"),
+                "import",
+                fingerprint=_fp(1),
+                import_run_id=alex_export,
+            )
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            state = c.execute(
+                select(doc.c.parse_status, doc.c.import_review_latched).where(doc.c.id == alex_doc)
+            ).one()
+            assert tuple(state) == ("pending", False)
+        # A household statement is the household's: Sam may run it.
+        with app_engine.begin() as c:
+            set_ctx(c, hid, sam)
+            household_run = _open_run(c, hid, household_doc, None)
+            _txn(
+                c,
+                hid,
+                joint,
+                Decimal("-1.00"),
+                "import",
+                fingerprint=_fp(2),
+                import_run_id=household_run,
+            )
+    finally:
+        delete_household(owner_engine, seed.household_id)

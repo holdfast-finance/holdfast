@@ -89,10 +89,13 @@ class Transaction(Base):
 
     **Imports** (ADR 0017). An imported row (``source = 'import'``) always has an
     ``import_fingerprint`` (64-char hex, ``app.domain.fingerprint``), unique per account, so a
-    re-import inserts nothing. ``import_run_id`` records which run created it (imports only).
-    Once set, that link cannot be changed or cleared (trigger ``transaction_import_run_guard``).
-    A run can't be deleted while its rows exist (NO ACTION), so undoing an import deletes its
-    rows first, under RLS.
+    re-import inserts nothing. ``import_run_id`` records which run created it: every imported
+    row has one, and only imported rows do (CHECKs). Trigger ``transaction_import_run_guard``
+    lets a row join a run only on insert, only while the run is ``running`` and its
+    reconciliation ``pending``, only in the run's account (when it has one), and only if the
+    writer may write the run. After that the link and the row's account are final. A run can't
+    be deleted while its rows exist (NO ACTION), so undoing an import deletes its rows first,
+    under RLS.
 
     **Supersession** (PLAN 8.1 step 5, "Plaid wins"). ``superseded_by_id`` points at the row that
     replaces this one; superseded rows stay (so their fingerprints keep re-imports idempotent) but
@@ -125,6 +128,7 @@ class Transaction(Base):
             "superseded_by_id IS NULL OR superseded_by_id <> id", name="not_self_superseded"
         ),
         CheckConstraint("import_run_id IS NULL OR source = 'import'", name="import_run_source"),
+        CheckConstraint("source <> 'import' OR import_run_id IS NOT NULL", name="import_has_run"),
         CheckConstraint(
             "source <> 'import' OR import_fingerprint IS NOT NULL", name="import_fingerprinted"
         ),
