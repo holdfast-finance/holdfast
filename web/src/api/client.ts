@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
+import createClient from 'openapi-fetch'
 
-import { CLIENT_ERROR_CODES, ERROR_CODES } from '@/api/types'
+import { CLIENT_ERROR_CODES, ERROR_CODES } from '@/api/contracts'
+import type { components, paths } from '@/api/schema'
 
 /*
  * Typed fetch wrapper for the Holdfast API (docs/phases/PHASE-1-contract.md, "API contract").
@@ -12,9 +14,6 @@ import { CLIENT_ERROR_CODES, ERROR_CODES } from '@/api/types'
  * - Non-2xx responses become a typed `ApiError` carrying the contract's `{error: {code, message}}`.
  * - 401s are reported to the query client (see `queryClient.ts`), which drops the cached session
  *   so the route guard sends the user to /login.
- *
- * TODO(openapi): types in `./types.ts` are hand-written; generate them with openapi-typescript
- * once the backend publishes /api/openapi.json, and keep amounts as `string`.
  *
  * Never log request bodies here: they carry passwords, TOTP codes and recovery codes.
  */
@@ -80,47 +79,33 @@ async function toApiError(response: Response): Promise<ApiError> {
   )
 }
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
+export const api = createClient<paths>({
+  baseUrl: window.location.origin,
+  credentials: 'same-origin',
+  headers: { Accept: 'application/json' },
+  fetch: (request) => globalThis.fetch(request),
+})
 
-export interface RequestOptions {
-  method?: Method
-  body?: unknown
-  query?: Record<string, string | number | undefined>
-  signal?: AbortSignal
-}
+api.use({
+  onRequest({ request }) {
+    if (request.method !== 'GET') request.headers.set(CSRF_HEADER, '1')
+  },
+  async onResponse({ response }) {
+    if (!response.ok) throw await toApiError(response)
+  },
+  onError({ error }) {
+    if (error instanceof DOMException && error.name === 'AbortError') return
+    return new ApiError(0, CLIENT_ERROR_CODES.networkError, 'Holdfast could not reach its server.')
+  },
+})
 
-/**
- * Call `/api{path}` and return the parsed JSON (or `undefined` for 204).
- * The caller states the response type; validation is the API's contract.
- */
-export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const method = options.method ?? 'GET'
-  const url = new URL(apiUrl(`/api${path}`))
-  for (const [key, value] of Object.entries(options.query ?? {})) {
-    if (value !== undefined) url.searchParams.set(key, String(value))
+/** Unwrap a successful response on routes that declare a JSON body. */
+export async function readData<T>(request: Promise<{ data?: T; response: Response }>): Promise<T> {
+  const { data, response } = await request
+  if (data === undefined) {
+    throw new ApiError(response.status, 'bad_body', 'The server returned an empty response.')
   }
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  if (method !== 'GET') headers[CSRF_HEADER] = '1'
-  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
-
-  let response: Response
-  try {
-    response = await fetch(url.toString(), {
-      method,
-      headers,
-      credentials: 'same-origin',
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      signal: options.signal,
-    })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError(0, CLIENT_ERROR_CODES.networkError, 'Holdfast could not reach its server.')
-  }
-
-  if (!response.ok) throw await toApiError(response)
-  if (response.status === 204) return undefined as T
-  const text = await response.text()
-  return (text ? JSON.parse(text) : undefined) as T
+  return data
 }
 
 /** A human message for any error a query or mutation can throw. */
@@ -156,13 +141,8 @@ export function errorMessage(error: unknown): string {
 
 // --- Health (Phase 0) -------------------------------------------------------------------------
 
-export type CheckState = 'ok' | 'error'
-
-export interface HealthResponse {
-  status: CheckState
-  version: string
-  checks: Record<string, CheckState>
-}
+type HealthResponse = components['schemas']['HealthResponse']
+type CheckState = HealthResponse['status']
 
 export type ApiStatus = 'ok' | 'degraded' | 'unreachable'
 
@@ -177,7 +157,8 @@ export function isHealthResponse(value: unknown): value is HealthResponse {
     isCheckState(status) &&
     typeof version === 'string' &&
     isRecord(checks) &&
-    Object.values(checks).every(isCheckState)
+    isCheckState(checks.db) &&
+    isCheckState(checks.redis)
   )
 }
 

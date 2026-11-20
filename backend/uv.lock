@@ -457,7 +457,7 @@ wheels = [
 
 [[package]]
 name = "holdfast"
-version = "0.0.0"
+version = "0.0.0a0"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },

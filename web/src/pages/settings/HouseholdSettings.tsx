@@ -14,7 +14,7 @@ import {
   useRenameHousehold,
   useUpdatePerson,
 } from '@/api/household'
-import type { Person } from '@/api/types'
+import type { Person } from '@/api/contracts'
 import { CopyButton } from '@/components/CopyButton'
 import { Field, FormError } from '@/components/forms/Field'
 import { ResponsiveSheet } from '@/components/ResponsiveSheet'

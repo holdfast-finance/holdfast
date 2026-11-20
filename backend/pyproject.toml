@@ -1,6 +1,6 @@
 [project]
 name = "holdfast"
-version = "0.0.0"
+version = "0.0.0a0"
 description = "Holdfast API and worker: self-hosted personal finance."
 readme = "README.md"
 license = "AGPL-3.0-only"
