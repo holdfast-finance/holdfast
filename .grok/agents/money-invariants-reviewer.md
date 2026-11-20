@@ -26,3 +26,5 @@ Hunt for:
 Useful search: `rg -n "float\(|parseFloat|Number\(|toFixed|REAL|Float\b" backend web/src`.
 
 Output concrete findings with `file:line`, a failing input, and the fix, ranked by impact. Say "no findings" if clean. Name the head SHA.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Ledger via Helm (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.

@@ -22,3 +22,5 @@ For each value in the files you are given:
 4. A value you cannot confirm is `TODO_VERIFY`, not a guess.
 
 Output a table: `key | value in file | value at source | source URL | status (OK / MISMATCH / UNSOURCED / NEEDS TODO_VERIFY)`. Finish with the edits to make.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Tally via Helm (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.

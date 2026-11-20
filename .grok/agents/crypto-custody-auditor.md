@@ -27,3 +27,5 @@ Hard failures, any one of which blocks the merge:
 Also check: the change address is verified as belonging to the wallet during PSBT review, passkey re-auth happens before a PSBT is built, broadcast goes to the user's node when one is configured, a privacy warning appears for public chain APIs, and per-wallet basis lots exist with transfer matching before disposal.
 
 Output PASS or FAIL. List hard failures first, then other findings with `file:line` and the fix. Name the head SHA.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Cipher via Helm (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.

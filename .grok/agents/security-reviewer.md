@@ -28,3 +28,5 @@ Check, in order:
 9. New dependencies: maintained and AGPL-compatible.
 
 Output findings ranked critical, high, medium, low. Each one has `file:line`, the failure scenario, and the fix. Say "no findings" if clean. Name the head SHA in the verdict.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Bulwark via Helm (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.

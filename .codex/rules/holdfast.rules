@@ -1,36 +1,37 @@
-# Approval rules for Codex shell prefixes. Project lane restrictions also apply.
-prefix_rule(pattern = ["git", "push"], decision = "prompt")
+# Approval rules for Codex shell prefixes (Anvil). Project lane restrictions also apply.
+# prefix_rule is an exact argv prefix, so flag-before-subcommand and refspec variants are enumerated.
+# The hard boundary is the GitHub Read role plus the holdfast-agents OS user (ADR 0012,
+# scripts/external-agent-launch.sh). These rules are a second layer. Verified by scripts/tests/test_agent_guard.py.
 prefix_rule(pattern = ["git", "remote"], decision = "prompt")
 prefix_rule(pattern = ["git", "merge"], decision = "prompt")
 prefix_rule(pattern = ["git", "rebase"], decision = "prompt")
 prefix_rule(pattern = ["git", "reset", "--hard"], decision = "prompt")
 prefix_rule(pattern = ["gh", "repo", "create"], decision = "prompt")
 prefix_rule(pattern = ["docker", "compose", "down", "-v"], decision = "prompt")
-prefix_rule(pattern = ["cat", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["cat", "./.env"], decision = "forbidden")
-# Keel additions (2026-11-19): reading secrets by any common tool, and gate bypasses.
-prefix_rule(pattern = ["head", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["tail", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["less", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["more", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["grep", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["source", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["cp", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["base64", ".env"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "pr", "merge"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "pr", "review"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "label"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "pr", "edit"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "api"], decision = "prompt")
-# prefix_rule is an exact argv prefix. repos/.../pulls/<n>/merge is not one
-# without also matching ordinary `gh api` reads, so this stays prompt.
-prefix_rule(pattern = ["gh", "secret"], decision = "forbidden")
-prefix_rule(pattern = ["gh", "ruleset"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "--force"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "-f"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "origin", "main"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "upstream", "main"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "origin", "HEAD:main"], decision = "forbidden")
-prefix_rule(pattern = ["git", "push", "upstream", "HEAD:main"], decision = "forbidden")
-prefix_rule(pattern = ["git", "commit", "--no-verify"], decision = "forbidden")
-prefix_rule(pattern = ["git", "tag"], decision = "prompt")
+prefix_rule(pattern = ["git", "push"], decision = "prompt")
+
+# Reading secrets by any common tool.
+prefix_rule(pattern = [["cat", "head", "tail", "less", "more", "grep", "source", "cp", "base64"], [".env", "./.env", ".env.local", "./.env.local"]], decision = "forbidden")
+
+# GitHub: nothing that merges, labels, approves, edits settings or releases. `gh api` can do all of it
+# (any implicit POST via -f/-F too), so the whole command is forbidden.
+prefix_rule(pattern = ["gh", "pr", ["merge", "review", "edit"]], decision = "forbidden")
+prefix_rule(pattern = ["gh", "issue", "edit"], decision = "forbidden")
+prefix_rule(pattern = ["gh", ["label", "release", "secret", "ruleset", "workflow", "api"]], decision = "forbidden")
+prefix_rule(pattern = ["gh", "repo", ["edit", "delete"]], decision = "forbidden")
+
+# git: global options before the subcommand can re-point the repo, hooks or config.
+prefix_rule(pattern = ["git", ["-C", "-c", "--git-dir", "--work-tree", "--exec-path", "--config-env", "--namespace"]], decision = "forbidden")
+prefix_rule(pattern = ["git", "config", ["core.hooksPath", "core.hookspath"]], decision = "forbidden")
+prefix_rule(pattern = ["git", "tag"], decision = "forbidden")
+prefix_rule(pattern = ["git", "commit", ["-n", "--no-verify", "-an", "-na"]], decision = "forbidden")
+prefix_rule(pattern = ["git", "push", ["--force", "-f", "--force-with-lease", "--mirror", "--delete", "-d", "--tags", "--follow-tags", "--all", "--prune"]], decision = "forbidden")
+prefix_rule(pattern = ["git", "push", ["-u", "--set-upstream"], ["origin", "upstream"], ["main", "+main", "refs/heads/main", "+refs/heads/main", ":main", ":refs/heads/main", "HEAD:main", "+HEAD:main", "HEAD:refs/heads/main", "+HEAD:refs/heads/main", "@:main", "+@:main", "@:refs/heads/main", "+@:refs/heads/main"]], decision = "forbidden")
+prefix_rule(pattern = ["git", "push", ["origin", "upstream"], ["main", "+main", "refs/heads/main", "+refs/heads/main", ":main", ":refs/heads/main", "HEAD:main", "+HEAD:main", "HEAD:refs/heads/main", "+HEAD:refs/heads/main", "@:main", "+@:main", "@:refs/heads/main", "+@:refs/heads/main"]], decision = "forbidden")
+
+# Shell wrappers hide the real command from these prefixes.
+prefix_rule(pattern = [["bash", "sh", "zsh", "dash", "fish"], ["-c", "-lc", "-ic", "-ec", "-xc"]], decision = "forbidden")
+# The agents push only to their fork (`origin`). Any push to `upstream` (x:main and every other form) is forbidden.
+prefix_rule(pattern = ["git", "push", "upstream"], decision = "forbidden")
+prefix_rule(pattern = ["git", "push", ["-u", "--set-upstream"], "upstream"], decision = "forbidden")
+prefix_rule(pattern = ["git", "push", "origin", ["--force", "-f", "--force-with-lease", "--mirror", "--delete", "-d"]], decision = "forbidden")

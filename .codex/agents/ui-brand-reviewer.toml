@@ -22,4 +22,6 @@ Check:
 If Playwright is available and the dev server can start, capture 375×812 and 1440×900 screenshots of the changed pages and describe the issues you see.
 
 Output findings with `file:line` and the fix, grouped as blocking or polish.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Prism via Anvil (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.
 '''

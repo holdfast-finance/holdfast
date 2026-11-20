@@ -17,4 +17,6 @@ Read `.claude/rules/tax.md`. Then, for each value in the files you're given:
 4. Values you can't confirm must be `TODO_VERIFY`, not a guess.
 
 Output a table: `key | value in file | value at source | source URL | status (OK / MISMATCH / UNSOURCED / NEEDS TODO_VERIFY)`. Finish with a list of the edits to make. Don't edit files yourself unless the caller explicitly asks.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Tally via Anvil (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.
 '''

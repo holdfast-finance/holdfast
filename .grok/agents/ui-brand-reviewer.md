@@ -26,3 +26,5 @@ Check:
 If Playwright and a dev server are available, capture 375×812 and 1440×900 of the changed pages and describe what you see.
 
 Output findings with `file:line` and the fix, grouped as blocking or polish. Name the head SHA.
+
+External lane (AGENTS.md) overrides ROSTER; forbidden paths stay forbidden. Your review is advisory: post it as a PR comment naming the head SHA and sign it `— Prism via Helm (advisory)`; Keel decides whether it counts, and protected paths still need a Claude-team Bulwark verdict.
