@@ -10,7 +10,8 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check')]
+        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked',
+        'ci-minutes', 'ci-local', 'release-check')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -50,6 +51,8 @@ $Help = [ordered]@{
     'sync'    = 'Fast-forward main to origin/main; elsewhere print ahead/behind'
     'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
     'test-locked' = 'test under an exclusive lock (${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock) so parallel worktrees share the test DB safely'
+    'ci-minutes'  = 'Billed Actions minutes this UTC month (used/2000)'
+    'ci-local'    = 'Local merge gate for a PR head: dev.ps1 ci-local <n>'
     'release-check' = 'Compare product SemVer and Python version. Does not tag or publish.'
 }
 
@@ -127,7 +130,7 @@ function Invoke-Test {
 switch ($Target) {
     'help' {
         Write-Host 'Holdfast dev.ps1 targets:'
-        foreach ($e in $Help.GetEnumerator()) { Write-Host ("  {0,-9} {1}" -f $e.Key, $e.Value) }
+        foreach ($e in $Help.GetEnumerator()) { Write-Host ("  {0,-12} {1}" -f $e.Key, $e.Value) }
     }
     'up' {
         Assert-Env
@@ -165,15 +168,15 @@ switch ($Target) {
     'health' { curl -fsSk https://localhost/api/health; Write-Host '' }
     'ports' {
         Assert-Env
-        docker @Compose config --format json | & $Python scripts/check-compose-ports.py --dev
-        docker compose -f docker-compose.yml config --format json | & $Python scripts/check-compose-ports.py
+        docker @Compose config --format json | & $Python -I scripts/check-compose-ports.py --dev
+        docker compose -f docker-compose.yml config --format json | & $Python -I scripts/check-compose-ports.py
         # Prod needs TAILSCALE_BIND_IP/CF_API_TOKEN: use .env values if set, else CI-style dummies.
         $envText = Get-Content .env -Raw
         $saved = @{ TAILSCALE_BIND_IP = $env:TAILSCALE_BIND_IP; CF_API_TOKEN = $env:CF_API_TOKEN }
         try {
             if ($envText -notmatch '(?m)^TAILSCALE_BIND_IP=.+') { $env:TAILSCALE_BIND_IP = '100.64.0.1' }
             if ($envText -notmatch '(?m)^CF_API_TOKEN=.+') { $env:CF_API_TOKEN = 'x' * 40 }
-            docker @ComposeProd config --format json | & $Python scripts/check-compose-ports.py --prod
+            docker @ComposeProd config --format json | & $Python -I scripts/check-compose-ports.py --prod
         } finally {
             $env:TAILSCALE_BIND_IP = $saved.TAILSCALE_BIND_IP
             $env:CF_API_TOKEN = $saved.CF_API_TOKEN
@@ -230,5 +233,10 @@ switch ($Target) {
             }
         }
         try { Invoke-Test } finally { $lock.Dispose() }
+    }
+    'ci-minutes' { & $Python scripts/ci_minutes.py }
+    'ci-local' {
+        if (-not $Service) { Write-Error 'usage: ./scripts/dev.ps1 ci-local <PR>' }
+        & $Python scripts/ci_local.py $Service
     }
 }

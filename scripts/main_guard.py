@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""Detect a bad push to main (ADR 0013). Read the GitHub API only.
+
+A push is acceptable when every new commit is the merge commit of exactly
+one merged PR and that PR's head has green ``ci-required`` (from
+``.github/workflows/ci.yml``) and ``review-gate`` (from
+``.github/workflows/review-gate.yml``) runs. A later same-named job from
+any other workflow is ignored. A non-ancestor ``before`` (force-push) fails.
+On failure the caller opens a ``main-guard`` issue. This module does not
+change git history and does not run code from the pushed commits.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from typing import Any, Callable, Protocol
+
+CHECK_NAMES = ("ci-required", "review-gate")
+# Job name is not enough: a fork pull_request workflow can publish the same name.
+CHECK_WORKFLOWS = {
+    "ci-required": ".github/workflows/ci.yml",
+    "review-gate": ".github/workflows/review-gate.yml",
+}
+# Trusted trigger per check. A PR can edit its own copy of any workflow that runs on
+# ``pull_request``, so review-gate counts only from ``pull_request_target`` (it runs the
+# base-branch file). ci-required has no base-branch twin: it counts only from
+# ``pull_request`` and ci.yml is a protected path that review-gate makes Bulwark sign off.
+CHECK_EVENTS = {
+    "ci-required": ("pull_request",),
+    "review-gate": ("pull_request_target",),
+}
+# Both must also come from the merged PR's head branch and repo. GitHub empties a run's
+# ``pull_requests`` after merge, so an empty list is allowed. A non-empty list must be
+# only the merged PR, every entry's base ``main``, and every entry's head SHA the merged
+# head. Any PR from that head whose base moved fails closed: a manual retarget is
+# ``base_ref_changed``, and deleting the old base records ``base_ref_deleted`` plus
+# ``automatic_base_change_succeeded``. A sibling whose current base is not ``main``
+# also fails.
+PR_BOUND_CHECKS = ("ci-required", "review-gate")
+BASE_BRANCH = "main"
+BASE_MOVE_EVENTS = frozenset({
+    "base_ref_changed",
+    "automatic_base_change_succeeded",
+    "base_ref_deleted",
+})
+LABEL = "main-guard"
+Runner = Callable[..., tuple[int, str, str]]
+
+
+class ApiError(Exception):
+    def __init__(self, path: str, code: int) -> None:
+        super().__init__(path)
+        self.path = path
+        self.code = code
+
+
+class GitHub(Protocol):
+    def compare(self, repo: str, before: str, after: str) -> dict[str, Any]: ...
+
+    def pulls(self, repo: str, sha: str) -> list[dict[str, Any]]: ...
+
+    def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]: ...
+
+    def timeline(self, repo: str, number: int) -> list[dict[str, Any]]: ...
+
+    def head_pulls(self, repo: str, head_repo: str, head_ref: str) -> list[dict[str, Any]]: ...
+
+    def ensure_label(self, repo: str) -> None: ...
+
+    def find_open_issue(self, repo: str, after: str) -> int | None: ...
+
+    def create_issue(self, repo: str, title: str, body: str) -> int: ...
+
+
+def _run(cmd: list[str], input_text: str | None = None) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+class GhApi:
+    """``gh api`` adapter. Paths stay on the REST API; no rulesets endpoint."""
+
+    def __init__(self, runner: Runner | None = None) -> None:
+        self._runner = runner or _run
+
+    def _json_cmd(self, cmd: list[str], input_text: str | None = None) -> Any:
+        code, out, _err = self._runner(cmd, input_text)
+        if code != 0:
+            raise ApiError(cmd[-1] if cmd else "gh", code)
+        if not out.strip():
+            return None
+        return json.loads(out)
+
+    def _lines(self, cmd: list[str]) -> list[dict[str, Any]]:
+        code, out, _err = self._runner(cmd)
+        if code != 0:
+            path = next((part for part in cmd if part.startswith("repos/")), "gh")
+            raise ApiError(path, code)
+        rows: list[dict[str, Any]] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if line and line != "null":
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    rows.append(parsed)
+        return rows
+
+    def compare(self, repo: str, before: str, after: str) -> dict[str, Any]:
+        path = f"repos/{repo}/compare/{before}...{after}"
+        payload = self._json_cmd(["gh", "api", path])
+        if not isinstance(payload, dict):
+            raise ApiError(path, 1)
+        return payload
+
+    def pulls(self, repo: str, sha: str) -> list[dict[str, Any]]:
+        path = f"repos/{repo}/commits/{sha}/pulls"
+        return self._lines(
+            [
+                "gh", "api", "--paginate", path,
+                "--header", "Accept: application/vnd.github+json",
+                "--jq",
+                ".[] | {merge_commit_sha, merged_at, number, head_sha: .head.sha,"
+                " head_ref: .head.ref, head_repo: .head.repo.full_name}",
+            ]
+        )
+
+    def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Jobs for ``sha``, each tagged with its workflow file path.
+
+        The path comes from the workflow run, not the job name. ``latest_run``
+        then keeps only ``ci.yml`` and ``review-gate.yml``.
+        """
+        runs_path = f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100"
+        workflow_runs = self._lines(
+            [
+                "gh", "api", "--paginate", runs_path,
+                "--jq",
+                ". as $page | .workflow_runs[] | {id, path, event, created_at, name,"
+                " conclusion, head_sha, total_count: $page.total_count,"
+                " pull_requests: [(.pull_requests // [])[] | {number,"
+                " base_ref: .base.ref, head_sha: .head.sha}],"
+                " head_branch, head_repo: .head_repository.full_name}",
+            ]
+        )
+        if workflow_runs:
+            totals = [
+                total
+                for run in workflow_runs
+                if isinstance(total := run.get("total_count"), int)
+            ]
+            if not totals or max(totals) > len(workflow_runs):
+                raise ApiError(runs_path, 1)
+        rows: list[dict[str, Any]] = []
+        for run in workflow_runs:
+            if run.get("head_sha") != sha:
+                continue
+            run_id = run.get("id")
+            path = run.get("path")
+            if isinstance(run_id, str) and run_id.isdigit():
+                run_id = int(run_id)
+            if not isinstance(run_id, int) or not isinstance(path, str) or not path:
+                continue
+            jobs_path = f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
+            jobs = self._lines(
+                [
+                    "gh", "api", "--paginate", jobs_path,
+                    "--jq",
+                    ".jobs[] | {name, conclusion, started_at, completed_at}",
+                ]
+            )
+            for job in jobs:
+                job["workflow"] = path
+                job["event"] = run.get("event")
+                job["pull_requests"] = run.get("pull_requests") or []
+                job["head_branch"] = run.get("head_branch")
+                job["head_repo"] = run.get("head_repo")
+                job["head_sha"] = run.get("head_sha")
+                rows.append(job)
+        return rows
+
+    def timeline(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """Timeline event names for a PR (paginated). Used to spot a retargeted base."""
+        return self._lines(
+            [
+                "gh", "api", "--paginate",
+                f"repos/{repo}/issues/{number}/timeline?per_page=100",
+                "--header", "Accept: application/vnd.github+json",
+                "--jq", ".[] | {event}",
+            ]
+        )
+
+    def head_pulls(self, repo: str, head_repo: str, head_ref: str) -> list[dict[str, Any]]:
+        """Every PR (any state) opened from this head branch, with its base ref."""
+        owner = head_repo.split("/", 1)[0]
+        return self._lines(
+            [
+                "gh", "api", "-X", "GET", "--paginate", f"repos/{repo}/pulls",
+                "-f", "state=all", "-f", "per_page=100", "-f", f"head={owner}:{head_ref}",
+                "--jq", ".[] | {number, base_ref: .base.ref}",
+            ]
+        )
+
+    def ensure_label(self, repo: str) -> None:
+        code, _out, _err = self._runner(["gh", "api", f"repos/{repo}/labels/{LABEL}"])
+        if code == 0:
+            return
+        payload = json.dumps(
+            {
+                "name": LABEL,
+                "color": "b60205",
+                "description": "Push to main failed the free-tier gate (ADR 0013)",
+            }
+        )
+        code, _out, _err = self._runner(
+            ["gh", "api", "--method", "POST", f"repos/{repo}/labels", "--input", "-"],
+            payload,
+        )
+        if code != 0:
+            raise ApiError(f"repos/{repo}/labels", code)
+
+    def find_open_issue(self, repo: str, after: str) -> int | None:
+        title = issue_title(after)
+        rows = self._lines(
+            [
+                "gh", "api", "--paginate",
+                f"repos/{repo}/issues?state=open&labels={LABEL}&per_page=100",
+                "--jq", ".[] | {number, title}",
+            ]
+        )
+        for row in rows:
+            if row.get("title") == title and isinstance(row.get("number"), int):
+                return int(row["number"])
+        return None
+
+    def create_issue(self, repo: str, title: str, body: str) -> int:
+        payload = json.dumps({"title": title, "body": body, "labels": [LABEL]})
+        parsed = self._json_cmd(
+            ["gh", "api", "--method", "POST", f"repos/{repo}/issues", "--input", "-"],
+            payload,
+        )
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("number"), int):
+            raise ApiError(f"repos/{repo}/issues", 1)
+        return int(parsed["number"])
+
+
+UNSAFE_REF_CHARS = set("&#?%+") | set(" \t\r\n")
+
+
+def unsafe_ref(ref: str) -> bool:
+    return any(ch in UNSAFE_REF_CHARS or ch.isspace() for ch in ref)
+
+
+def is_null_sha(sha: str) -> bool:
+    return not sha or set(sha) <= {"0"}
+
+
+def ancestry_failure(compare: dict[str, Any]) -> str | None:
+    """None when ``before`` is an ancestor of ``after`` (a normal fast-forward)."""
+    status = compare.get("status")
+    try:
+        behind = int(compare.get("behind_by") or 0)
+        ahead = int(compare.get("ahead_by") or 0)
+    except (TypeError, ValueError):
+        return "force-push: compare payload was not numeric; refusing to pass"
+    if status == "ahead" and behind == 0:
+        return None
+    if status == "identical" and behind == 0 and ahead == 0:
+        return None
+    return f"force-push: compare status {status} (before is not an ancestor of after)"
+
+
+def workflow_path(run: dict[str, Any]) -> str:
+    """Workflow file from the run. ``workflow`` is what we store; ``path`` is the API field."""
+    raw = run.get("workflow")
+    if not isinstance(raw, str) or not raw.strip():
+        raw = run.get("path")
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip().replace("\\", "/")
+    if text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def workflow_matches(name: str, run: dict[str, Any]) -> bool:
+    wanted = CHECK_WORKFLOWS.get(name)
+    if wanted is None:
+        return False
+    path = workflow_path(run)
+    return path == wanted
+
+
+def event_matches(name: str, run: dict[str, Any]) -> bool:
+    return run.get("event") in CHECK_EVENTS.get(name, ())
+
+
+def pr_matches(
+    name: str, run: dict[str, Any], pr_number: int | None, head_sha: str | None = None,
+) -> bool:
+    """Empty ``pull_requests`` is the post-merge shape and is allowed.
+
+    A non-empty list must be only the merged PR. Every entry needs base ``main``
+    and the merged head SHA. ``any()`` would let a second PR launder the run.
+    """
+    if name not in PR_BOUND_CHECKS:
+        return True
+    prs = run.get("pull_requests")
+    if not isinstance(prs, list):
+        return False
+    if not prs:
+        return True
+    if pr_number is None or not head_sha:
+        return False
+    return all(
+        isinstance(pr, dict)
+        and pr.get("number") == pr_number
+        and pr.get("base_ref") == BASE_BRANCH
+        and pr.get("head_sha") == head_sha
+        for pr in prs
+    )
+
+
+def head_matches(
+    name: str, run: dict[str, Any], head_ref: str | None, head_repo: str | None,
+) -> bool:
+    """The run must be from the merged PR's head branch and head repository."""
+    if name not in PR_BOUND_CHECKS:
+        return True
+    if not head_ref or not head_repo:
+        return False
+    return run.get("head_branch") == head_ref and run.get("head_repo") == head_repo
+
+
+def _listed_head_ok(run: dict[str, Any], head_sha: str | None) -> bool:
+    """A job that names a workflow head SHA must name the SHA we queried."""
+    if not head_sha:
+        return True
+    listed = run.get("head_sha")
+    if listed is None:
+        return True
+    return listed == head_sha
+
+
+def latest_run(
+    runs: list[dict[str, Any]], name: str, pr_number: int | None = None,
+    head_ref: str | None = None, head_repo: str | None = None,
+    head_sha: str | None = None,
+) -> dict[str, Any] | None:
+    """Latest run of this job from its own workflow file, trusted event, PR and head."""
+    matching = [
+        run for run in runs
+        if run.get("name") == name
+        and workflow_matches(name, run)
+        and event_matches(name, run)
+        and pr_matches(name, run, pr_number, head_sha)
+        and head_matches(name, run, head_ref, head_repo)
+        and _listed_head_ok(run, head_sha)
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda run: str(run.get("started_at") or run.get("completed_at") or ""))
+
+
+def merged_prs(pulls: list[dict[str, Any]], sha: str) -> list[dict[str, Any]]:
+    return [
+        pull for pull in pulls
+        if pull.get("merge_commit_sha") == sha and pull.get("merged_at")
+    ]
+
+
+def commit_failure(
+    sha: str, pulls: list[dict[str, Any]], runs: list[dict[str, Any]],
+) -> str | None:
+    merged = merged_prs(pulls, sha)
+    if len(merged) != 1:
+        return f"{sha}: not the merge commit of exactly one merged PR (found {len(merged)})"
+    head = merged[0].get("head_sha") or ""
+    if not head:
+        return f"{sha}: merged PR has no head SHA"
+    problems: list[str] = []
+    for name in CHECK_NAMES:
+        run = latest_run(
+            runs, name, merged[0].get("number"),
+            merged[0].get("head_ref"), merged[0].get("head_repo"), head,
+        )
+        conclusion = None if run is None else run.get("conclusion")
+        if conclusion != "success":
+            shown = "missing" if run is None else conclusion
+            problems.append(f"{name} on head {head} is {shown}, not success")
+    if problems:
+        return f"{sha}: " + "; ".join(problems)
+    return None
+
+
+def commit_shas(compare: dict[str, Any]) -> tuple[list[str], str | None]:
+    raw = compare.get("commits") or []
+    if not isinstance(raw, list):
+        return [], "compare commits payload was not a list; refusing to pass"
+    shas: list[str] = []
+    for item in raw:
+        if isinstance(item, dict) and isinstance(item.get("sha"), str):
+            shas.append(item["sha"])
+        elif isinstance(item, str):
+            shas.append(item)
+        else:
+            return [], "compare commits payload had an entry without a sha; refusing to pass"
+    total = compare.get("total_commits")
+    if total is not None and int(total) != len(shas):
+        return [], f"compare truncated ({len(shas)} of {total}); refusing to pass"
+    return shas, None
+
+
+def reasons_from_compare(compare: dict[str, Any], gh: GitHub, repo: str) -> list[str]:
+    ancestry = ancestry_failure(compare)
+    if ancestry:
+        return [ancestry]
+    if compare.get("status") == "identical":
+        return []
+    shas, truncated = commit_shas(compare)
+    if truncated:
+        return [truncated]
+    if not shas:
+        return ["no commits in before..after; refusing to pass"]
+    reasons: list[str] = []
+    for sha in shas:
+        try:
+            pulls = gh.pulls(repo, sha)
+        except ApiError:
+            reasons.append(f"{sha}: pulls API failed; refusing to pass")
+            continue
+        merged = merged_prs(pulls, sha)
+        runs: list[dict[str, Any]] = []
+        if len(merged) == 1 and merged[0].get("head_sha"):
+            head_ref = merged[0].get("head_ref")
+            head_repo = merged[0].get("head_repo")
+            if not head_ref or not head_repo:
+                reasons.append(f"{sha}: merged PR head branch or repo is unknown; refusing to pass")
+                continue
+            if unsafe_ref(str(head_ref)):
+                reasons.append(f"{sha}: head branch name has unsafe characters; refusing to pass")
+                continue
+            try:
+                siblings = gh.head_pulls(repo, str(head_repo), str(head_ref))
+            except ApiError:
+                reasons.append(f"{sha}: head PR listing API failed; refusing to pass")
+                continue
+            if not any(
+                p.get("number") == merged[0].get("number") and p.get("base_ref") == BASE_BRANCH
+                for p in siblings
+            ):
+                reasons.append(
+                    f"{sha}: head PR listing does not contain PR #{merged[0].get('number')} "
+                    f"with base {BASE_BRANCH}; refusing to pass"
+                )
+                continue
+            odd = [p for p in siblings if p.get("base_ref") != BASE_BRANCH]
+            if odd:
+                reasons.append(
+                    f"{sha}: PR from {head_ref} targets base "
+                    f"{odd[0].get('base_ref')} (#{odd[0].get('number')}); refusing to pass"
+                )
+                continue
+            blocked = False
+            for sibling in siblings:
+                number = sibling.get("number")
+                if isinstance(number, bool) or not isinstance(number, int):
+                    reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
+                    blocked = True
+                    break
+                try:
+                    events = gh.timeline(repo, number)
+                except (ApiError, KeyError, TypeError, ValueError):
+                    reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
+                    blocked = True
+                    break
+                if any(e.get("event") in BASE_MOVE_EVENTS for e in events):
+                    reasons.append(
+                        f"{sha}: PR #{number} base was changed; "
+                        "a green run may belong to another base"
+                    )
+                    blocked = True
+                    break
+            if blocked:
+                continue
+            try:
+                runs = gh.check_runs(repo, str(merged[0]["head_sha"]))
+            except ApiError:
+                reasons.append(f"{sha}: check-runs API failed; refusing to pass")
+                continue
+        failure = commit_failure(sha, pulls, runs)
+        if failure:
+            reasons.append(failure)
+    return reasons
+
+
+def issue_title(after: str) -> str:
+    return f"main-guard: {after} failed"
+
+
+def issue_body(before: str, after: str, reasons: list[str]) -> str:
+    lines = [
+        "A push to `main` failed main-guard (ADR 0013).",
+        "This workflow does not change git history.",
+        "",
+        f"Before: `{before}`",
+        f"After: `{after}`",
+        "",
+        "Reasons:",
+        *[f"- {reason}" for reason in reasons],
+        "",
+        "Keel reverts through a PR if this push should not be on main.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def execute(before: str, after: str, repo: str, gh: GitHub) -> int:
+    if is_null_sha(before):
+        reasons = ["force-push: before is the all-zero SHA (not an ancestor of after)"]
+    else:
+        try:
+            compare = gh.compare(repo, before, after)
+        except ApiError:
+            reasons = ["compare API failed; refusing to pass"]
+        else:
+            try:
+                reasons = reasons_from_compare(compare, gh, repo)
+            except ApiError:
+                reasons = ["main-guard API failed; refusing to pass"]
+    if not reasons:
+        print(f"main-guard: {after} ok")
+        return 0
+    for reason in reasons:
+        print(f"::error::{reason}")
+    try:
+        gh.ensure_label(repo)
+        existing = gh.find_open_issue(repo, after)
+        number = existing if existing is not None else gh.create_issue(
+            repo, issue_title(after), issue_body(before, after, reasons),
+        )
+        print(f"main-guard: issue #{number}")
+    except ApiError:
+        print("::error::main-guard could not open an issue", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    before = os.environ["BEFORE"]
+    after = os.environ["AFTER"]
+    repo = os.environ["REPO"]
+    if not os.environ.get("GH_TOKEN"):
+        print("::error::GH_TOKEN is not set", file=sys.stderr)
+        return 1
+    return execute(before, after, repo, GhApi())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

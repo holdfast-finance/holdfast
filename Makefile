@@ -6,11 +6,11 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked release-check
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked ci-minutes ci-local release-check api-types api-types-check api-types-test
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
-	@grep -E '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-9s %s\n", $$1, $$2}'
+	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
@@ -108,7 +108,7 @@ sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
 
 release-check: ## Compare product SemVer and Python version. Does not tag or publish.
-	python3 scripts/cut_release.py check
+	python3 -I scripts/cut_release.py check
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
 	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \
@@ -119,16 +119,22 @@ health: ## GET /api/health through Caddy
 	curl -fsSk https://localhost/api/health; echo
 
 ports: env-check ## Assert no compose service publishes beyond the rules
-	$(COMPOSE) config --format json | python3 scripts/check-compose-ports.py --dev
-	docker compose -f docker-compose.yml config --format json | python3 scripts/check-compose-ports.py
+	$(COMPOSE) config --format json | python3 -I scripts/check-compose-ports.py --dev
+	docker compose -f docker-compose.yml config --format json | python3 -I scripts/check-compose-ports.py
 	@# Prod needs TAILSCALE_BIND_IP/CF_API_TOKEN; use .env values if set, else CI-style dummies.
 	@tip=$$(grep -E '^TAILSCALE_BIND_IP=.+' .env | cut -d= -f2- || true); \
 	 cft=$$(grep -qE '^CF_API_TOKEN=.+' .env && echo set || true); \
 	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
-	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+	 $(COMPOSE_PROD) config --format json | python3 -I scripts/check-compose-ports.py --prod
 
-.PHONY: api-types api-types-check api-types-test
+ci-minutes: ## Billed Actions minutes this UTC month (used/2000)
+	python3 scripts/ci_minutes.py
+
+ci-local: ## Local merge gate for a PR head (make ci-local PR=<n>)
+	@test -n "$(PR)" || { echo "usage: make ci-local PR=<n>" >&2; exit 2; }
+	python3 scripts/ci_local.py "$(PR)"
+
 # Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).
 # This target also diffs the full openapi-typescript output. No workflow edit: Harbor owns CI.
 api-types api-types-check: ## Generate web API types, or fail if schema.d.ts drifted

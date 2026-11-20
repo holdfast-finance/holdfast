@@ -4,36 +4,393 @@ on:
   push:
     branches: [main, "phase/**"]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # hashFiles() isn't allowed in job-level `if`, so detect which parts of the repo exist first.
-  detect:
+  # One billed job for the old detect, secrets, scripts-test, and compose jobs (ADR 0013).
+  # A deleted manifest fails this job. ci-required must not treat that as a skip.
+  checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
-      backend: ${{ steps.d.outputs.backend }}
-      web: ${{ steps.d.outputs.web }}
+      backend: ${{ steps.plan.outputs.backend }}
+      web: ${{ steps.plan.outputs.web }}
+      backend_reason: ${{ steps.plan.outputs.backend_reason }}
+      web_reason: ${{ steps.plan.outputs.web_reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - id: d
-        # A PR that deletes these must fail, not skip the backend/web jobs (skips count as passing).
+        with:
+          fetch-depth: 0
+      - name: Manifests exist
         run: |
           for f in backend/pyproject.toml web/package.json; do
             [ -f "$f" ] || { echo "::error::$f is missing; backend and web jobs cannot be skipped"; exit 1; }
           done
-          echo "backend=true" >> "$GITHUB_OUTPUT"
-          echo "web=true" >> "$GITHUB_OUTPUT"
+      - id: plan
+        name: Plan backend and web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        # Trusted planner: this heredoc, not a script from the checkout.
+        run: |
+          python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
+          #!/usr/bin/env python3
+          """Decide whether the backend and web CI jobs run (ADR 0013).
+
+          Pull requests and non-main pushes are path-gated. A push to main skips
+          both jobs only when the single new commit is a merged PR whose head
+          already contained ``before``. Anything uncertain runs both jobs.
+          Prints ``GITHUB_OUTPUT`` keys on stdout.
+          """
+
+          from __future__ import annotations
+
+          import json
+          import os
+          import subprocess
+          import sys
+          from collections.abc import Callable
+          from dataclasses import dataclass
+          from pathlib import Path
+
+          BACKEND_EXACT = {
+              ".github/workflows/ci.yml",
+              ".github/audit-allowlist.yml",
+              "scripts/audit_gate.py",
+              "scripts/ci_plan.py",
+              "scripts/ci_required_eval.py",
+          }
+          WEB_EXACT = {
+              ".github/workflows/ci.yml",
+              ".github/audit-allowlist.yml",
+              "scripts/audit_gate.py",
+              "scripts/ci_plan.py",
+              "scripts/ci_required_eval.py",
+          }
+          BACKEND_PREFIXES = ("backend/", "infra/postgres/")
+          WEB_PREFIXES = ("web/",)
+
+
+          @dataclass(frozen=True)
+          class Plan:
+              backend: bool
+              web: bool
+              backend_reason: str
+              web_reason: str
+
+
+          def affected(paths: list[str], kind: str) -> bool:
+              exact = BACKEND_EXACT if kind == "backend" else WEB_EXACT
+              prefixes = BACKEND_PREFIXES if kind == "backend" else WEB_PREFIXES
+              # A path that still starts with a quote was C-quoted by git: never trust it, run the job.
+              return any(
+                  path.startswith('"') or path in exact or path.startswith(prefixes) for path in paths
+              )
+
+
+          def plan(*, event: str, ref: str, paths: list[str] | None, uptodate: bool | None) -> Plan:
+              """``uptodate`` True means the PR head's history contains ``before``."""
+              if event == "push" and ref == "refs/heads/main":
+                  if uptodate is True:
+                      return Plan(False, False, "main-uptodate", "main-uptodate")
+                  reason = "run" if uptodate is False else "unknown"
+                  return Plan(True, True, reason, reason)
+              if paths is None:
+                  return Plan(True, True, "unknown", "unknown")
+              backend = affected(paths, "backend")
+              web = affected(paths, "web")
+              return Plan(
+                  backend,
+                  web,
+                  "run" if backend else "paths",
+                  "run" if web else "paths",
+              )
+
+
+          def emit(decision: Plan) -> str:
+              def flag(value: bool) -> str:
+                  return "true" if value else "false"
+
+              lines = [
+                  f"backend={flag(decision.backend)}",
+                  f"web={flag(decision.web)}",
+                  f"backend_reason={decision.backend_reason}",
+                  f"web_reason={decision.web_reason}",
+              ]
+              return "\n".join(lines) + "\n"
+
+
+          def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+              return subprocess.run(
+                  ["git", *args],
+                  cwd=repo,
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  errors="surrogateescape",
+              )
+
+
+          def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool | None:
+              if not ancestor or not descendant or set(ancestor) <= {"0"} or set(descendant) <= {"0"}:
+                  return None
+              proc = _git(repo, "merge-base", "--is-ancestor", ancestor, descendant)
+              if proc.returncode == 0:
+                  return True
+              if proc.returncode == 1:
+                  return False
+              return None
+
+
+          def name_status_paths(repo: Path, range_expr: str) -> list[str] | None:
+              """Changed paths (both sides of renames and copies); None when git or parsing fails.
+
+              ``-z`` with ``core.quotePath=false`` gives raw NUL-separated names, so non-ASCII
+              and quote characters cannot hide a path from ``affected``. ``None`` means unknown,
+              which plans both jobs.
+              """
+              proc = _git(
+                  repo,
+                  "-c",
+                  "core.quotePath=false",
+                  "diff",
+                  "-z",
+                  "--name-status",
+                  "--find-renames",
+                  "--find-copies",
+                  range_expr,
+              )
+              if proc.returncode != 0:
+                  return None
+              tokens = proc.stdout.split("\0")
+              if tokens and tokens[-1] == "":
+                  tokens.pop()
+              paths: list[str] = []
+              i = 0
+              while i < len(tokens):
+                  status = tokens[i]
+                  n = 2 if status[:1] in ("R", "C") else 1
+                  if not status or status[0] not in "ACDMRTUX":
+                      return None
+                  group = tokens[i + 1 : i + 1 + n]
+                  if len(group) != n or not all(group):
+                      return None
+                  paths.extend(group)
+                  i += 1 + n
+              return paths
+
+
+          def compute_paths(
+              repo: Path,
+              *,
+              event: str,
+              before: str,
+              after: str,
+              pr_base: str,
+              pr_head: str,
+          ) -> list[str] | None:
+              """Changed paths, or None when the diff is missing or the branch is behind."""
+              if event == "workflow_dispatch" or event not in {"pull_request", "push"}:
+                  return None
+              if event == "pull_request":
+                  if is_ancestor(repo, pr_base, pr_head) is not True:
+                      return None
+                  return name_status_paths(repo, f"{pr_base}...{pr_head}")
+              if is_ancestor(repo, before, after) is not True:
+                  return None
+              return name_status_paths(repo, f"{before}..{after}")
+
+
+          def probe_uptodate(
+              repo: Path,
+              before: str,
+              after: str,
+              *,
+              load_pulls: Callable[[str], list[dict[str, object]]],
+              fetch_pr: Callable[[object, str], bool],
+          ) -> bool | None:
+              """True/False when proven; None when the push is not a single known PR merge."""
+              if is_ancestor(repo, before, after) is not True:
+                  return None
+              counted = _git(repo, "rev-list", "--count", f"{before}..{after}")
+              if counted.returncode != 0 or counted.stdout.strip() != "1":
+                  return None
+              try:
+                  pulls = load_pulls(after)
+              except (OSError, subprocess.SubprocessError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                  return None
+              merged = [
+                  pull for pull in pulls
+                  if pull.get("merge_commit_sha") == after and pull.get("merged_at")
+              ]
+              if len(merged) != 1:
+                  return None
+              head = merged[0].get("head_sha")
+              number = merged[0].get("number")
+              if not isinstance(head, str) or not head or number is None:
+                  return None
+              if not fetch_pr(number, head):
+                  return None
+              return is_ancestor(repo, before, head)
+
+
+          def default_load_pulls(repo_name: str, sha: str) -> list[dict[str, object]]:
+              proc = subprocess.run(
+                  [
+                      "gh", "api", "--paginate", f"repos/{repo_name}/commits/{sha}/pulls",
+                      "--header", "Accept: application/vnd.github+json",
+                      "--jq", ".[] | {merge_commit_sha, merged_at, number, head_sha: .head.sha}",
+                  ],
+                  check=False,
+                  capture_output=True,
+                  text=True,
+                  env=os.environ,
+              )
+              if proc.returncode != 0:
+                  raise OSError(proc.returncode)
+              rows: list[dict[str, object]] = []
+              for line in proc.stdout.splitlines():
+                  line = line.strip()
+                  if line and line != "null":
+                      parsed = json.loads(line)
+                      if isinstance(parsed, dict):
+                          rows.append(parsed)
+              return rows
+
+
+          def default_fetch_pr(repo: Path, number: object, head: str) -> bool:
+              proc = subprocess.run(
+                  ["git", "fetch", "--no-tags", "origin", f"pull/{number}/head"],
+                  cwd=repo,
+                  check=False,
+                  capture_output=True,
+                  text=True,
+              )
+              if proc.returncode != 0:
+                  return False
+              fetched = subprocess.run(
+                  ["git", "rev-parse", "FETCH_HEAD"],
+                  cwd=repo,
+                  check=False,
+                  capture_output=True,
+                  text=True,
+              )
+              return fetched.returncode == 0 and fetched.stdout.strip() == head
+
+
+          def decide(
+              repo: Path,
+              *,
+              event: str,
+              ref: str,
+              before: str,
+              after: str,
+              pr_base: str,
+              pr_head: str,
+              repo_name: str,
+              load_pulls: Callable[[str], list[dict[str, object]]] | None = None,
+              fetch_pr: Callable[[object, str], bool] | None = None,
+          ) -> Plan:
+              uptodate: bool | None = None
+              if event == "push" and ref == "refs/heads/main":
+                  pulls = load_pulls or (lambda sha: default_load_pulls(repo_name, sha))
+                  fetch = fetch_pr or (lambda number, head: default_fetch_pr(repo, number, head))
+                  uptodate = probe_uptodate(repo, before, after, load_pulls=pulls, fetch_pr=fetch)
+              paths = None
+              if not (event == "push" and ref == "refs/heads/main"):
+                  paths = compute_paths(
+                      repo, event=event, before=before, after=after, pr_base=pr_base, pr_head=pr_head,
+                  )
+              return plan(event=event, ref=ref, paths=paths, uptodate=uptodate)
+
+
+          def main() -> int:
+              decision = decide(
+                  Path("."),
+                  event=os.environ.get("EVENT_NAME", ""),
+                  ref=os.environ.get("REF_NAME", ""),
+                  before=os.environ.get("BEFORE", ""),
+                  after=os.environ.get("AFTER", ""),
+                  pr_base=os.environ.get("PR_BASE", ""),
+                  pr_head=os.environ.get("PR_HEAD", ""),
+                  repo_name=os.environ.get("REPO", ""),
+              )
+              text = emit(decision)
+              sys.stderr.write(text)
+              sys.stdout.write(text)
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+      # CLI image instead of gitleaks-action, which needs a paid license on organization repos.
+      # PRs scan only their own commit range; pushes scan full history.
+      - name: gitleaks
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          opts=()
+          if [ "$EVENT" = "pull_request" ]; then
+            opts=(--log-opts="$BASE_SHA..$HEAD_SHA")
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --no-banner --redact -v "${opts[@]}" /repo
+      - name: Gate script self-tests
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Throwaway .env
+        run: python3 -I scripts/gen-keys.py --write
+      - name: docker compose config
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
+            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config -q
+      - name: No ports beyond the rules (CLAUDE.md rule 12), prod renders APP_ENV=prod
+        run: |
+          docker compose config --format json | python3 -I scripts/check-compose-ports.py
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config --format json \
+            | python3 -I scripts/check-compose-ports.py --dev
+          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
+            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config --format json \
+            | python3 -I scripts/check-compose-ports.py --prod
+      - name: Validate Caddyfiles
+        run: |
+          # caddy:2-alpine
+          docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \
+            caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          # Prod image bundles Caddyfile.prod; the DNS provider only checks the token's format.
+          docker build -t holdfast-caddy:ci -f infra/caddy/Dockerfile.prod infra/caddy
+          docker run --rm -e APP_HOST=holdfast.example.com -e WEB_UPSTREAM=web:80 \
+            -e CF_API_TOKEN="$(python3 -c 'print("x" * 40)')" \
+            holdfast-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: docker compose build
+        run: docker compose build
+      - name: Remove throwaway .env
+        if: always()
+        run: rm -f .env
 
   backend:
-    needs: detect
-    if: needs.detect.outputs.backend == 'true'
+    needs: checks
+    if: needs.checks.result == 'success' && needs.checks.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -114,7 +471,7 @@ jobs:
         run: |
           uv export --frozen --no-hashes --no-emit-project --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
           uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/requirements.txt" --progress-spinner off -f json -o "$RUNNER_TEMP/pip-audit.json" || true
-          python3 ../scripts/audit_gate.py pip "$RUNNER_TEMP/pip-audit.json" ../.github/audit-allowlist.yml
+          python3 -I ../scripts/audit_gate.py pip "$RUNNER_TEMP/pip-audit.json" ../.github/audit-allowlist.yml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -123,8 +480,8 @@ jobs:
           if-no-files-found: ignore
 
   web:
-    needs: detect
-    if: needs.detect.outputs.web == 'true'
+    needs: checks
+    if: needs.checks.result == 'success' && needs.checks.outputs.web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -149,81 +506,14 @@ jobs:
       - name: pnpm audit (blocking at high, expiring allowlist)
         run: |
           pnpm audit --audit-level high --json > "$RUNNER_TEMP/pnpm-audit.json" || true
-          python3 ../scripts/audit_gate.py pnpm "$RUNNER_TEMP/pnpm-audit.json" ../.github/audit-allowlist.yml
+          python3 -I ../scripts/audit_gate.py pnpm "$RUNNER_TEMP/pnpm-audit.json" ../.github/audit-allowlist.yml
 
-  secrets:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      # CLI image instead of gitleaks-action, which needs a paid license on organization repos.
-      # PRs scan only their own commit range; pushes scan full history.
-      - name: gitleaks
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          opts=()
-          if [ "$EVENT" = "pull_request" ]; then
-            opts=(--log-opts="$BASE_SHA..$HEAD_SHA")
-          fi
-          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            git --no-banner --redact -v "${opts[@]}" /repo
-
-  scripts-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Gate script self-tests
-        run: python3 -m unittest discover -s scripts/tests -v
-
-  compose:
-    needs: detect
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Throwaway .env
-        run: python3 scripts/gen-keys.py --write
-      - name: docker compose config
-        run: |
-          docker compose config -q
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
-          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
-            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config -q
-      - name: No ports beyond the rules (CLAUDE.md rule 12), prod renders APP_ENV=prod
-        run: |
-          docker compose config --format json | python3 scripts/check-compose-ports.py
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml config --format json \
-            | python3 scripts/check-compose-ports.py --dev
-          TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
-            docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config --format json \
-            | python3 scripts/check-compose-ports.py --prod
-      - name: Validate Caddyfiles
-        run: |
-          docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \
-            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          # Prod image bundles Caddyfile.prod; the DNS provider only checks the token's format.
-          docker build -t holdfast-caddy:ci -f infra/caddy/Dockerfile.prod infra/caddy
-          docker run --rm -e APP_HOST=holdfast.example.com -e WEB_UPSTREAM=web:80 \
-            -e CF_API_TOKEN="$(python3 -c 'print("x" * 40)')" \
-            holdfast-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - name: docker compose build
-        if: needs.detect.outputs.backend == 'true' && needs.detect.outputs.web == 'true'
-        run: docker compose build
-      - name: Remove throwaway .env
-        if: always()
-        run: rm -f .env
-
-  # The single stable required check. Jobs skipped by `detect` count as passing; failed or
-  # cancelled jobs do not. Add every new job to `needs`.
+  # Stable required check. backend/web may skip for paths or an up-to-date main push.
+  # A failed checks job, including a missing manifest, is not a pass.
+  # No checkout: the evaluator is this file, so a PR cannot shadow stdlib modules.
   ci-required:
     if: always()
-    needs: [detect, backend, web, secrets, scripts-test, compose]
+    needs: [checks, backend, web]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -231,11 +521,65 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          python3 - <<'PY'
-          import json, os, sys
-          bad = {k: v["result"] for k, v in json.loads(os.environ["RESULTS"]).items()
-                 if v["result"] not in ("success", "skipped")}
-          for k, v in bad.items():
-              print(f"::error::{k}: {v}")
-          sys.exit(1 if bad else 0)
+          python3 -I - <<'PY'
+          #!/usr/bin/env python3
+          """Aggregate CI into the stable ``ci-required`` check.
+
+          ``checks`` must succeed (a missing manifest fails that job). ``backend`` and
+          ``web`` may be skipped only when the plan says so (``paths`` or
+          ``main-uptodate``). Any other skip, failure, or cancellation fails the gate.
+          """
+
+          from __future__ import annotations
+
+          import json
+          import os
+          import sys
+          from typing import Any
+
+          SKIP_REASONS = {"paths", "main-uptodate"}
+          HEAVY = ("backend", "web")
+
+
+          def evaluate(needs: dict[str, Any]) -> list[str]:
+              checks = needs.get("checks") or {}
+              if checks.get("result") != "success":
+                  return [f"checks: {checks.get('result')}"]
+              outputs = checks.get("outputs") or {}
+              errors: list[str] = []
+              for job in HEAVY:
+                  result = (needs.get(job) or {}).get("result")
+                  decision = outputs.get(job)
+                  reason = outputs.get(f"{job}_reason") or ""
+                  if decision == "true":
+                      if result != "success":
+                          errors.append(f"{job}: {result} (required, plan {reason or 'unset'})")
+                  elif decision == "false":
+                      if reason not in SKIP_REASONS:
+                          errors.append(f"{job}: skipped without an accepted reason ({reason!r})")
+                      elif result not in ("success", "skipped"):
+                          errors.append(f"{job}: {result} (skip reason {reason})")
+                  else:
+                      errors.append(f"{job}: missing plan decision")
+              return errors
+
+
+          def main() -> int:
+              needs = json.loads(os.environ["RESULTS"])
+              errors = evaluate(needs)
+              for error in errors:
+                  print(f"::error::{error}")
+              if errors:
+                  return 1
+              checks = needs["checks"]["outputs"]
+              print(
+                  "ci-required: pass "
+                  f"(backend {checks.get('backend')} {checks.get('backend_reason')}; "
+                  f"web {checks.get('web')} {checks.get('web_reason')})"
+              )
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
           PY

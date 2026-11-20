@@ -41,10 +41,35 @@
    - e2e (F12) runs on merges to `main` that touch `web/`, `backend/` or `infra/`, and never on a cron.
    - Track it: `make ci-minutes` totals billed minutes for the month from the runs API
      (`gh api repos/{repo}/actions/runs/{id}/timing`). Keel logs it in each standup.
-4. **When the quota runs out**, the gate moves to Keel's machine as `make ci-local`. It runs the same
-   steps (`make lint`, `make test`, `make lint-imports`, Alembic head check, gitleaks on the PR range,
-   compose config, `check-protected-paths.sh` against the PR diff). Keel posts the output as a PR comment
-   naming the head SHA, and merges only on a clean result. SDLC §2 already allows this.
+4. **When the quota runs out**, the gate moves to Keel's machine as `make ci-local`. The trusted
+   script runs the same checks as CI (ruff, mypy, pytest, web lint/typecheck/test, lint-imports,
+   one Alembic head, gitleaks on the PR range, compose config, `check-protected-paths.sh` on the
+   PR diff). It does not run the pull request's Makefile, and it does not read or symlink the
+   operator `.env`; throwaway keys are written into the temp worktree only. Keel posts the output
+   as a PR comment naming the head SHA, and merges only on a clean result. SDLC §2 already allows this.
+   **Trust limit:** `ci-local` runs the PR's code (tests, linters, installs) with the operator's
+   privileges. Use it only for PRs from trusted in-org lane agents, never fork PRs, until it is
+   sandboxed. Follow-up story F7c: run it in a container with an allowlisted env and no network
+   (and a scrubbed env, since the steps need many tool variables).
+   `main-guard` binds each check to its trusted trigger: `review-gate` counts only from a
+   `pull_request_target` run and `ci-required` only from a `pull_request` run of `ci.yml`.
+   GitHub empties a run's `pull_requests` once the PR merges, so both runs are bound by
+   `head_branch` and `head_repository` matching the merged PR's head. An empty
+   `pull_requests` list is allowed. A non-empty list must contain only the merged PR, every
+   entry's base must be `main`, and each entry's head SHA must be the merged head. A
+   same-branch sibling whose current base is not `main` fails the push. So does a base
+   move on any PR from that head: `base_ref_changed`, `base_ref_deleted`, or
+   `automatic_base_change_succeeded` (a manual retarget, or GitHub retargeting the PR
+   after the old base is deleted).
+   A workflow-run listing that names a different head SHA is dropped, and a listing shorter
+   than `total_count` fails closed. A null head repository fails closed. `ci.yml` runs
+   `pull_request` only for base `main`.
+   **Accepted risk (L3):** `main-guard` runs from the workflow file in the pushed commit, so a push
+   to `main` that edits or deletes `.github/workflows/main-guard.yml` judges itself and can report
+   green. This is accepted until rulesets are available. Mitigations: `.github/` is a protected
+   path (review-gate plus a Bulwark sign-off for anything that arrives through a PR), and the weekly
+   digest lists every commit on `main` that touched `.github/workflows/main-guard.yml`
+   (`git log --since=1.week -- .github/workflows/main-guard.yml`).
 5. **Later options (owner decisions, no cost):**
    - **Making the repo public** removes both limits: rulesets become available and Actions minutes are
      unlimited for public repos. It's an AGPL project going open source anyway. The cost is publishing
