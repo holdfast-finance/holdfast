@@ -177,7 +177,7 @@ class MainGuardTests(unittest.TestCase):
                 ),
             ]
         }
-        chosen = main_guard.latest_run(runs[HEAD], "ci-required")
+        chosen = main_guard.latest_run(runs[HEAD], "ci-required", 4)
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen["conclusion"], "failure")
@@ -271,9 +271,11 @@ class MainGuardTests(unittest.TestCase):
             if "actions/runs?" in joined:
                 return 0, (
                     '{"id": 9, "path": ".github/workflows/ci.yml", "event": "pull_request", '
-                    '"created_at": "2026-11-19T00:00:00Z", "name": "CI", "conclusion": "failure"}\n'
+                    '"created_at": "2026-11-19T00:00:00Z", "name": "CI", "conclusion": "failure", '
+                    '"pull_requests": [{"number": 4, "base_ref": "main"}]}\n'
                     '{"id": 10, "path": ".github/workflows/fork.yml", "event": "pull_request", '
-                    '"created_at": "2026-11-19T03:00:00Z", "name": "Fork", "conclusion": "success"}\n'
+                    '"created_at": "2026-11-19T03:00:00Z", "name": "Fork", "conclusion": "success", '
+                    '"pull_requests": [{"number": 4, "base_ref": "main"}]}\n'
                 ), ""
             if "/runs/9/jobs" in joined:
                 return 0, (
@@ -292,7 +294,7 @@ class MainGuardTests(unittest.TestCase):
         self.assertIn("path", jq)
         self.assertIn("name", jq)
         self.assertNotIn("rulesets", jq)
-        chosen = main_guard.latest_run(rows, "ci-required")
+        chosen = main_guard.latest_run(rows, "ci-required", 4)
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen["conclusion"], "failure")
