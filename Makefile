@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys seed keys check health ports env-check sync test-locked
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -94,6 +94,9 @@ fmt: ## Format backend (ruff) and web (format script, if any)
 # One-off container with the owner role's URL; api/worker never get those credentials.
 migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` container)
 	$(COMPOSE) run --rm migrate
+
+rotate-keys: env-check ## Re-encrypt stored secrets under the primary FERNET_KEY (ADR 0015); run twice
+	$(COMPOSE) run --rm rotate-keys
 
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py

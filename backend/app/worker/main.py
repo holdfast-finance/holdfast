@@ -10,6 +10,7 @@ from arq.connections import RedisSettings
 from app import __version__
 from app.config import get_settings
 from app.logging import configure_logging, get_logger
+from app.security import crypto
 
 log = get_logger(__name__)
 
@@ -21,6 +22,8 @@ async def heartbeat(ctx: dict[str, Any]) -> None:
 
 async def startup(ctx: dict[str, Any]) -> None:
     configure_logging()
+    if (key := get_settings().fernet_key) is not None:
+        crypto.load_ring(key)  # malformed or duplicate keys fail startup
     log.info("worker.startup", version=__version__)
 
 
