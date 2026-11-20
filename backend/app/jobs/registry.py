@@ -4,20 +4,23 @@ Declare a job next to the code it drives, in a module under ``app/jobs/handlers/
 automatically, like routers; no hot file to edit)::
 
     class SyncItem(JobPayload):
-        bank_connection_id: uuid.UUID
+        bank_connection_id: Annotated[uuid.UUID, Ref(BankConnection)]
 
     @job("plaid.sync_item", payload=SyncItem, retry=RetryPolicy(max_attempts=5))
     async def sync_item(ctx: JobContext, payload: SyncItem) -> None:
         ...  # ctx.session is household-wide and commits together with the success mark
 
-    # elsewhere (a service):
+    # elsewhere (a service), with the *authenticated* household and person:
     await jobs.enqueue(factory, pool, sync_item, SyncItem(household_id=h, bank_connection_id=c),
-                       idempotency_key=f"sync:{c}:{hour}")
+                       household_id=h, requested_by=person_id, idempotency_key=f"sync:{c}:{hour}")
 
 Payloads are **IDs only**: every field is a ``uuid.UUID`` and ``household_id`` is always present.
-A payload class with any other field type fails at import. Data the job needs (tokens, amounts,
-dates) is loaded from the database by ID inside the job, so nothing sensitive sits in Redis, in
-arq's logs or in ``job_run``. Validation is strict and runs twice: before enqueue and before run.
+Every other field names the household-scoped table its id points into (``Ref``), so enqueue can
+check the requester can see that row (ADR 0016, confused deputy). A payload class with any other
+field type, or an id field without exactly one ``Ref``, fails at import. Data the job needs
+(tokens, amounts, dates) is loaded from the database by ID inside the job, so nothing sensitive
+sits in Redis, in arq's logs or in ``job_run``. Validation is strict: before enqueue, and before
+run on the payload stored in ``job_run`` (never the copy in Redis).
 """
 
 from __future__ import annotations
@@ -30,7 +33,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, ClassVar
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pydantic_core
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -42,6 +46,9 @@ from app.models._common import (
     JOB_NAME_MAX,
     JOB_NAME_PATTERN,
 )
+
+if TYPE_CHECKING:
+    from app.db import Base
 
 HANDLERS_PACKAGE = "app.jobs.handlers"
 
@@ -57,10 +64,36 @@ class InvalidIdempotencyKey(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class Ref:
+    """Payload field metadata: this id is a row of ``model``'s household-scoped table.
+
+    Use as ``Annotated[uuid.UUID, Ref(Account)]``. Before anything is recorded, enqueue looks the
+    id up in the requester's own person-scoped session, so RLS decides whether they may name it.
+    """
+
+    model: type[Base]
+
+    def __post_init__(self) -> None:
+        table = getattr(self.model, "__table__", None)
+        columns = getattr(table, "c", ())
+        if "id" not in columns or "household_id" not in columns:
+            raise TypeError(
+                f"Ref({getattr(self.model, '__name__', self.model)!r}): needs an ORM model with "
+                "id and household_id columns (a household-scoped table under RLS)"
+            )
+
+
 class JobPayload(BaseModel):
-    """Base for job payloads: frozen, strict, no extra keys, UUID fields only."""
+    """Base for job payloads: frozen, strict, no extra keys, UUID fields only.
+
+    ``household_id`` is always present. Every other field carries exactly one :class:`Ref`;
+    ``refs`` maps those field names to it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    refs: ClassVar[Mapping[str, Ref]] = MappingProxyType({})
 
     household_id: uuid.UUID
 
@@ -75,6 +108,23 @@ class JobPayload(BaseModel):
                 f"{cls.__name__}: job payloads are IDs only (uuid.UUID fields); "
                 f"not allowed: {', '.join(sorted(bad))}"
             )
+        refs: dict[str, Ref] = {}
+        unreferenced: list[str] = []
+        for name, field in cls.model_fields.items():
+            marks = [m for m in field.metadata if isinstance(m, Ref)]
+            if name == "household_id":
+                if marks:
+                    raise TypeError(f"{cls.__name__}: household_id takes no Ref")
+            elif len(marks) == 1:
+                refs[name] = marks[0]
+            else:
+                unreferenced.append(name)
+        if unreferenced:
+            raise TypeError(
+                f"{cls.__name__}: each id field needs exactly one Ref, as "
+                f"Annotated[uuid.UUID, Ref(Model)]: {', '.join(sorted(unreferenced))}"
+            )
+        cls.refs = MappingProxyType(refs)
 
 
 @dataclass(frozen=True)
@@ -134,7 +184,11 @@ class JobContext:
     before that commit rolls both back and the retry starts clean. Commit earlier (the context
     survives commits) only for progress that must persist across retries, and keep such steps
     idempotent. ``factory`` opens independent sessions (for example an audit row that must
-    survive a rollback).
+    survive a rollback). Open at most one of those at a time: a run's budget is three pooled
+    connections (lock, ``session``, one side session; ``app.worker.main.MAX_JOBS``).
+
+    The handler runs under ``asyncio.timeout(spec.timeout)``. On expiry it is cancelled, its
+    uncommitted writes roll back and the run is retried or failed like any other error.
     """
 
     run_id: uuid.UUID

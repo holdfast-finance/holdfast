@@ -22,9 +22,11 @@ from app.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
 
-# Each running job holds two pooled connections at most (the household lock and its session);
-# 5 jobs x 2 stays inside SQLAlchemy's default pool (5 + 10 overflow).
+# Each running job holds three pooled connections at most: the household lock, the handler's
+# session and one side session from JobContext.factory (handlers open one at a time). 5 jobs x 3
+# = 15 = SQLAlchemy's default pool (5 + 10 overflow), so a full worker never waits on the pool.
 MAX_JOBS = 5
+CONNECTIONS_PER_JOB = 3
 
 
 async def heartbeat(ctx: dict[str, Any]) -> None:
@@ -52,7 +54,9 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url.get_secret_value())
-    job_serializer = staticmethod(queue.dumps)
-    job_deserializer = staticmethod(queue.loads)
+    # Plain functions, not staticmethod(): arq builds the Worker from this class's __dict__, so a
+    # wrapper would reach it as-is. tests/test_worker.py pins what arq actually receives.
+    job_serializer = queue.dumps
+    job_deserializer = queue.loads
     max_jobs = MAX_JOBS
     health_check_interval = 60
