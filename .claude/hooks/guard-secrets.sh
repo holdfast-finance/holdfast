@@ -14,6 +14,11 @@ case "$rel" in
   data/*|*/data/documents/*|secrets/*|*/secrets/*) block "writing under $rel (private data dir)";;
 esac
 
+# Seed phrases (12+ consecutive BIP39 words) in any string of the tool input. Shared with the Codex/Grok guard.
+guard_py="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/scripts/agent_guard.py"
+[ -f "$guard_py" ] || block "scripts/agent_guard.py is missing, so the seed-phrase scan cannot run"
+python3 -I "$guard_py" --seed-only <<<"$input" >/dev/null 2>&1 || block "possible seed phrase (12+ BIP39 words); never store seed phrases or private keys"
+
 # Real-looking secrets. Test fixtures must use obviously fake values.
 grep -Eq 'access-(sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-' <<<"$content" && block "Plaid access token"
 grep -Eq 'sk-ant-[A-Za-z0-9_-]{20,}' <<<"$content" && block "Anthropic API key"

@@ -1,27 +1,10 @@
 #!/usr/bin/env bash
-# PreToolUse adapter. Normalizes Grok and Cursor edit payloads, then calls the
-# shared Claude guard. Does not edit .claude/. Exit 2 blocks the write.
-set -euo pipefail
-input="$(cat)"
-truncated="$(jq -r 'if .toolInputTruncated == true then "yes" else "no" end' <<<"$input")"
-if [ "$truncated" = "yes" ]; then
-  echo "guard-secrets: BLOCKED — tool input was truncated, so the secret scan is incomplete" >&2
-  exit 2
-fi
-root="${CLAUDE_PROJECT_DIR:-${GROK_WORKSPACE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
-normalized="$(jq -c '
-  .tool_input = (.tool_input // {})
-  | .tool_input.file_path = (
-      .tool_input.file_path
-      // .tool_input.path
-      // .tool_input.notebook_path
-      // .tool_input.target_notebook
-      // ""
-    )
-  | .tool_input.content = (
-      if .tool_input.content != null then .tool_input.content
-      else .tool_input.contents
-      end
-    )
-' <<<"$input")"
-printf '%s' "$normalized" | bash "$root/.claude/hooks/guard-secrets.sh"
+# PreToolUse adapter for Grok. All logic lives in scripts/agent_guard.py (shared with Codex).
+# Fails closed: if the guard cannot run, the edit is blocked. Never prints the payload.
+set -u
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)" || exit 2
+[ -f "$root/scripts/agent_guard.py" ] || { echo "guard-secrets: BLOCKED - shared guard missing" >&2; exit 2; }
+python3 -I "$root/scripts/agent_guard.py"
+rc=$?
+[ "$rc" -eq 0 ] && exit 0
+exit 2
