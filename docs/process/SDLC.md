@@ -12,13 +12,14 @@ Backlog (ROADMAP.md) ─► Sprint plan (Keel, per usage window)
    ─► PR (gh pr create, template checklist)
    ─► CI: ci-required (aggregate)  +  review-gate (agent sign-offs bound to head SHA)
    ─► Keel merges (squash) ─► main
-   ─► Release (phase end or on demand): tag, CHANGELOG, images, Beacon notes
+   ─► Release (Keel, on main): annotated v-tag + GitHub Release. Phase tags are milestones only.
    ─► Deploy (pull-based on the owner's host, once it exists)
 ```
 
 - **Agents from other vendors** (Anvil = Codex, Helm = Grok) work under ADR 0012 and `AGENTS.md`, pulling from `docs/planning/HANDOFF.md`. Same gate; only Keel merges.
 - **Unit of work:** one story = one branch `feat|fix|chore/<story-id>-<slug>` = one PR. S or M only; L must be split before it's scheduled.
-- **Phases are milestones**, not long-lived branches. `phase-<n>` is a tag on the green `main` commit after Sounding's acceptance run.
+- **Phases are milestones**, not long-lived branches. `phase-<n>` is an annotated tag on the green `main` commit after Sounding's acceptance run. It is not a product release and it does not get a GitHub Release.
+- **Public version releases** are an annotated `v` + SemVer tag and a GitHub Release on that same commit. Keel cuts them from `docs/process/RELEASES.md`. `make release-check` does not publish.
 - **Only Keel merges.** Builders never merge their own PR.
 - **Worktrees:** create them with `scripts/wt-new.sh` so the base is fresh; see `docs/process/WORKTREES.md`.
 
