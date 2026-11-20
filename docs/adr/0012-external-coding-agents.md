@@ -1,4 +1,4 @@
-# 0012. Coding agents from other vendors (Codex as Anvil, Grok as Flint)
+# 0012. Coding agents from other vendors (Codex as Anvil, Grok as Helm)
 
 - Status: Accepted (agents start once the owner setup is done)
 - Date: 2026-11-19
@@ -13,7 +13,7 @@ tools, not runtime services, but each one sends repo contents to its vendor, so 
 recorded here. `AGENTS.md` already said a new agent's lane has to be defined before it starts.
 
 ## Decision
-1. Codex works as **Anvil** and Grok works as **Flint**. They get lanes, briefs and a trailer like
+1. Codex works as **Anvil** and Grok works as **Helm**. They get lanes, briefs and a trailer like
    any other team member. They are never credited by vendor or model name.
 2. **Their own identity, no write access.** They run as a separate OS user (`holdfast-agents`) in
    its own clone, signed in to GitHub as a machine user with the **Read** role. They push only to the
@@ -36,7 +36,7 @@ recorded here. `AGENTS.md` already said a new agent's lane has to be defined bef
 
 ## Consequences
 - More throughput when Claude windows are exhausted, at the cost of review load on Keel's next window.
-- The Claude hooks (`guard-secrets.sh`, `format.sh`) don't run for Anvil or Flint. The pre-commit
+- The Claude hooks (`guard-secrets.sh`, `format.sh`) don't run for Anvil or Helm. The pre-commit
   gitleaks hook, CI and `review-gate` still do.
 - Agents can't run DB-backed tests locally (no docker group). CI is the source of truth for their PRs.
 - The owner pays for and configures each CLI. Usage isn't counted in the sprint token log.

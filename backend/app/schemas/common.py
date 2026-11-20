@@ -1,11 +1,25 @@
-"""Field types shared by request schemas. Validation errors become ``validation_error`` 422."""
+"""Field types shared by request schemas. Validation errors become ``validation_error`` 422.
+
+Prefer ``MoneyStr``, ``PriceStr``, or ``QuantityStr`` for fields backed by the matching
+storage column. ``DecimalStr`` retains the generic fixed-point bounds.
+"""
 
 from __future__ import annotations
 
 import json
+import re
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    WithJsonSchema,
+)
 
 NAME_MAX = 200
 # A WebAuthn response is a few KB (attestation certificate chains included); 64 KiB is ample.
@@ -54,6 +68,54 @@ Token = Annotated[str, Field(min_length=1, max_length=512)]
 Code = Annotated[str, Field(min_length=1, max_length=64)]
 # A WebAuthn credential JSON (registration or assertion), size-bounded before py_webauthn sees it.
 WebAuthnCredential = Annotated[dict[str, Any], AfterValidator(_credential)]
+
+
+class _DecimalString:
+    """Marks an API decimal whose JSON schema is a string, not a number."""
+
+
+DECIMAL_STRING = _DecimalString()
+
+
+def _decimal_string(
+    integer_digits: int, scale: int
+) -> tuple[BeforeValidator, PlainSerializer, WithJsonSchema, _DecimalString]:
+    pattern = re.compile(
+        rf"^-?(?:0|[1-9][0-9]{{0,{integer_digits - 1}}})(?:\.[0-9]{{1,{scale}}})?$"
+    )
+
+    def check_bounds(value: Decimal) -> Decimal:
+        sign, digits, exponent = value.as_tuple()
+        if not isinstance(exponent, int):
+            raise ValueError("Amount must be finite.")
+        # A zero coefficient has only one integer digit even with a positive exponent.
+        if exponent < -scale or (digits != (0,) and len(digits) + exponent > integer_digits):
+            raise ValueError("Amount exceeds the decimal string bounds.")
+        return Decimal("0") if sign and digits == (0,) else value
+
+    def _parse_decimal_str(value: object) -> Decimal:
+        if isinstance(value, str) and pattern.fullmatch(value):
+            value = Decimal(value)
+        if not isinstance(value, Decimal):
+            raise ValueError("Amount must be a fixed-point decimal string within bounds.")
+        return check_bounds(value)
+
+    def _dump_decimal_str(value: Decimal) -> str:
+        return format(check_bounds(value), "f")
+
+    return (
+        BeforeValidator(_parse_decimal_str),
+        PlainSerializer(_dump_decimal_str, return_type=str, when_used="json"),
+        WithJsonSchema({"type": "string", "pattern": pattern.pattern}),
+        DECIMAL_STRING,
+    )
+
+
+DecimalStr = Annotated[Decimal, *_decimal_string(14, 8)]
+# Match the NUMERIC columns in app.models._common.
+MoneyStr = Annotated[Decimal, *_decimal_string(12, 2)]
+PriceStr = Annotated[Decimal, *_decimal_string(10, 8)]
+QuantityStr = Annotated[Decimal, *_decimal_string(18, 10)]
 
 
 class Model(BaseModel):

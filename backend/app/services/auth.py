@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db_context import scoped_session, unscoped_session
+from app.logging import get_logger
 from app.models import AppUser, Person, TotpRecoveryCode, WebauthnCredential
 from app.schemas.auth import (
     CredentialOut,
@@ -50,6 +51,10 @@ from app.services.passkeys import (
 from app.services.sessions import Principal
 from app.services.setup import clear_setup_token
 from app.services.users import get_user, has_any_credential, has_passkey, session_out, user_out
+
+log = get_logger(__name__)
+# Stands in for a missing account so a failed recovery-code login runs the same queries.
+_NO_USER = uuid.UUID(int=0)
 
 TOTP_REPLAY_TTL_SECONDS = 120
 # POST /auth/passkey/login/options is public and writes a challenge to Redis on every call.
@@ -96,18 +101,86 @@ class AuthService:
             **kw,
         )
 
-    async def _totp_matches(self, user: AppUser, code: str) -> bool:
-        """Check ``code`` against the user's secret; each time step is accepted only once."""
+    @staticmethod
+    def _totp_step(user: AppUser, code: str) -> int | None:
+        """The time step ``code`` matches for this user, or None. Pure: nothing is recorded."""
         if user.totp_secret_enc is None:
-            return False
+            return None
         secret = crypto.decrypt(user.totp_secret_enc.decode("ascii"))
-        step = totp.matching_step(secret, code)
-        if step is None:
-            return False
+        return totp.matching_step(secret, code)
+
+    async def _claim_totp_step(self, user: AppUser, step: int) -> bool:
+        """Each time step is accepted only once."""
         fresh = await self.ctx.redis.set(
             f"hf:totp:used:{user.id}:{step}", "1", nx=True, ex=TOTP_REPLAY_TTL_SECONDS
         )
         return bool(fresh)
+
+    async def _totp_matches(self, user: AppUser, code: str) -> bool:
+        """Check ``code`` against the user's secret; each time step is accepted only once."""
+        step = self._totp_step(user, code)
+        return step is not None and await self._claim_totp_step(user, step)
+
+    async def _finish_password_login(
+        self,
+        user: AppUser | None,
+        verified_hash: str | None,
+        recovery_code: str | None,
+        *,
+        first_ok: bool = True,
+    ) -> tuple[str | None, AppUser | None]:
+        """Re-read the user under lock and mint the session if nothing changed since verifying.
+
+        The account may have been disabled, given a new password, or had its codes turned off or
+        re-enrolled while argon2 ran. Any of those fails the attempt instead of trusting the
+        earlier read. With ``first_ok`` False the same queries run but nothing is consumed.
+        """
+        snapshot = user.totp_secret_enc if user is not None else None
+        async with unscoped_session(self.ctx.factory) as s:
+            current = (
+                await s.execute(
+                    select(AppUser)
+                    .where(
+                        AppUser.id == (user.id if user is not None else _NO_USER),
+                        AppUser.disabled_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            fresh = (
+                first_ok
+                and current is not None
+                and current.password_hash == verified_hash
+                and current.totp_enabled
+                and current.totp_secret_enc == snapshot
+            )
+            if recovery_code is not None:
+                if fresh and current is not None:
+                    fresh = await self._consume_recovery_code(s, current, recovery_code)
+                else:
+                    await self._recovery_code_exists(
+                        s, user.id if user is not None else _NO_USER, recovery_code
+                    )
+            if not fresh or current is None:
+                return None, user
+            current.last_login_at = sessions.utcnow()
+            token = await sessions.create(
+                s, current.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
+            )
+        return token, current
+
+    async def _rehash_password(self, user_id: uuid.UUID, old_hash: str, password: str) -> None:
+        """Upgrade an outdated hash after a successful login. Best effort: login already won."""
+        try:
+            rehashed = await passwords.hash_password_async(password)
+            async with unscoped_session(self.ctx.factory) as s:
+                await s.execute(
+                    update(AppUser)
+                    .where(AppUser.id == user_id, AppUser.password_hash == old_hash)
+                    .values(password_hash=rehashed)
+                )
+        except Exception as exc:  # the session is minted; a failed upgrade retries next login
+            log.warning("auth.password.rehash_failed", error_type=type(exc).__name__)
 
     async def _consume_recovery_code(self, s: AsyncSession, user: AppUser, code: str) -> bool:
         result = await s.execute(
@@ -120,6 +193,20 @@ class AuthService:
             .values(used_at=func.now())
         )
         return bool(getattr(result, "rowcount", 0) == 1)
+
+    @staticmethod
+    async def _recovery_code_exists(s: AsyncSession, user_id: uuid.UUID, code: str) -> bool:
+        """The same lookup as consuming, with no write (keeps failed attempts' cost uniform)."""
+        found = await s.execute(
+            select(TotpRecoveryCode.id)
+            .where(
+                TotpRecoveryCode.user_id == user_id,
+                TotpRecoveryCode.code_hash == totp.recovery_code_hash(code),
+                TotpRecoveryCode.used_at.is_(None),
+            )
+            .limit(1)
+        )
+        return found.scalar_one_or_none() is not None
 
     async def _gate_new_credential(self, s: AsyncSession, principal: Principal) -> AppUser:
         user = await get_user(s, principal.user_id)
@@ -166,33 +253,44 @@ class AuthService:
             )
             raise _rate_limited(attempt.retry_after, attempt.message)
 
-        token: str | None = None
-        user: AppUser | None = None
+        # No DB connection is held while queued for or running argon2: read the user in one short
+        # session, verify with no session open, then open a second session only to finish.
         async with unscoped_session(self.ctx.factory) as s:
             user = (
                 await s.execute(
                     select(AppUser).where(AppUser.email == email, AppUser.disabled_at.is_(None))
                 )
             ).scalar_one_or_none()
-            ok = await passwords.verify_password_async(
-                user.password_hash if user else None, body.password
+        verified_hash = user.password_hash if user else None
+        password_ok = await passwords.verify_password_async(verified_hash, body.password)
+        # From here to the second-factor verdict, a right and a wrong password cost the same work,
+        # so timing can't confirm a password without the second factor.
+        first_ok = password_ok and user is not None and user.totp_enabled
+
+        token: str | None = None
+        if body.totp_code is not None:
+            step = self._totp_step(user, body.totp_code) if user is not None else None
+            if (
+                first_ok
+                and user is not None
+                and step is not None
+                and await self._claim_totp_step(user, step)
+            ):
+                token, user = await self._finish_password_login(user, verified_hash, None)
+        elif body.recovery_code is not None:
+            # Always opens the finishing session (even for a wrong password or unknown account);
+            # the code is only consumed when the password and account check out.
+            token, user = await self._finish_password_login(
+                user, verified_hash, body.recovery_code, first_ok=first_ok
             )
-            if ok and user is not None and user.totp_enabled:
-                if body.totp_code is not None:
-                    ok = await self._totp_matches(user, body.totp_code)
-                elif body.recovery_code is not None:
-                    ok = await self._consume_recovery_code(s, user, body.recovery_code)
-                else:
-                    ok = False
-            else:
-                ok = False  # no user, wrong password, or no second factor configured
-            if ok and user is not None:
-                if user.password_hash and passwords.needs_rehash(user.password_hash):
-                    user.password_hash = await passwords.hash_password_async(body.password)
-                user.last_login_at = sessions.utcnow()
-                token = await sessions.create(
-                    s, user.id, ip=self.ctx.ip, user_agent=self.ctx.user_agent, strong=True
-                )
+
+        if (
+            token is not None
+            and user is not None
+            and verified_hash
+            and passwords.needs_rehash(verified_hash)
+        ):
+            await self._rehash_password(user.id, verified_hash, body.password)
 
         if token is None or user is None:
             # The reserved attempt stays counted as the failure.

@@ -16,6 +16,8 @@ from typing import Any
 import structlog
 from pydantic import SecretBytes, SecretStr
 
+from app.security.secret_token import SecretToken
+
 REDACTED = "***"
 
 # Field names that always carry secrets. Over-masking is fine; under-masking is not.
@@ -42,7 +44,7 @@ def redact(value: Any, key: str | None = None) -> Any:
     """Return a copy of ``value`` with secret-looking fields and values masked."""
     if key is not None and SENSITIVE_KEY.search(key):
         return REDACTED
-    if isinstance(value, SecretStr | SecretBytes):
+    if isinstance(value, SecretStr | SecretBytes | SecretToken):
         return REDACTED
     if isinstance(value, Mapping):
         return {k: redact(v, str(k)) for k, v in value.items()}

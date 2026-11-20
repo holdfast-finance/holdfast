@@ -22,6 +22,12 @@ function at<T>(rec: Record<string, T>, key: string): T {
   return v
 }
 
+/** `color-mix` of `percent` `toward` over an opaque ground, as `#rrggbb`. */
+function mixed(toward: string, percent: number, ground: string): `#${string}` {
+  const rgb = over(hexToRgb(toward), percent, hexToRgb(ground))
+  return `#${rgb.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
+}
+
 /** Holo's block starts at its selector; Signal's tokens live in `:root` above it. */
 const HOLO_AT = CSS.indexOf(":root[data-brand='holo'] {")
 const HOLO_END = CSS.indexOf('@media (prefers-color-scheme: dark)', HOLO_AT)
@@ -45,11 +51,21 @@ describe.each(brandEntries)('%s: index.css mirrors src/lib/tokens.ts', (brand, t
     ...hues.map((h): [string, { light: string; dark: string }] => [h, at(t.fill, h)]),
     ...hues.map((h): [string, { light: string; dark: string }] => [`${h}-text`, at(t.text, h)]),
     ...Object.entries(t.grounds),
+    ['text', t.foreground],
+    ['text-muted', t.muted],
+    ...Object.entries(t.inks),
     ['focus-ring', t.focusRing],
     ['input-border', t.inputBorder],
   ]
   it.each(cases)('--%s', (name, pair) => {
     expect(SCOPE[brand]).toContain(`--${name}: light-dark(${pair.light}, ${pair.dark});`)
+  })
+
+  it('mirrors --hull-raised', () => {
+    const { base, toward, percent } = t.raised
+    expect(SCOPE[brand]).toContain(
+      `--hull-raised: color-mix(in srgb, var(--${base}), light-dark(${toward.light}, ${toward.dark}) ${String(percent)}%);`,
+    )
   })
 })
 
@@ -105,6 +121,29 @@ describe.each(brandEntries)('%s: WCAG AA contrast', (_brand, t) => {
   )
 
   it.each(buttonCases)('%s >= 4.5 (got %f)', (_label, ratio) => {
+    expect(ratio).toBeGreaterThanOrEqual(4.5)
+  })
+
+  const base = t.grounds[t.raised.base]
+  if (!base) throw new Error(`raised base --${t.raised.base} is not a ground`)
+  const raised = {
+    light: mixed(t.raised.toward.light, t.raised.percent / 100, base.light),
+    dark: mixed(t.raised.toward.dark, t.raised.percent / 100, base.dark),
+  }
+  const foregroundCases = THEMES.flatMap((theme) =>
+    [...grounds, raised].flatMap((g, i) => [
+      [
+        `${theme} text on ground ${String(i)}`,
+        contrast(hexToRgb(t.foreground[theme]), hexToRgb(g[theme])),
+      ] as const,
+      [
+        `${theme} text-muted on ground ${String(i)}`,
+        contrast(hexToRgb(t.muted[theme]), hexToRgb(g[theme])),
+      ] as const,
+    ]),
+  )
+
+  it.each(foregroundCases)('%s >= 4.5 (got %f)', (_label, ratio) => {
     expect(ratio).toBeGreaterThanOrEqual(4.5)
   })
 })

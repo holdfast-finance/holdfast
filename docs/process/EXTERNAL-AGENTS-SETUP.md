@@ -1,4 +1,4 @@
-# Setting up Anvil (Codex) and Flint (Grok): owner steps
+# Setting up Anvil (Codex) and Helm (Grok): owner steps
 
 ADR 0012 requires this before either agent starts. It gives them their own GitHub identity with
 read-only access, a fork to push to, and an OS user that can't see your `.env`, SSH keys or `gh` login.

@@ -1,11 +1,11 @@
-# Handoff queue: Anvil (Codex) and Flint (Grok)
+# Handoff queue: Anvil (Codex) and Helm (Grok)
 
 Rules are in `AGENTS.md` and ADR 0012. **Nothing here starts until the owner has finished
 `docs/process/EXTERNAL-AGENTS-SETUP.md`.** Take the first story in **your** column that has no open
 PR. An open (draft) PR is the claim. Briefs are in `docs/planning/briefs/`. Keel reviews and merges
 on its next window and updates this file.
 
-| # | Anvil (Codex) | Flint (Grok) |
+| # | Anvil (Codex) | Helm (Grok) |
 |---|---|---|
 | 1 | **C4a** Transfer pairing, pure core · `feat/C4a-transfer-core` · S | **T1** Tax config TY2025 + TY2026 · `feat/T1-tax-config` · M |
 | 2 | **C5a** Recurring detection, pure core · `feat/C5a-recurring-core` · S | **D1** User docs, Phases 0–1 · `docs/D1-user-docs` · S |
@@ -16,15 +16,15 @@ Keel-maintained status:
 |---|---|---|---|
 | C4a | Anvil | | Ledger |
 | C5a | Anvil | | Ledger |
-| T1 | Flint | | Tally |
-| D1 | Flint | | Keel |
+| T1 | Helm | | Tally |
+| D1 | Helm | | Keel |
 
 ## Do not take (Claude team)
-F3 OpenAPI types, A1 redaction, F13 invite-replacement race (found by Anvil, `services/invites.py:67`), F2 job framework, F5 secrets, F6 schema-gap migration, F7, F8b, F9,
+F3 OpenAPI types, A1 redaction, F2 job framework, F5 secrets, F6 schema-gap migration, F7, F8b, F9,
 F11, F12, and all of Phase 2. Anything touching a forbidden path in `AGENTS.md`.
 
 ## Migration token
-Held by: nobody. Anvil and Flint don't hold it in this queue.
+Held by: nobody. Anvil and Helm don't hold it in this queue.
 
 ## Starting a session (owner, as the `holdfast-agents` user, in its clone)
 
@@ -35,5 +35,5 @@ including the user config. If either is set, Codex ignores `default_permissions`
 
 ```sh
 codex exec -C ~/holdfast "You are Anvil. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
-grok --cwd ~/holdfast --permission-mode acceptEdits "You are Flint. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
+grok --cwd ~/holdfast --permission-mode acceptEdits "You are Helm. Read AGENTS.md and docs/planning/HANDOFF.md, then take and finish your next story."
 ```

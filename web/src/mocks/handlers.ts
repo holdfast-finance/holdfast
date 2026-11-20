@@ -8,8 +8,8 @@ import type {
   Person,
   SessionResponse,
   User,
-} from '@/api/types'
-import { ERROR_CODES, FILING_ROLES } from '@/api/types'
+} from '@/api/contracts'
+import { ERROR_CODES, FILING_ROLES } from '@/api/contracts'
 import { CSRF_HEADER } from '@/api/client'
 import {
   MOCK_LOGIN_LIMIT,

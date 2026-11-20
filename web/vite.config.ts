@@ -4,7 +4,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, type Plugin, type UserConfig } from 'vite'
+
+import { defaultBrandEnv } from './src/lib/brand-html.ts'
 
 // In Docker the edge Caddy serves the app and routes /api/* to api:8000 on the same origin.
 // Outside Docker, `pnpm dev` proxies /api to a locally running backend instead.
@@ -60,8 +62,23 @@ function mockServiceWorker(): Plugin {
   }
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), mockServiceWorker()],
+function defaultBrandAttribute(): Plugin {
+  let brand: ReturnType<typeof defaultBrandEnv> = 'signal'
+  return {
+    name: 'holdfast-default-brand',
+    configResolved({ env }) {
+      const current: unknown = env.VITE_BRAND
+      brand = defaultBrandEnv(typeof current === 'string' ? current : undefined)
+    },
+    transformIndexHtml: {
+      order: 'post',
+      handler: (html) => html.replace(/(<html\b[^>]*\sdata-brand=")signal(")/, `$1${brand}$2`),
+    },
+  }
+}
+
+const config = {
+  plugins: [react(), tailwindcss(), mockServiceWorker(), defaultBrandAttribute()],
   cacheDir,
   build: {
     assetsInlineLimit: (filePath) => (FONT_FILE.test(filePath) ? false : undefined),
@@ -94,4 +111,6 @@ export default defineConfig({
     css: false,
     restoreMocks: true,
   },
-})
+} satisfies UserConfig
+
+export default defineConfig(config)
