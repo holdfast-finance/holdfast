@@ -57,8 +57,10 @@
    `head_branch` and `head_repository` matching the merged PR's head. An empty
    `pull_requests` list is allowed. A non-empty list must contain only the merged PR, every
    entry's base must be `main`, and each entry's head SHA must be the merged head. A
-   same-branch sibling whose current base is not `main` fails the push. So does
-   `base_ref_changed` on any PR from that head, including one later retargeted to `main`.
+   same-branch sibling whose current base is not `main` fails the push. So does a base
+   move on any PR from that head: `base_ref_changed`, `base_ref_deleted`, or
+   `automatic_base_change_succeeded` (a manual retarget, or GitHub retargeting the PR
+   after the old base is deleted).
    A workflow-run listing that names a different head SHA is dropped, and a listing shorter
    than `total_count` fails closed. A null head repository fails closed. `ci.yml` runs
    `pull_request` only for base `main`.

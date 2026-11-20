@@ -35,10 +35,17 @@ CHECK_EVENTS = {
 # Both must also come from the merged PR's head branch and repo. GitHub empties a run's
 # ``pull_requests`` after merge, so an empty list is allowed. A non-empty list must be
 # only the merged PR, every entry's base ``main``, and every entry's head SHA the merged
-# head. Any PR from that head whose base changed (including one later retargeted to
-# ``main``) fails closed. A sibling whose current base is not ``main`` also fails.
+# head. Any PR from that head whose base moved fails closed: a manual retarget is
+# ``base_ref_changed``, and deleting the old base records ``base_ref_deleted`` plus
+# ``automatic_base_change_succeeded``. A sibling whose current base is not ``main``
+# also fails.
 PR_BOUND_CHECKS = ("ci-required", "review-gate")
 BASE_BRANCH = "main"
+BASE_MOVE_EVENTS = frozenset({
+    "base_ref_changed",
+    "automatic_base_change_succeeded",
+    "base_ref_deleted",
+})
 LABEL = "main-guard"
 Runner = Callable[..., tuple[int, str, str]]
 
@@ -476,7 +483,7 @@ def reasons_from_compare(compare: dict[str, Any], gh: GitHub, repo: str) -> list
                     reasons.append(f"{sha}: PR timeline API failed; refusing to pass")
                     blocked = True
                     break
-                if any(e.get("event") == "base_ref_changed" for e in events):
+                if any(e.get("event") in BASE_MOVE_EVENTS for e in events):
                     reasons.append(
                         f"{sha}: PR #{number} base was changed; "
                         "a green run may belong to another base"

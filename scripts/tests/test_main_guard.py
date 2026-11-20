@@ -458,26 +458,32 @@ class MainGuardTests(unittest.TestCase):
             [],
             [{"number": 4, "base_ref": "main", "head_sha": HEAD}],
         )
-        for pulls in shapes:
-            runs = {HEAD: [
-                _job("review-gate", "success", "2026-11-19T00:00:00Z"),
-                _job("ci-required", "success", "2026-11-19T00:00:00Z"),
-            ]}
-            for job in runs[HEAD]:
-                job["pull_requests"] = [dict(item) for item in pulls]
-            gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
-            gh.head_prs = [
-                {"number": 4, "base_ref": "main"},
-                {"number": 9, "base_ref": "main"},
-            ]
-            gh.timelines = {
-                4: [{"event": "reviewed"}],
-                9: [{"event": "base_ref_changed"}],
-            }
-            code, out = _run(gh)
-            self.assertEqual(code, 1, out)
-            self.assertIn("PR #9", out)
-            self.assertIn("base was changed", out)
+        events = (
+            "base_ref_changed",
+            "automatic_base_change_succeeded",
+            "base_ref_deleted",
+        )
+        for event in events:
+            for pulls in shapes:
+                runs = {HEAD: [
+                    _job("review-gate", "success", "2026-11-19T00:00:00Z"),
+                    _job("ci-required", "success", "2026-11-19T00:00:00Z"),
+                ]}
+                for job in runs[HEAD]:
+                    job["pull_requests"] = [dict(item) for item in pulls]
+                gh = FakeGH(_ahead([AFTER]), pulls={AFTER: [_merged()]}, runs=runs)
+                gh.head_prs = [
+                    {"number": 4, "base_ref": "main"},
+                    {"number": 9, "base_ref": "main"},
+                ]
+                gh.timelines = {
+                    4: [{"event": "reviewed"}],
+                    9: [{"event": event}],
+                }
+                code, out = _run(gh)
+                self.assertEqual(code, 1, event + out)
+                self.assertIn("PR #9", out)
+                self.assertIn("base was changed", out)
 
     def test_pulls_command_does_not_call_rulesets(self) -> None:
         seen: list[list[str]] = []
