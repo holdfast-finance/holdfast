@@ -172,6 +172,10 @@ jobs:
           fi
           docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git --no-banner --redact -v "${opts[@]}" /repo
+      # Real statements never land in the repo (ADR 0019): no force-added ignored files, no
+      # statement-type files outside the fixture allowlist.
+      - name: No private data files
+        run: bash scripts/check-private-data.sh tree
 
   scripts-test:
     runs-on: ubuntu-latest
