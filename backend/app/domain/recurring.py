@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from calendar import monthrange
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -44,10 +44,14 @@ MIN_ANNUAL_OCCURRENCES = 2
 MIN_VARIABLE_OCCURRENCES = 6
 # A dozen fast variable postings distinguish bills from short shopping streaks.
 MIN_FAST_VARIABLE_OCCURRENCES = 12
-# Dense variable schedules need stronger evidence to distinguish regular shopping.
-MIN_FAST_VARIABLE_SLOT_COVERAGE = Decimal("0.95")
-# An annual pair has too little timing evidence to support a broad amount band.
-ANNUAL_PAIR_AMOUNT_TOLERANCE = Decimal("0.001")
+# Require nine in ten slots to distinguish regular shopping while allowing missed pay cycles.
+MIN_FAST_VARIABLE_SLOT_COVERAGE = Decimal("0.90")
+# A renewal can change price modestly; anchor the comparison to the earlier charge.
+ANNUAL_PAIR_AMOUNT_TOLERANCE = Decimal("0.10")
+# Above six postings in a calendar year, a chance date match needs a unique exact amount.
+MAX_ANNUAL_PAIR_POSTINGS_PER_YEAR = 6
+# With other activity present, require near-identical amounts as corroboration.
+ANNUAL_PAIR_WITH_PURCHASES_TOLERANCE = Decimal("0.001")
 # Allow year-to-year utility changes while looking for the same seasonal pattern.
 SEASONAL_AMOUNT_TOLERANCE = Decimal("0.25")
 # A repeating annual shape needs most months to agree before relaxing raw coverage.
@@ -56,6 +60,9 @@ MIN_SEASONAL_TRANSACTION_COVERAGE = Decimal("0.65")
 _CENT = Decimal("0.01")
 # Three of four expected dates must be present, even across isolated misses.
 MIN_SLOT_COVERAGE = Decimal("0.75")
+# A long, nearly complete monthly run can stand apart from irregular purchases.
+MIN_MONTHLY_TIMING_OCCURRENCES = 10
+MIN_MONTHLY_TIMING_SLOT_COVERAGE = Decimal("0.90")
 # Frequent unmatched purchases in the same window weaken the cadence evidence.
 MIN_TRANSACTION_COVERAGE = Decimal("0.80")
 # Two payments supply materially less evidence than a longer history.
@@ -206,11 +213,9 @@ def _fixed_profile(
     return _AmountProfile(center, band, False, bands)
 
 
-def _amount_profile(
-    amounts: list[Decimal], minimum: int, annual_pair: bool
-) -> _AmountProfile | None:
+def _amount_profile(amounts: list[Decimal], minimum: int) -> _AmountProfile | None:
     center = median(amounts)
-    tolerance = ANNUAL_PAIR_AMOUNT_TOLERANCE if annual_pair else FIXED_AMOUNT_TOLERANCE
+    tolerance = FIXED_AMOUNT_TOLERANCE
     if all(amount == center for amount in amounts):
         return _fixed_profile(center, tolerance)
     low, high = _band(center, tolerance)
@@ -230,7 +235,10 @@ def _amount_profile(
                 if (
                     old != new
                     and (
-                        fixed_count < len(amounts)
+                        (
+                            fixed_count < len(amounts)
+                            and all(not old_low <= amount <= old_high for amount in amounts[split:])
+                        )
                         or (
                             all(amount == old for amount in amounts[:split])
                             and all(amount == new for amount in amounts[split:])
@@ -239,17 +247,17 @@ def _amount_profile(
                     and all(old_low <= amount <= old_high for amount in amounts[:split])
                     and all(new_low <= amount <= new_high for amount in amounts[split:])
                 ):
-                    return _fixed_profile(new, tolerance, old)
+                    profile = _fixed_profile(new, tolerance, old)
+                    return _AmountProfile(amounts[-1], profile.band, False, profile.coverage_bands)
                 if not new_low <= amounts[split - 1] <= new_high:
                     break
 
     # Keep occasional exceptions in the cadence while excluding them from the fixed price.
-    if fixed_count == len(amounts):
-        return _fixed_profile(center, tolerance)
     if fixed_count >= minimum and len(amounts) - fixed_count <= len(amounts) // 5:
-        return _fixed_profile(
-            median([amount for amount in amounts if low <= amount <= high]), tolerance
-        )
+        inliers = [amount for amount in amounts if low <= amount <= high]
+        inlier_median = median(inliers)
+        typical = min(reversed(inliers), key=lambda amount: abs(amount - inlier_median))
+        return _AmountProfile(typical, (low, high), False, ((low, high),))
 
     if len(amounts) < MIN_VARIABLE_OCCURRENCES:
         return None
@@ -305,11 +313,42 @@ class _Candidate:
     error: int
 
 
+def _annual_pair(
+    slots: list[list[_Match]], amount_counts: Counter[Decimal], group_size: int, dense: bool
+) -> tuple[_Match, _Match] | None:
+    tolerance = (
+        ANNUAL_PAIR_AMOUNT_TOLERANCE
+        if group_size == MIN_ANNUAL_OCCURRENCES
+        else ANNUAL_PAIR_WITH_PURCHASES_TOLERANCE
+    )
+    eligible: list[tuple[_Match, _Match]] = []
+    for first in slots[0]:
+        old = first.transaction.amount
+        for last in slots[1]:
+            new = last.transaction.amount
+            if dense:
+                if old == new and amount_counts[old] == 2:
+                    eligible.append((first, last))
+            elif abs(new - old) <= abs(old) * tolerance:
+                eligible.append((first, last))
+    return min(
+        eligible,
+        key=lambda pair: (
+            abs(pair[0].transaction.amount - pair[1].transaction.amount)
+            / abs(pair[0].transaction.amount),
+            pair[0].error + pair[1].error,
+        ),
+        default=None,
+    )
+
+
 def _candidate(
     schedule: _Schedule,
     slots: list[list[_Match]],
     group: list[PostedTransaction],
     dates: list[date],
+    amount_counts: Counter[Decimal],
+    dense: bool,
     as_of: date,
 ) -> _Candidate | None:
     count = len(slots)
@@ -327,20 +366,23 @@ def _candidate(
         for matches in slots
     ]
     annual_pair = schedule.cadence == Cadence.ANNUAL and count == MIN_ANNUAL_OCCURRENCES
-    profile = _amount_profile([member.transaction.amount for member in run], minimum, annual_pair)
-    if annual_pair and profile is None and any(len(matches) > 1 for matches in slots):
-        # With only two slots, an unrelated posting can erase all the amount evidence.
-        pair = min(
-            ((first, last) for first in slots[0] for last in slots[1]),
-            key=lambda pair: (
-                abs(pair[0].transaction.amount - pair[1].transaction.amount)
-                / abs(pair[0].transaction.amount + pair[1].transaction.amount),
-                pair[0].error + pair[1].error,
-            ),
+    profile: _AmountProfile | None
+    if annual_pair:
+        pair = _annual_pair(slots, amount_counts, len(group), dense)
+        if pair is None:
+            return None
+        run = list(pair)
+        old, new = (member.transaction.amount for member in run)
+        old_band = _band(old, ANNUAL_PAIR_WITH_PURCHASES_TOLERANCE)
+        new_band = _band(new, ANNUAL_PAIR_WITH_PURCHASES_TOLERANCE)
+        profile = _AmountProfile(
+            old,
+            (min(old_band[0], new_band[0]), max(old_band[1], new_band[1])),
+            False,
+            (old_band, new_band),
         )
-        profile = _amount_profile(
-            [match.transaction.amount for match in pair], minimum, annual_pair
-        )
+    else:
+        profile = _amount_profile([member.transaction.amount for member in run], minimum)
     if profile is None or (
         profile.is_variable
         and schedule.cadence in _FAST_CADENCES
@@ -355,30 +397,33 @@ def _candidate(
         return any(low <= amount <= high for low, high in profile.coverage_bands)
 
     # Prefer an in-band posting when an ad-hoc purchase lands in the same slot.
-    run = [
-        min(
-            matches,
-            key=lambda match: (
-                not in_band(match.transaction.amount),
-                match != seasonal.get(match.slot),
-                match.error,
-            ),
-        )
-        for matches in slots
-    ]
+    if not annual_pair:
+        run = [
+            min(
+                matches,
+                key=lambda match: (
+                    not in_band(match.transaction.amount),
+                    match != seasonal.get(match.slot),
+                    match.error,
+                ),
+            )
+            for matches in slots
+        ]
     first, last = run[0], run[-1]
-    try:
-        start = bisect_left(dates, schedule.expected(first.slot - 1))
-    except ValueError:
-        start = 0
     try:
         next_date = schedule.expected(last.slot + 1)
         lapse_date = schedule.expected(last.slot + 2)
     except ValueError:
         return None
-    end = bisect_right(dates, next_date)
     matched = sum(in_band(member.transaction.amount) for member in run)
-    nearby = sum(in_band(row.amount) for row in group[start:end])
+    nearby = len(
+        {
+            match.transaction
+            for matches in slots
+            for match in matches
+            if in_band(match.transaction.amount)
+        }
+    )
     if matched < minimum:
         return None
     transaction_coverage = Decimal(matched) / nearby
@@ -392,6 +437,25 @@ def _candidate(
 
     slot_coverage = Decimal(count) / span
     error = sum(member.error for member in run)
+    # Require corroboration for short streaks in busy groups. A long, stable
+    # monthly run can qualify when at least half the in-band activity follows it.
+    if not (annual_pair and dense):
+        try:
+            start = bisect_left(dates, schedule.expected(first.slot - 1))
+        except ValueError:
+            start = 0
+        end = bisect_right(dates, next_date)
+        window_count = sum(in_band(row.amount) for row in group[start:end])
+        strong_monthly_timing = (
+            schedule.cadence == Cadence.MONTHLY
+            and count >= MIN_MONTHLY_TIMING_OCCURRENCES
+            and slot_coverage >= MIN_MONTHLY_TIMING_SLOT_COVERAGE
+            and error <= count
+            and matched * 2 >= window_count
+        )
+        if not strong_monthly_timing and matched < required_coverage * window_count:
+            return None
+
     date_fit = 1 - Decimal(error) / (count * (schedule.tolerance + 1))
     confidence = slot_coverage * transaction_coverage * (1 + date_fit) / 2
     if annual_pair:
@@ -448,6 +512,9 @@ def detect_recurring(
                 continue
             group.sort(key=lambda item: (item.posted_date, str(item.id), type(item.id).__name__))
             dates = [item.posted_date for item in group]
+            amount_counts = Counter(item.amount for item in group)
+            year_counts = Counter(item.posted_date.year for item in group)
+            dense = max(year_counts.values()) > MAX_ANNUAL_PAIR_POSTINGS_PER_YEAR
             schedules: dict[_Schedule, dict[int, list[_Match]]] = {}
             for transaction in group:
                 day = transaction.posted_date
@@ -462,7 +529,12 @@ def detect_recurring(
                 candidate
                 for schedule, slots in schedules.items()
                 for run in _runs(slots, _MINIMUM[schedule.cadence])
-                if (candidate := _candidate(schedule, run, group, dates, as_of)) is not None
+                if (
+                    candidate := _candidate(
+                        schedule, run, group, dates, amount_counts, dense, as_of
+                    )
+                )
+                is not None
             ]
             used: set[str | UUID] = set()
             for candidate in sorted(
