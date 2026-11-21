@@ -185,8 +185,8 @@ jobs:
             REVISION=${{ env.SHA }}
           provenance: true
           sbom: true
-          cache-from: type=gha,scope=release-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
+          # No build cache: a release image is built from scratch, never from another run's layers.
+          no-cache: true
 
   github-release:
     name: Attach files to the GitHub Release
