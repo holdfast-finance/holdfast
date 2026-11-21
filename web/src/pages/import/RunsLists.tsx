@@ -113,7 +113,7 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
       >
         <p className="font-medium text-destructive-text">Couldn't load your imports.</p>
         <p className="text-sm text-muted-foreground">{errorMessage(runs.error)}</p>
-        <Button variant="outline" onClick={() => void runs.refetch()}>
+        <Button variant="outline" size="lg" onClick={() => void runs.refetch()}>
           Retry
         </Button>
       </div>
@@ -122,8 +122,23 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
 
   const all = runs.data.pages.flatMap((p) => p.items)
   const review = all.filter((r) => r.reconcile_status === 'needs_review')
+  const allReconciled =
+    !runs.hasNextPage &&
+    all.length > 0 &&
+    all.every((run) => run.status === 'succeeded' && run.reconcile_status === 'reconciled')
+  const emptyReviewMessage = runs.hasNextPage
+    ? 'Nothing needs review in the imports loaded so far.'
+    : allReconciled
+      ? 'Every imported statement reconciled.'
+      : 'Nothing needs review.'
   const pagination = (
     <>
+      {runs.isFetchNextPageError && (
+        <div role="alert">
+          <p className="text-sm font-medium text-destructive-text">Couldn't load more.</p>
+          <p className="text-sm text-muted-foreground">{errorMessage(runs.error)}</p>
+        </div>
+      )}
       {runs.hasNextPage && (
         <Button
           variant="outline"
@@ -131,13 +146,8 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
           disabled={runs.isFetchingNextPage}
           onClick={() => void runs.fetchNextPage()}
         >
-          {runs.isFetchingNextPage ? 'Loading…' : 'Load more'}
+          {runs.isFetchingNextPage ? 'Loading…' : runs.isFetchNextPageError ? 'Retry' : 'Load more'}
         </Button>
-      )}
-      {runs.isFetchNextPageError && (
-        <p role="alert" className="text-sm text-destructive-text">
-          Couldn't load more. Try Load more again.
-        </p>
       )}
     </>
   )
@@ -148,17 +158,20 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
           id="review-title"
           ref={reviewHeading}
           tabIndex={-1}
+          aria-describedby={runs.hasNextPage ? 'review-scope' : undefined}
           className="font-heading text-lg font-semibold"
         >
           Needs review{' '}
           {review.length > 0 && <span className="money text-base">({review.length})</span>}
         </h2>
         {runs.hasNextPage && (
-          <p className="text-xs text-muted-foreground">This queue covers loaded pages only.</p>
+          <p id="review-scope" className="text-xs text-muted-foreground">
+            This queue covers loaded pages only.
+          </p>
         )}
         {review.length === 0 ? (
           <p className="rounded-card border border-border bg-card p-4 text-sm text-muted-foreground">
-            Nothing to review in the loaded imports.
+            {emptyReviewMessage}
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-card border border-border bg-card">

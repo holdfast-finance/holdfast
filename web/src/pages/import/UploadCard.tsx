@@ -94,8 +94,8 @@ export function UploadCard({
       <CardHeader>
         <CardTitle className="font-heading text-lg">Import a statement</CardTitle>
         <CardDescription>
-          PDF only, up to {MAX_UPLOAD_LABEL}. It is read on your server and never leaves it. Upload
-          the same file twice and nothing is added.
+          PDF only, up to {MAX_UPLOAD_LABEL}. Your statement is stored with your household's
+          documents. Upload the same file twice and nothing is added.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -119,7 +119,7 @@ export function UploadCard({
             <div className="flex flex-col gap-2">
               <label
                 htmlFor={inputId}
-                className="flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-dashed border-border bg-muted/40 px-4 py-3 text-sm font-medium has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50"
+                className="relative flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-dashed border-border bg-muted/40 px-4 py-3 text-sm font-medium focus-within:ring-3 focus-within:ring-ring"
               >
                 <FileUp aria-hidden="true" className="size-5 shrink-0 text-primary-text" />
                 <span className="min-w-0 flex-1 truncate">
@@ -133,7 +133,7 @@ export function UploadCard({
                   id={inputId}
                   type="file"
                   accept="application/pdf,.pdf"
-                  className="sr-only"
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                   disabled={busy}
                   aria-label="Statement PDF"
                   aria-invalid={fileError ? true : undefined}

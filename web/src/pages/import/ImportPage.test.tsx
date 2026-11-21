@@ -78,8 +78,54 @@ describe('Import page: runs and the review queue', () => {
 
   it('shows an empty state with no imports', async () => {
     open({ empty: true })
-    expect(await screen.findByText(/Nothing to review/)).toBeInTheDocument()
+    expect(await screen.findByText('Nothing needs review.')).toBeInTheDocument()
     expect(screen.getByText(/No imports yet/)).toBeInTheDocument()
+  })
+
+  it.each([
+    [null, 'Every imported statement reconciled.'],
+    ['accepted', 'Nothing needs review.'],
+    ['pending', 'Nothing needs review.'],
+  ])('summarizes a complete queue with extra reconciliation status %s', async (status, message) => {
+    seedHousehold({ signedIn: true })
+    seedLedger()
+    seedImportRuns()
+    db.importRuns = db.importRuns.filter(
+      (run) => run.reconcile_status === 'reconciled' || run.reconcile_status === status,
+    )
+    renderApp('/import')
+    expect(within(await queue()).getByText(message)).toBeInTheDocument()
+  })
+
+  it('limits the empty queue summary to loaded pages and shows the next-page error', async () => {
+    let failNext = true
+    server.use(
+      http.get('*/api/imports/runs', ({ request }) => {
+        if (new URL(request.url).searchParams.get('cursor') !== 'older') {
+          return HttpResponse.json({
+            items: db.importRuns.filter((run) => run.reconcile_status === 'reconciled'),
+            next_cursor: 'older',
+          })
+        }
+        if (failNext) {
+          return HttpResponse.json(
+            { error: { code: 'server_error', message: 'Older imports are temporarily unavailable.' } },
+            { status: 500 },
+          )
+        }
+        return HttpResponse.json({ items: [], next_cursor: null })
+      }),
+    )
+    open()
+    const review = within(await queue())
+    expect(review.getByText('Nothing needs review in the imports loaded so far.')).toBeVisible()
+    await userEvent.click(review.getByRole('button', { name: 'Load more' }))
+    expect(await review.findByRole('alert')).toHaveTextContent(
+      'Older imports are temporarily unavailable.',
+    )
+    failNext = false
+    await userEvent.click(review.getByRole('button', { name: 'Retry' }))
+    expect(await review.findByText('Every imported statement reconciled.')).toBeVisible()
   })
 
   it('pages the run list with Load more', async () => {
@@ -176,6 +222,15 @@ describe('Import page: accepting a flagged statement', () => {
 })
 
 describe('Import page: uploading', () => {
+  it('offers a keyboard-focusable PDF picker and describes household storage', async () => {
+    open()
+    const picker = await screen.findByLabelText('Statement PDF')
+    expect(picker).toHaveAttribute('accept', 'application/pdf,.pdf')
+    expect(screen.getByText(/stored with your household's documents/)).toBeVisible()
+    picker.focus()
+    expect(picker).toHaveFocus()
+  })
+
   it('imports a statement that reconciles', async () => {
     open()
     await upload(pdf('november.pdf'))
