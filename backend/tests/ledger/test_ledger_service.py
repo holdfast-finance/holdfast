@@ -216,6 +216,63 @@ async def test_automated_source_never_overwrites_a_user_category(
     assert (await _row(factory, household, t2)).category_source == "plaid"
 
 
+async def test_source_precedence_is_user_rule_plaid_ml(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    rank = {AutoCategorySource.ML: 1, AutoCategorySource.PLAID: 2, AutoCategorySource.RULE: 3}
+    a = await _account(factory, household)
+    first = await _category(factory, household, "First")
+    second = await _category(factory, household, "Second")
+    for existing in AutoCategorySource:
+        for new in AutoCategorySource:
+            t = await _txn(factory, household, a, "-5.00")
+            async with scoped_session(factory, household, None, household_wide=True) as s:
+                assert await LedgerWriter(s, household).apply_category(t, first, existing)
+            async with scoped_session(factory, household, None, household_wide=True) as s:
+                applied = await LedgerWriter(s, household).apply_category(t, second, new)
+            row = await _row(factory, household, t)
+            assert applied == (rank[new] >= rank[existing]), (existing, new)
+            want = (second, new.value) if applied else (first, existing.value)
+            assert (row.category_id, row.category_source) == want, (existing, new)
+
+
+async def test_user_clearing_a_category_sticks_until_released(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await _account(factory, household)
+    t = await _txn(factory, household, a, "-5.00")
+    c = await _category(factory, household)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=USER).set_category(t, c)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=USER).set_category(t, None)
+    row = await _row(factory, household, t)
+    assert (row.category_id, row.category_source) == (None, "user")
+    for source in AutoCategorySource:
+        async with scoped_session(factory, household, None, household_wide=True) as s:
+            assert await LedgerWriter(s, household).apply_category(t, c, source) is False
+    assert (await _row(factory, household, t)).category_id is None
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=USER).release_category(t)
+    assert (await _row(factory, household, t)).category_source is None
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        assert await LedgerWriter(s, household).apply_category(t, c, AutoCategorySource.ML)
+    assert (await _row(factory, household, t)).category_source == "ml"
+    assert await _audit(factory, household) == [
+        "ledger.category_set",
+        "ledger.category_set",
+        "ledger.category_released",
+    ]
+
+
+async def test_release_category_needs_a_user(factory: Factory, household: uuid.UUID) -> None:
+    a = await _account(factory, household)
+    t = await _txn(factory, household, a, "-5.00")
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        with pytest.raises(LedgerRuleError):
+            await LedgerWriter(s, household).release_category(t)
+
+
 async def test_unknown_category_and_source_are_rejected(
     factory: Factory, household: uuid.UUID
 ) -> None:

@@ -115,7 +115,7 @@ detailed:
   GENERAL_SERVICES_OTHER_GENERAL_SERVICES: fees.other-services
 
   GOVERNMENT_AND_NON_PROFIT_DONATIONS: gifts.charity
-  GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT: taxes.income-tax
+  GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT: taxes.other  # covers income and property tax alike
 
   TRANSPORTATION_BIKES_AND_SCOOTERS: transport.bikes-scooters
   TRANSPORTATION_GAS: transport.fuel

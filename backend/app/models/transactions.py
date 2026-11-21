@@ -40,6 +40,11 @@ class Category(Base):
         check_in("kind", CATEGORY_KINDS),
         child_fk("parent_id", "category", ondelete="SET NULL"),
         check_in("origin", CATEGORY_ORIGINS),
+        # The flag follows the kind: an expense that should not count is hidden or kind excluded.
+        CheckConstraint(
+            "counts_toward_spending = false OR kind = 'expense'",
+            name="counts_spending_only_expense",
+        ),
         parent_key(),
         UniqueConstraint("household_id", "slug"),
     )

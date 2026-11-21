@@ -48,6 +48,7 @@ async def test_seeding_is_idempotent_and_keeps_household_edits(app: FastAPI, own
             await s.execute(select(Category).where(Category.slug == "food.coffee"))
         ).scalar_one()
         coffee.kind = "excluded"
+        coffee.counts_toward_spending = False
         s.add(
             Category(
                 household_id=hid, slug="custom.hobby", name="Hobby", kind="expense", origin="user"

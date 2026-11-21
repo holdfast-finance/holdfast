@@ -100,6 +100,10 @@ def test_lookup_prefers_detailed_then_primary_and_leaves_unmapped_alone() -> Non
     assert pfc_category_slug("FOOD_AND_DRINK", "FOOD_AND_DRINK_GROCERIES") == "food.groceries"
     assert pfc_category_slug("FOOD_AND_DRINK", "FOOD_AND_DRINK_NEW_CODE") == "food.other"
     assert pfc_category_slug("FOOD_AND_DRINK", None) == "food.other"
+    assert (
+        pfc_category_slug("GOVERNMENT_AND_NON_PROFIT", "GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT")
+        == "taxes.other"
+    )
     assert pfc_category_slug("GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_SUPERSTORES") is None
     assert pfc_category_slug("GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_NEW") is None
     assert pfc_category_slug(None, None) is None
