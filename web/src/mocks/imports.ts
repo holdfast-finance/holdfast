@@ -31,6 +31,7 @@ interface RunSeed {
   closing: string | null
   sum: string | null
   reconcile: ImportRun['reconcile_status']
+  reason?: string
   status?: ImportRun['status']
   parsed: number
   inserted: number
@@ -67,6 +68,7 @@ const RUNS: RunSeed[] = [
     closing: '-655.25',
     sum: '-200.00',
     reconcile: 'needs_review',
+    reason: 'balance_mismatch,date_out_of_period',
     parsed: 31,
     inserted: 31,
     duplicate: 0,
@@ -83,6 +85,7 @@ const RUNS: RunSeed[] = [
     closing: '2500.00',
     sum: '0.00',
     reconcile: 'needs_review',
+    reason: 'unknown',
     parsed: 3,
     inserted: 3,
     duplicate: 0,
@@ -122,6 +125,23 @@ const RUNS: RunSeed[] = [
     error: 'ParseError',
     created: '2026-10-01T08:00:00Z',
   },
+  {
+    id: '00000000-0000-4000-8000-00000000b006',
+    filename: 'example-checking-2026-11.pdf',
+    account: 'checking',
+    name: 'Everyday checking',
+    start: '2026-11-01',
+    end: '2026-11-30',
+    opening: '1534.50',
+    closing: '1436.15',
+    sum: '-98.35',
+    reconcile: 'needs_review',
+    reason: 'unexplained_duplicates',
+    parsed: 27,
+    inserted: 25,
+    duplicate: 2,
+    created: '2026-12-02T13:00:00Z',
+  },
 ]
 
 function toRun(s: RunSeed): ImportRun {
@@ -134,7 +154,7 @@ function toRun(s: RunSeed): ImportRun {
     currency: 'USD',
     status: s.status ?? 'succeeded',
     reconcile_status: s.reconcile,
-    reason: s.reconcile === 'needs_review' ? 'balance_mismatch' : null,
+    reason: s.reason ?? null,
     period_start: s.start,
     period_end: s.end,
     opening_balance: s.opening,

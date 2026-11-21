@@ -20,6 +20,7 @@ export function AcceptButton({
   numbers,
   currency,
   reason,
+  fromRun = false,
   fallbackFocus,
   onAccepted,
 }: {
@@ -27,8 +28,8 @@ export function AcceptButton({
   label: string
   numbers: ReconcileNumbers
   currency: string | null
-  /** `undefined` when the runs list is the source: it carries no reason. */
-  reason: string | null | undefined
+  reason: string | null
+  fromRun?: boolean
   fallbackFocus: RefObject<HTMLElement | null>
   onAccepted: (runId: string) => void
 }) {
@@ -73,7 +74,7 @@ export function AcceptButton({
         <div className="flex flex-col gap-4">
           <section aria-label="Why it was flagged" className="flex flex-col gap-2">
             <h3 className="text-sm font-semibold">Why it was flagged</h3>
-            <ReasonList reason={reason} numbers={numbers} />
+            <ReasonList reason={reason} numbers={numbers} fromRun={fromRun} />
           </section>
           <ReconcileFacts numbers={numbers} currency={currency} />
           <p className="text-sm">
