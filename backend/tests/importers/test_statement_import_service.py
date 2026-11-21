@@ -16,7 +16,7 @@ from app.domain.ledger_rules import InvalidAmountError
 from app.domain.statement_parse import ParsedStatement, detect_profile, parse_statement
 from app.importers.profile_loader import load_profiles
 from app.models import Account, Document, ImportRun, Transaction
-from app.services.ledger_service import LedgerService, NewTransaction
+from app.services.ledger_service import LedgerWriter, NewTransaction
 from app.services.statement_import import (
     AccountNotVisibleError,
     DocumentMeta,
@@ -123,7 +123,7 @@ async def test_unexplained_duplicate_needs_review(
     (original,) = first.blocks
     if existing_row == "manual":
         async with scoped_session(factory, household, None, household_wide=True) as s:
-            await LedgerService(s, household).insert_transaction(
+            await LedgerWriter(s, household).insert_transaction(
                 NewTransaction(
                     account_id=original.account_id,
                     posted_date=txn.posted_date,
