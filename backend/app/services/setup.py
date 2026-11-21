@@ -23,6 +23,7 @@ from app.schemas.auth import SessionOut, SetupIn
 from app.security.ratelimit import Locked, RateLimiter, ip_scope
 from app.security.tokens import new_token, same_hash, token_hash_hex
 from app.services import audit, sessions
+from app.services.categories import ensure_default_categories
 from app.services.context import RequestContext
 from app.services.errors import ApiError
 from app.services.users import has_any_credential, session_out
@@ -95,6 +96,7 @@ async def run_setup(ctx: RequestContext, body: SetupIn) -> tuple[str, SessionOut
             if state == "fresh":
                 household_id = await create_household(s, body.household_name)
                 await apply_context(s, household_id, None)
+                await ensure_default_categories(s, household_id)
                 person = Person(
                     household_id=household_id,
                     display_name=body.display_name,

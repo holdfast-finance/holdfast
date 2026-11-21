@@ -1,6 +1,6 @@
 """The one writer of ledger money fields (ADR 0011, PLAN 20 money review).
 
-``LedgerService`` is the only code allowed to create a ``Transaction`` or ``TransactionSplit``, or
+``LedgerWriter`` is the only code allowed to create a ``Transaction`` or ``TransactionSplit``, or
 to set a transaction's ``amount``, ``category_id``/``category_source``, ``is_transfer`` or
 ``transfer_group_id``. ``tests/test_ledger_single_writer.py`` is a lint over ``app/`` that fails
 the build if any other module does; the real guarantee is RLS plus the database triggers. Reads
@@ -13,8 +13,9 @@ runs them, persists, and audits.
 **Who is acting.** ``household_id`` is taken from the session's RLS context and the argument must
 match it. User edits (``set_category``, ``set_amount``, transfers, splits) need ``user_id`` and are
 always audited. Automated categorisation goes through ``apply_category`` with a closed
-``AutoCategorySource`` and is never audited row by row (nor are ingest inserts: the import or sync
-run is the record). A request can never pick the audit path: ``"user"`` is not an auto source.
+``AutoCategorySource``: precedence is user > rule > plaid > ml, a lower source returns ``False``
+and changes nothing, and it is never audited row by row, nor are ingest inserts: the import or
+sync run is the record. A request can never pick the audit path: ``"user"`` is not an auto source.
 
 **Failure semantics.** Every check runs before a row is touched. A database failure leaves the
 caller's transaction failed: roll back (``scoped_session`` does on exit). Database errors are
@@ -93,6 +94,14 @@ class AutoCategorySource(enum.StrEnum):
     ML = "ml"
 
 
+# Higher wins. "user" is not an AutoCategorySource; an unknown or missing source ranks lowest.
+SOURCE_RANK = {"ml": 1, "plaid": 2, "rule": 3, "user": 4}
+
+
+def _rank(source: str | None) -> int:
+    return SOURCE_RANK.get(source or "", 0)
+
+
 @dataclass(frozen=True)
 class NewTransaction:
     """A transaction to insert. ``amount`` is signed: outflow negative (Plaid already negated)."""
@@ -138,7 +147,7 @@ def _translate(exc: Exception, denied: type[LedgerNotFoundError]) -> Exception:
     return exc
 
 
-class LedgerService:
+class LedgerWriter:
     def __init__(
         self,
         session: AsyncSession,
@@ -149,7 +158,7 @@ class LedgerService:
     ) -> None:
         bound = session.info.get("household_id")
         if bound is None or bound != household_id:
-            raise ValueError("LedgerService needs a session scoped to this household")
+            raise ValueError("LedgerWriter needs a session scoped to this household")
         self._s = session
         self._household_id: uuid.UUID = bound
         self._user_id = user_id
@@ -210,7 +219,11 @@ class LedgerService:
     # ---------------------------------------------------------------- category
 
     async def set_category(self, transaction_id: uuid.UUID, category_id: uuid.UUID | None) -> None:
-        """A person sets (or clears, with ``None``) a category. Needs ``user_id``; audited."""
+        """A person sets (or clears, with ``None``) a category. Needs ``user_id``; audited.
+
+        Clearing is a choice too: the source stays ``user`` so automation does not refill the row.
+        ``release_category`` hands a row back to automation.
+        """
         user = self._require_user()
         if category_id is not None:
             await self._require_category(category_id)
@@ -218,7 +231,7 @@ class LedgerService:
         self._require_live(txn)
         previous = txn.category_id
         txn.category_id = category_id
-        txn.category_source = None if category_id is None else "user"
+        txn.category_source = "user"
         await self._flush()
         self._audit(
             "ledger.category_set",
@@ -230,24 +243,48 @@ class LedgerService:
             user,
         )
 
+    async def release_category(self, transaction_id: uuid.UUID) -> None:
+        """Hand a row back to automation: clear ``category_source`` and keep the category until an
+        automated source replaces it. Needs ``user_id``; audited."""
+        user = self._require_user()
+        txn = (await self._lock_group([transaction_id]))[transaction_id]
+        self._require_live(txn)
+        previous = txn.category_source
+        txn.category_source = None
+        await self._flush()
+        self._audit(
+            "ledger.category_released",
+            transaction_id,
+            {"previous_source": previous},
+            user,
+        )
+
     async def apply_category(
         self,
         transaction_id: uuid.UUID,
         category_id: uuid.UUID | None,
         source: AutoCategorySource,
-    ) -> None:
-        """Automated categorisation (rules, Plaid, ML). Not audited per row."""
+    ) -> bool:
+        """Automated categorisation (rules, Plaid, ML). Not audited per row.
+
+        Precedence is user > rule > plaid > ml. A source never overwrites a higher-ranked one: the
+        row is left untouched and this returns ``False``. An equal or higher source applies and
+        returns ``True``. A user's choice (including "no category") always holds.
+        """
         try:
-            value = AutoCategorySource(source).value
+            auto = AutoCategorySource(source)
         except ValueError:
             raise LedgerRuleError("unknown category source") from None
         if category_id is not None:
             await self._require_category(category_id)
         txn = (await self._lock_group([transaction_id]))[transaction_id]
         self._require_live(txn)
+        if _rank(txn.category_source) > _rank(auto.value):
+            return False
         txn.category_id = category_id
-        txn.category_source = None if category_id is None else value
+        txn.category_source = None if category_id is None else auto.value
         await self._flush()
+        return True
 
     # ------------------------------------------------------------------ amount
 
