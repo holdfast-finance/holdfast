@@ -1,6 +1,6 @@
 # 0008. Row-level security and per-person visibility
 
-- Status: Accepted (amended 2026-11-19 after the Phase 1 security and money review)
+- Status: Accepted (amended 2026-11-19 after the Phase 1 security and money review; extended by ADR 0025 for rules and derived ledger rows)
 - Date: 2026-11-19
 - Deciders: project engineer (Phase 1, data-model workstream)
 
