@@ -52,6 +52,7 @@ class BlockResult:
     rows_inserted: int
     rows_duplicate: int
     created: bool  # False: this file was already imported; nothing was written
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -209,10 +210,12 @@ async def _unexplained_duplicates(
 ) -> int:
     """How many skipped rows are not explained by an overlapping statement of the same account.
 
-    A duplicate is explained when the existing row came from another document's run on this
-    account and its posted date falls inside both statements' periods: the same real transaction
-    appears on two overlapping statements. A row with no run, from this same document, or dated
-    outside either period is a fingerprint collision or a misread date: unexplained.
+    A skipped row is explained when a row from another document on the same account matches its
+    fingerprint (date, amount, normalized description, same-day ordinal) inside both statement
+    windows: the same real transaction printed on two overlapping statements. A row with no run,
+    from this same document, or dated outside either window is a fingerprint collision or a
+    misread date: unexplained. Residual risk: two genuinely different purchases that collide on
+    all four across overlapping statements cannot be told apart.
     """
     if not fingerprints:
         return 0
@@ -272,6 +275,12 @@ async def _import_block(
         .first()
     )
     if prior is not None:
+        reason = None
+        if prior.reconcile_status == "needs_review":
+            reason = block.reconciliation.reason
+            # A successful run with balanced parsed rows was flagged for its skipped rows.
+            if block.reconciliation.status == "reconciled" and prior.rows_duplicate:
+                reason = "unexplained_duplicates"
         return BlockResult(
             prior.id,
             acct.id,
@@ -280,6 +289,7 @@ async def _import_block(
             0,
             prior.rows_parsed,
             created=False,
+            reason=reason,
         )
 
     run = ImportRun(
@@ -331,5 +341,12 @@ async def _import_block(
     run.finished_at = datetime.now(UTC)
     await s.flush()
     return BlockResult(
-        run.id, acct.id, run.reconcile_status, len(block.txns), inserted, run.rows_duplicate, True
+        run.id,
+        acct.id,
+        run.reconcile_status,
+        len(block.txns),
+        inserted,
+        run.rows_duplicate,
+        created=True,
+        reason=rec.reason or ("unexplained_duplicates" if unexplained else None),
     )

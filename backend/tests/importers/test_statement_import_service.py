@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -15,6 +16,7 @@ from app.domain.ledger_rules import InvalidAmountError
 from app.domain.statement_parse import ParsedStatement, detect_profile, parse_statement
 from app.importers.profile_loader import load_profiles
 from app.models import Account, Document, ImportRun, Transaction
+from app.services.ledger_service import LedgerService, NewTransaction
 from app.services.statement_import import (
     AccountNotVisibleError,
     DocumentMeta,
@@ -98,6 +100,52 @@ async def test_same_rows_in_a_different_file_are_deduplicated_by_fingerprint(
     assert await _count(factory, household, Transaction) == before
     assert again.rows_inserted == 0
     assert sum(b.rows_duplicate for b in again.blocks) == before
+    assert all(b.created and b.reconcile_status == "reconciled" for b in again.blocks)
+
+
+@pytest.mark.parametrize("existing_row", ["manual", "outside_prior_window"])
+async def test_unexplained_duplicate_needs_review(
+    factory: async_sessionmaker[AsyncSession], household: uuid.UUID, existing_row: str
+) -> None:
+    st = _parse(NFCU_CARD)
+    (parsed,) = st.blocks
+    assert parsed.reconciliation.status == "reconciled"
+    txn = next(t for t in parsed.txns if t.amount == Decimal("80.00"))
+    if existing_row == "manual":
+        payment = next(
+            line for line in NFCU_CARD.splitlines(keepends=True) if "EXAMPLE PAYMENT" in line
+        )
+        seed = _parse(NFCU_CARD.replace(payment, "").replace("$200.00", "$120.00"))
+        assert seed.blocks[0].reconciliation.status == "reconciled"
+    else:
+        seed = dataclasses.replace(st, period_start=txn.posted_date + timedelta(days=1))
+    first = await import_statement(factory, household, seed, _meta(10), household_wide=True)
+    (original,) = first.blocks
+    if existing_row == "manual":
+        async with scoped_session(factory, household, None, household_wide=True) as s:
+            await LedgerService(s, household).insert_transaction(
+                NewTransaction(
+                    account_id=original.account_id,
+                    posted_date=txn.posted_date,
+                    amount=txn.amount,
+                    description_raw=txn.description,
+                    source="manual",
+                    import_fingerprint=txn.fingerprint,
+                )
+            )
+
+    again = await import_statement(factory, household, st, _meta(11), household_wide=True)
+    (block,) = again.blocks
+    assert block.created
+    assert block.rows_inserted == 0
+    assert block.rows_duplicate == len(parsed.txns)
+    assert block.reconcile_status == "needs_review"
+    assert block.reason == "unexplained_duplicates"
+
+    retry = await import_statement(factory, household, st, _meta(11), household_wide=True)
+    (retried,) = retry.blocks
+    assert not retried.created
+    assert retried.reason == block.reason
 
 
 async def test_unreconciled_statement_is_flagged_and_latches_the_document(

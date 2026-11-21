@@ -351,6 +351,14 @@ def _yearless(period: str, rows: list[str], closing: str) -> list[date]:
     return [t.posted_date for t in parse_statement(text, _profile(extra=extra)).blocks[0].txns]
 
 
+@pytest.mark.parametrize("period", ["01/01/25 - 12/31/25", "12/01/24 - 12/31/25"])
+def test_year_less_rows_prefer_the_statement_period_over_grace(period: str) -> None:
+    assert _yearless(period, ["01-01 First post 1.00", "12-31 Last post 1.00"], "$2.00") == [
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+    ]
+
+
 def test_year_less_row_just_after_a_january_period_end_stays_in_the_period_year() -> None:
     # 02-03 is 3 days after 01/31/25: inside the +7 day grace, so 2025, not 2024.
     assert _yearless("01/04/25 - 01/31/25", ["02-03 Late post 1.00"], "$1.00") == [date(2025, 2, 3)]

@@ -237,10 +237,10 @@ def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None
     """Read a printed row date. A year-less date takes the year that best fits the statement.
 
     Candidates are the period end's year and its neighbours (Dec/Jan statements, a row a few days
-    past the end). One inside ``[period_start, period_end + 7 days]`` wins (card statements with
-    no printed start allow two months back); otherwise the candidate nearest the period end. A
-    candidate year where the day does not exist (Feb 29) is skipped. Dates that print a year are
-    taken as printed.
+    past the end). Prefer a candidate inside the period, then one in the posting grace, then
+    any candidate. Within each group the candidate nearest the period end wins. Card statements
+    with no printed start allow two months back. A candidate year where the day does not exist
+    (Feb 29) is skipped. Dates that print a year are taken as printed.
     """
     if "%y" in fmt or "%Y" in fmt:
         try:
@@ -262,8 +262,9 @@ def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None
         raise StatementParseError("unreadable date")
     lower = period_start if period_start is not None else _months_back(period_end, 2)
     upper = period_end + timedelta(days=7)
-    inside = [d for d in candidates if lower <= d <= upper]
-    return min(inside or candidates, key=lambda d: abs((d - period_end).days))
+    inside = [d for d in candidates if lower <= d <= period_end]
+    with_grace = [d for d in candidates if lower <= d <= upper]
+    return min(inside or with_grace or candidates, key=lambda d: abs((d - period_end).days))
 
 
 def _block_key(name: str) -> str:
