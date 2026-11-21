@@ -9,7 +9,7 @@ brokerage and crypto live in one place, with sync health you can see, full histo
 statements, honest forecasts that publish their own error, and a private AI advisor that runs on
 the model you choose (Claude, a local Ollama model, or any OpenAI-compatible endpoint).
 
-> Status: **pre-alpha, in development.** See [`docs/STATUS.md`](docs/STATUS.md).
+> Status: **v0.0.0-alpha, a foundation release.** Auth, households and the data model work. Bank sync, import, budgets, forecasts, credit, tax, the AI advisor and crypto are not built yet. See [release notes](docs/releases/v0.0.0-alpha.md) and [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Why
 
@@ -22,13 +22,16 @@ the model you choose (Claude, a local Ollama model, or any OpenAI-compatible end
 
 ## Self-host
 
-Coming in Phase 0. The target experience is:
+The alpha runs as a dev stack with synthetic data only. Don't use real financial data yet.
 
 ```sh
-docker compose up -d holdfast
+make keys && make up && make migrate   # Windows: ./scripts/dev.ps1 keys | up | migrate
 ```
 
-It runs privately behind Tailscale on your own domain and installs on your phone as a PWA.
+Then open https://localhost (self-signed in dev). There is no upgrade path before beta. Artifacts,
+checksums and limits are in the [release notes](docs/releases/v0.0.0-alpha.md).
+
+Private access over Tailscale and PWA install are planned, not shipped.
 
 ## Docs
 

@@ -25,7 +25,7 @@ A public version release is two GitHub objects, and both point at the same commi
 - Release notes live at `docs/releases/<tag>.md`. The plan refuses a missing file.
 - The Release is created on `holdfast-finance/holdfast`, not on a fork.
 - Changing `version` in a pull request does not create either object. `make release-check` only compares the two version strings. After that commit is on `main` and the stage evidence above is recorded, Keel runs `python3 scripts/cut_release.py plan --sha <sha>` and then those commands. Nobody else publishes.
-- The repository can be private when the tag is created. The release becomes public when the repository does (PLAN §17.6). Do not cut `v0.0.0-alpha` before that commit is on `main`.
+- The repository is public, and every upload to PyPI or a container registry is public and permanent ([ADR 0018](../adr/0018-release-artifact-registries.md)). Do not cut `v0.0.0-alpha` before that commit is on `main`.
 
 ## Compatibility and promotion
 
