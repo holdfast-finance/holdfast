@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -64,6 +65,33 @@ class ImportResult:
     @property
     def rows_inserted(self) -> int:
         return sum(b.rows_inserted for b in self.blocks)
+
+
+UNKNOWN_REASON = "unknown"
+TOLERANCE = Decimal("0.01")
+
+
+def infer_review_reason(run: ImportRun) -> str:
+    """Best guess at why a run created before ``review_reason`` existed was flagged.
+
+    Only from the stored figures (never by re-parsing): a missing balance, a diff over a cent, or
+    skipped rows. A date problem leaves no trace in the figures, so it reads as ``unknown``.
+    """
+    if run.opening_balance is None or run.closing_balance is None:
+        return "missing_balance"
+    if run.balance_diff is not None and abs(run.balance_diff) > TOLERANCE:
+        return "balance_mismatch"
+    if run.rows_duplicate:
+        return "unexplained_duplicates"
+    return UNKNOWN_REASON
+
+
+def stored_review_reason(run: ImportRun) -> str | None:
+    """The reason to show for ``run``: only while it needs review (the column keeps the history
+    after an accept). Stored, else inferred for a flagged legacy run."""
+    if run.reconcile_status != "needs_review":
+        return None
+    return run.review_reason or infer_review_reason(run)
 
 
 def external_account_key(statement: ParsedStatement, block: ParsedBlock) -> str:
@@ -173,6 +201,12 @@ async def import_statement(
     """
     async with scoped_session(factory, household_id, person_id, household_wide=household_wide) as s:
         doc = await _document(s, household_id, meta, statement.profile_id, person_id)
+        elsewhere = await _runs_under_other_profile(s, doc.id, statement.profile_id)
+        if elsewhere:
+            # The same bytes were already imported under another profile. Their accounts are keyed
+            # by profile, so importing again would copy every row into a second account and
+            # double-count it. Report the earlier runs and write nothing.
+            return ImportResult(doc.id, tuple(elsewhere))
         if statement.status == "balances_only":
             # Nothing was reconciled and no transactions exist, so it is never `parsed`. Flag it
             # for a person (hard rule 6): there is no run to carry the flag, so set the document's
@@ -192,6 +226,42 @@ async def import_statement(
         ):
             doc.parse_status = "parsed"
         return ImportResult(doc.id, tuple(results))
+
+
+async def _runs_under_other_profile(
+    s: AsyncSession, document_id: uuid.UUID, profile_id: str
+) -> list[BlockResult]:
+    """The document's finished runs when none were made under ``profile_id``; else empty."""
+    runs = (
+        (
+            await s.execute(
+                select(ImportRun)
+                .where(
+                    ImportRun.document_id == document_id,
+                    ImportRun.status == "succeeded",
+                    ImportRun.account_id.is_not(None),
+                )
+                .order_by(ImportRun.created_at, ImportRun.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not runs or any(r.profile == profile_id for r in runs):
+        return []
+    return [
+        BlockResult(
+            r.id,
+            r.account_id,  # type: ignore[arg-type]  # filtered NOT NULL above
+            r.reconcile_status,
+            r.rows_parsed,
+            0,
+            r.rows_parsed,
+            created=False,
+            reason=stored_review_reason(r) if r.reconcile_status == "needs_review" else None,
+        )
+        for r in runs
+    ]
 
 
 def _window(start: date | None, end: date | None) -> tuple[date, date] | None:
@@ -277,10 +347,13 @@ async def _import_block(
     if prior is not None:
         reason = None
         if prior.reconcile_status == "needs_review":
-            reason = block.reconciliation.reason
-            # A successful run with balanced parsed rows was flagged for its skipped rows.
-            if block.reconciliation.status == "reconciled" and prior.rows_duplicate:
-                reason = "unexplained_duplicates"
+            if prior.review_reason:
+                reason = prior.review_reason
+            else:  # flagged before the reason was stored: best guess from this parse
+                reason = block.reconciliation.reason
+                if block.reconciliation.status == "reconciled" and prior.rows_duplicate:
+                    reason = "unexplained_duplicates"
+                reason = reason or infer_review_reason(prior)
         return BlockResult(
             prior.id,
             acct.id,
@@ -334,9 +407,12 @@ async def _import_block(
     # A skipped row must be a re-import or an overlapping period. Otherwise the balances tie out
     # on the parsed sum while the ledger holds fewer rows: never call that reconciled.
     unexplained = await _unexplained_duplicates(s, acct.id, doc.id, run, skipped)
-    run.reconcile_status = (
-        "reconciled" if rec.status == "reconciled" and not unexplained else "needs_review"
-    )
+    reason = rec.reason if rec.status != "reconciled" else None
+    if rec.status == "reconciled" and unexplained:
+        reason = "unexplained_duplicates"
+    run.reconcile_status = "needs_review" if reason or rec.status != "reconciled" else "reconciled"
+    flagged = run.reconcile_status == "needs_review"
+    run.review_reason = (reason or UNKNOWN_REASON) if flagged else None
     run.status = "succeeded"
     run.finished_at = datetime.now(UTC)
     await s.flush()
@@ -348,5 +424,5 @@ async def _import_block(
         inserted,
         run.rows_duplicate,
         created=True,
-        reason=rec.reason or ("unexplained_duplicates" if unexplained else None),
+        reason=run.review_reason,
     )
