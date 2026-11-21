@@ -37,6 +37,7 @@ dependencies = [
     # Statement import reads PDFs in the api and worker, so this is not optional.
     "pdfplumber>=0.11.10",
     "python-multipart>=0.0.20",
+    "httpx>=0.28",
 ]
 
 [dependency-groups]
