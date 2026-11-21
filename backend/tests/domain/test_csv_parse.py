@@ -51,7 +51,7 @@ def test_split_columns_and_explicit_indexed_header() -> None:
         {**INDEXED, "amount": None, "debit": 2, "credit": 3, "header": "present"}
     )
     result = parse_csv(
-        "D,Text,Spent,Received\n2026-01-01,Store,(4.00),\n2026-01-02,Pay,,10.00".encode("utf-16"),
+        "D,Text,Spent,Received\n2026-01-01,Store,4.00,\n2026-01-02,Pay,,10.00".encode("utf-16"),
         profile,
     )
     assert [item.amount for item in result.txns] == [Decimal("-4.00"), Decimal("10.00")]
@@ -134,3 +134,62 @@ def test_repeated_exports_have_stable_distinct_fingerprints() -> None:
         ]
         assert len(set(fingerprints)) == count
         assert all(isinstance(t.amount, Decimal) for t in first.txns)
+
+
+def test_negative_debit_or_credit_is_rejected_unless_the_profile_opts_in() -> None:
+    split = {**INDEXED, "amount": None, "debit": 2, "credit": 3}
+    for row in ("2026-01-01,Store,-4.00,", "2026-01-01,Store,(4.00),", "2026-01-01,Pay,,-10.00"):
+        with pytest.raises(StatementParseError, match="negative debit or credit"):
+            parse_csv(row, csv_profile_from_mapping(split))
+    reverse = csv_profile_from_mapping({**split, "negative_split": "reverse"})
+    result = parse_csv("2026-01-01,Refund,-4.00,\n2026-01-02,Reversal,,-10.00", reverse)
+    assert [t.amount for t in result.txns] == [Decimal("4.00"), Decimal("-10.00")]
+    with pytest.raises(StatementParseError, match="negative_split"):
+        csv_profile_from_mapping({**PROFILE, "negative_split": "reverse"})
+    with pytest.raises(StatementParseError, match="negative_split must be"):
+        csv_profile_from_mapping({**split, "negative_split": "flip"})
+
+
+def test_negative_zero_is_zero_and_fingerprints_agree_across_sign_options() -> None:
+    plain = parse_csv("2026-01-01,Fee,-0.00", csv_profile_from_mapping(INDEXED))
+    flipped = parse_csv(
+        "2026-01-01,Fee,0.00", csv_profile_from_mapping(dict(INDEXED, sign="inverted"))
+    )
+    positive = parse_csv("2026-01-01,Fee,0.00", csv_profile_from_mapping(INDEXED))
+    assert str(plain.txns[0].amount) == str(flipped.txns[0].amount) == "0.00"
+    assert plain.txns[0].fingerprint == flipped.txns[0].fingerprint == positive.txns[0].fingerprint
+
+
+def test_card_balance_sign_lets_positive_owed_balances_reconcile() -> None:
+    body = "2026-01-01,Shop,-30.00,130.00\n2026-01-02,Payment,50.00,80.00"
+    owed = csv_profile_from_mapping({**INDEXED, "balance": 3, "balance_sign": "invert"})
+    result = parse_csv(body, owed)
+    assert result.opening_balance == Decimal("-100.00")
+    assert result.closing_balance == Decimal("-80.00")
+    assert result.reconciliation.status == "reconciled"
+    plain = parse_csv(body, csv_profile_from_mapping({**INDEXED, "balance": 3}))
+    assert plain.reconciliation.reason == "balance_mismatch"
+    with pytest.raises(StatementParseError, match="balance_sign"):
+        csv_profile_from_mapping({**INDEXED, "balance_sign": "flip"})
+    with pytest.raises(StatementParseError, match="requires a balance column"):
+        csv_profile_from_mapping({**INDEXED, "balance_sign": "invert"})
+
+
+@pytest.mark.parametrize("encoding", ["utf-7", "utf-16-be-sig", "rot13", "idna", "punycode"])
+def test_csv_profile_encoding_is_an_allowlist(encoding: str) -> None:
+    with pytest.raises(StatementParseError, match="text encoding"):
+        csv_profile_from_mapping({**PROFILE, "encoding": encoding})
+    assert csv_profile_from_mapping({**PROFILE, "encoding": "Windows-1252"}).encoding == "cp1252"
+
+
+def test_undecodable_csv_bytes_raise_a_generic_parse_error() -> None:
+    profile = csv_profile_from_mapping(dict(INDEXED, encoding="ascii"))
+    with pytest.raises(StatementParseError, match="cannot be decoded"):
+        parse_csv("2026-01-01,Café,1.00".encode(), profile)
+
+
+def test_separated_card_numbers_are_masked_in_csv_descriptions() -> None:
+    body = "2026-01-01,Pay 4111-1111-1111-1111 and 4111 1111 1111 1111 on 2026-01-15,1.00"
+    (txn,) = parse_csv(body, csv_profile_from_mapping(INDEXED)).txns
+    assert "4111" not in txn.description and "1111" not in txn.description
+    assert "2026-01-15" in txn.description

@@ -12,9 +12,9 @@ from decimal import Decimal, DecimalException
 from io import StringIO
 from typing import Literal
 
-from app.domain.money import ZERO, as_inflow, as_outflow
+from app.domain.money import ZERO
 from app.domain.statement_parse import StatementParseError, parse_amount
-from app.domain.tabular_statement import ExportRows, TransactionExport
+from app.domain.tabular_statement import ExportRows, TransactionExport, resolve_encoding
 
 Column = str | int
 
@@ -33,6 +33,13 @@ class CsvProfile:
     delimiter: str = ","
     encoding: str = "utf-8"
     newest_first: bool = False
+    # Sign of the printed running balance. Card exports often print the amount owed as positive:
+    # "invert" turns that into Holdfast's sign (owed negative).
+    balance_sign: Literal["as_is", "invert"] = "as_is"
+    # What a negative number in a debit or credit column means. "reject" (default): an error,
+    # because the column says which way the money moved. "reverse": the cell keeps its sign, so a
+    # negative debit is a refund (inflow) and a negative credit a reversal (outflow).
+    negative_split: Literal["reject", "reverse"] = "reject"
 
 
 def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
@@ -92,10 +99,22 @@ def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
     encoding = data.get("encoding", "utf-8")
     if not isinstance(encoding, str):
         raise StatementParseError("CSV profile encoding must be a text encoding")
-    try:
-        "a".encode(encoding)
-    except (LookupError, UnicodeError, ValueError):
-        raise StatementParseError("CSV profile encoding must be a text encoding") from None
+    codec = resolve_encoding(encoding)
+    if codec is None:
+        raise StatementParseError(
+            "CSV profile encoding must be a text encoding: utf-8, utf-16, utf-32, cp1252, "
+            "iso-8859-1 or ascii"
+        )
+    balance_sign = data.get("balance_sign", "as_is")
+    if balance_sign != "as_is" and balance_sign != "invert":
+        raise StatementParseError("CSV profile balance_sign must be as_is or invert")
+    if balance_sign == "invert" and balance is None:
+        raise StatementParseError("CSV profile balance_sign requires a balance column")
+    negative_split = data.get("negative_split", "reject")
+    if negative_split != "reject" and negative_split != "reverse":
+        raise StatementParseError("CSV profile negative_split must be reject or reverse")
+    if negative_split == "reverse" and amount is not None:
+        raise StatementParseError("CSV profile negative_split requires debit and credit columns")
     newest_first = data.get("newest_first", False)
     if not isinstance(newest_first, bool):
         raise StatementParseError("CSV profile newest_first must be a boolean")
@@ -110,8 +129,10 @@ def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
         "inverted" if sign == "inverted" else "as_printed",
         "present" if header == "present" else "absent" if header == "absent" else "auto",
         delimiter,
-        encoding,
+        codec,
         newest_first,
+        "invert" if balance_sign == "invert" else "as_is",
+        "reverse" if negative_split == "reverse" else "reject",
     )
 
 
@@ -141,7 +162,9 @@ def _row_amount(cells: Mapping[Column, str], profile: CsvProfile) -> Decimal:
         credit = parse_amount(credit_cell) if credit_cell else ZERO
         if debit and credit:
             raise StatementParseError("both debit and credit amounts are nonzero")
-        return as_outflow(debit) + as_inflow(credit)
+        if (debit < 0 or credit < 0) and profile.negative_split == "reject":
+            raise StatementParseError("negative debit or credit amount")
+        return credit - debit
     else:
         raise StatementParseError("CSV profile requires either amount or both debit and credit")
 
@@ -198,6 +221,8 @@ def parse_csv(source: str | bytes, profile: CsvProfile) -> TransactionExport:
                 raise StatementParseError("missing description")
             amount = _row_amount(cells, profile)
             balance = parse_amount(cells[profile.balance]) if profile.balance is not None else None
+            if balance is not None and profile.balance_sign == "invert":
+                balance = -balance
             result.add(posted, description, amount, balance)
         except StatementParseError as exc:
             raise StatementParseError(f"CSV row {line}: {exc}") from None
