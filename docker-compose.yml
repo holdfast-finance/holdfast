@@ -134,6 +134,14 @@ services:
 
   api:
     <<: *backend
+    # Upload sizing (ADR 0020). Starlette spools each multipart upload to /tmp; at most 2 are read
+    # at once (PARSE_SLOTS), each up to 21 MiB, so 64m holds both with headroom. tmpfs pages count
+    # against mem_limit. 1536m = ~150 MB idle API + 2 concurrent PDF parses (pdfplumber builds an
+    # object tree per page; budgeted ~500 MB each for a 20 MiB file, an estimate, not a
+    # measurement) + the 64 MB tmpfs, rounded up. Revisit with a measured peak.
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 1536m
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test:
