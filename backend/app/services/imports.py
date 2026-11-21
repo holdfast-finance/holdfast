@@ -61,6 +61,7 @@ from app.services.statement_import import (
     BlockResult,
     DocumentMeta,
     import_statement,
+    stored_review_reason,
 )
 
 PDF_MAGIC = b"%PDF-"
@@ -499,7 +500,9 @@ class ImportService:
                         "rows_inserted": r.rows_inserted,
                         "rows_duplicate": r.rows_duplicate,
                         "created": r.created,
-                        "reason": r.reason if run.reconcile_status == "needs_review" else None,
+                        "reason": (r.reason or stored_review_reason(run))
+                        if run.reconcile_status == "needs_review"
+                        else None,
                     }
                 )
             )
@@ -521,6 +524,7 @@ class ImportService:
                 "currency": cur,
                 "status": run.status,
                 "reconcile_status": run.reconcile_status,
+                "reason": stored_review_reason(run),
                 "period_start": run.period_start,
                 "period_end": run.period_end,
                 "opening_balance": run.opening_balance,

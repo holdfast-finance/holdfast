@@ -463,15 +463,20 @@ async def test_concurrent_identical_uploads_one_wins_one_conflicts_file_stays(
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
     data = pdf_bytes(NFCU_CARD)
-    async with await member_client(app, hid) as sam:
-        a, b = await asyncio.gather(upload(owner.client, data), upload(sam, data))
-    assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
-    assert await count(app, hid, Document) == 1
-    (path,) = stored_files(store)
-    assert path.read_bytes() == data
-    # The same user cannot run two at once, and a later sequential re-upload is the ordinary 200.
-    again = await upload(owner.client, data)
-    assert again.status_code == 200 and again.json()["created"] is False
+    async with await member_client(app, hid) as sam_client:
+        a, b = await asyncio.gather(upload(owner.client, data), upload(sam_client, data))
+        assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
+        assert await count(app, hid, Document) == 1
+        (path,) = stored_files(store)
+        assert path.read_bytes() == data
+        # A later sequential re-upload by whoever won is the ordinary 200. Not by the loser: the
+        # winner's document and account are that person's own and private (ADR 0008), so the
+        # other member correctly gets a 409. Which of the two wins is a race, so follow it.
+        a_won = a.status_code == 200
+        winner, loser = (owner.client, sam_client) if a_won else (sam_client, owner.client)
+        again = await upload(winner, data)
+        assert again.status_code == 200 and again.json()["created"] is False
+        assert (await upload(loser, data)).status_code == 409
 
 
 async def test_the_same_user_cannot_run_two_identical_uploads_at_once(owner: Owner) -> None:

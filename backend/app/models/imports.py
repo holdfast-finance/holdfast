@@ -128,6 +128,11 @@ class ImportRun(Base):
             name="succeeded_is_reconciled",
         ),
         CheckConstraint("error_class IS NULL OR status = 'failed'", name="error_only_on_failure"),
+        CheckConstraint(
+            "review_reason IS NULL OR (length(review_reason) <= 120"
+            " AND review_reason ~ '^[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*$')",
+            name="review_reason_format",
+        ),
         parent_key(),
     )
 
@@ -162,6 +167,9 @@ class ImportRun(Base):
     rows_superseded: Mapped[int] = mapped_column(server_default=text("0"))
     # Exception class name only (CHECK); messages can carry account numbers (hard rule 3).
     error_class: Mapped[str | None]
+    # Why the run was flagged: stable code(s) from the parser, comma-joined. Set with the flag.
+    # NULL on a reconciled run and on a needs_review run created before the column existed.
+    review_reason: Mapped[str | None]
     reviewed_by_user_id: Mapped[uuid.UUID | None]
     reviewed_at: Mapped[datetime | None]
     created_at: Mapped[CreatedAt]

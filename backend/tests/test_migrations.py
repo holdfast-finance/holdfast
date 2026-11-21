@@ -36,7 +36,7 @@ def _extensions(database_url: str) -> set[str]:
 
 def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0008_category_tree"]
+    assert script.get_heads() == ["0009_import_run_review_reason"]
 
 
 @pytest.mark.services
@@ -218,13 +218,13 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
 
         # A budget line on a system category blocks the downgrade, and nothing is changed.
         with pytest.raises(RuntimeError, match="budget line"):
-            command.downgrade(cfg, "-1")
+            command.downgrade(cfg, "0007_transaction_live_index")
         assert total() == (n + 3, n)
         with engine.begin() as c:
             ctx(c, hid)
             c.execute(text("DELETE FROM budget_line WHERE id = :i"), {"i": line})
 
-        command.downgrade(cfg, "-1")
+        command.downgrade(cfg, "0007_transaction_live_index")
         with engine.begin() as c:
             ctx(c, hid)
             assert c.execute(text("SELECT count(*) FROM category")).scalar_one() == 3
