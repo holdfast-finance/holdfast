@@ -362,7 +362,9 @@ def parse_statement(text: str, profile: Profile) -> ParsedStatement:
             else:
                 row_date = end
             printed = parse_amount(rm.group("amount") + ("-" if groups_.get("neg") else ""))
-            cur.rows.append((row_date, desc, _apply_sign(printed, active.sign)))
+            amount = _apply_sign(printed, active.sign)
+            if amount != ZERO:  # a $0.00 row (e.g. zero interest) changes nothing; not imported
+                cur.rows.append((row_date, desc, amount))
             pending = None
         elif line.strip():
             sm = active.wrap_start.search(line) if active.wrap_start else None
