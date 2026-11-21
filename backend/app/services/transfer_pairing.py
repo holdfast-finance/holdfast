@@ -2,16 +2,28 @@
 
 ``pair_transfers`` works on a session the caller opened with ``scoped_session`` and commits
 nothing. Reads follow that session's RLS context, so a person-scoped session only sees (and pairs)
-accounts that person may see and write; the household-wide context belongs to system jobs only
-(never a request handler). Pairs are written through ``LedgerWriter.apply_transfer_pair``, the one
-writer, each inside a savepoint so a leg the session cannot write, or that another worker paired
-first, is skipped without failing the rest.
+accounts that person may see and write. Pairs are written through
+``LedgerWriter.apply_transfer_pair``, the one writer, each inside a savepoint so a leg the session
+cannot write, or that changed since it was loaded, is skipped without failing the rest. The call
+needs an acting ``user_id`` or a household-wide system-job session; a request handler cannot run
+it "as the system".
 
-Idempotent: paired rows are excluded from the next run, so a rerun pairs nothing new. Ambiguous
-legs are **returned, not stored**: there is no review table yet (story C6 must persist them).
-Candidates are loaded from ``MAX_DAYS`` before ``date_from`` to ``MAX_DAYS`` after ``date_to`` so a
-leg at the edge of the window still finds its partner; a pair or ambiguity is reported only if at
-least one of its legs posted inside the window.
+**NOT SAFE TO SCHEDULE YET.** A person who undoes an automatic pair (``unmark_transfer``) would
+have it re-paired on the next run, because nothing records the rejection. Story C6 must add a
+rejection record (pair-level "not a transfer", needs a migration) and make this function honor it
+before any scheduled caller exists. Until then nothing registers it as a job and
+``tests/ledger/test_transfer_pairing_guard.py`` fails if it, or ``apply_transfer_pair``, is
+referenced from the job registry or ``app/api/``. As a partial guard, rows a person categorized or
+split are never auto-paired (they come back as suggestions).
+
+What is written: only confirmed pairs with at least one wording or mask hint, between accounts
+one person could undo. Everything else is returned, never written: ``suggested`` (a likely pair
+without a hint, a refund candidate, a row the person treated as spending, accounts of two
+different owners) and ``ambiguous`` (ties).
+
+Idempotent: paired rows leave the candidate pool, so a rerun pairs nothing new. The result does
+not depend on the window: candidates load ``2 * MAX_DAYS`` beyond it, and anything whose legs
+lie outside the window within ``MAX_DAYS`` of the load edge is dropped.
 """
 
 from __future__ import annotations
@@ -20,7 +32,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.ledger_rules import LedgerRuleError
@@ -28,10 +40,11 @@ from app.domain.transfers import (
     MAX_DAYS,
     AmbiguousLeg,
     ProposedPair,
+    SuggestedPair,
     TransferCandidate,
     match_transfers,
 )
-from app.models import Account, Transaction
+from app.models import Account, Transaction, TransactionSplit
 from app.security.client_ip import IPAddress
 from app.services.ledger_service import LedgerRetryableError, LedgerWriter
 
@@ -45,7 +58,15 @@ class PairedTransfer:
 
 @dataclass(frozen=True)
 class PairingReport:
+    """What a run did and found.
+
+    A household-wide run reports ids from every person's private accounts, so a report must never
+    be returned over an API. C6 must store ``suggested`` and ``ambiguous`` per person, with an RLS
+    check, and show each person only legs on accounts they may see.
+    """
+
     paired: tuple[PairedTransfer, ...]
+    suggested: tuple[SuggestedPair, ...]
     ambiguous: tuple[AmbiguousLeg, ...]
     skipped: tuple[ProposedPair, ...]
 
@@ -61,24 +82,36 @@ async def pair_transfers(
 ) -> PairingReport:
     if date_from > date_to:
         raise LedgerRuleError("the start date is after the end date")
-    pad = timedelta(days=MAX_DAYS)
+    writer = LedgerWriter(session, household_id, user_id=user_id, ip=ip)  # fails fast on mismatch
+    if user_id is None and not session.info.get("household_wide"):
+        raise LedgerRuleError("pairing needs an acting user or a system job session")
+    pad = timedelta(days=2 * MAX_DAYS)
+    near = timedelta(days=MAX_DAYS)
+    load_from, load_to = date_from - pad, date_to + pad
+    has_splits = exists().where(TransactionSplit.transaction_id == Transaction.id)
     rows = (
         await session.execute(
-            select(Transaction, Account.type, Account.currency, Account.mask)
+            select(
+                Transaction,
+                Account.type,
+                Account.currency,
+                Account.mask,
+                Account.owner_person_id,
+                has_splits,
+            )
             .join(Account, Account.id == Transaction.account_id)
             .where(
                 Transaction.household_id == household_id,
-                Transaction.posted_date >= date_from - pad,
-                Transaction.posted_date <= date_to + pad,
+                Transaction.posted_date >= load_from,
+                Transaction.posted_date <= load_to,
                 Transaction.superseded_by_id.is_(None),
                 Transaction.is_transfer.is_(False),
-                Transaction.is_pending.is_(False),
             )
         )
     ).all()
     posted: dict[uuid.UUID, date] = {}
     cands: list[TransferCandidate] = []
-    for t, acct_type, currency, mask in rows:
+    for t, acct_type, currency, mask, owner, split in rows:
         posted[t.id] = t.posted_date
         cands.append(
             TransferCandidate(
@@ -90,18 +123,26 @@ async def pair_transfers(
                 description=t.description_raw,
                 account_type=acct_type,
                 account_mask=mask,
+                is_pending=t.is_pending,
+                protected=t.category_source == "user" or bool(split),
+                owner_person_id=owner,
             )
         )
 
-    def inside(*ids: uuid.UUID) -> bool:
-        return any(date_from <= posted[i] <= date_to for i in ids)
+    def reportable(*ids: uuid.UUID) -> bool:
+        if not any(date_from <= posted[i] <= date_to for i in ids):
+            return False
+        # A leg outside the window and close to the load edge may have lost a competitor there.
+        return all(
+            date_from <= posted[i] <= date_to or (load_from + near <= posted[i] <= load_to - near)
+            for i in ids
+        )
 
     result = match_transfers(cands)
-    writer = LedgerWriter(session, household_id, user_id=user_id, ip=ip)
     paired: list[PairedTransfer] = []
     skipped: list[ProposedPair] = []
     for pair in result.pairs:
-        if not inside(pair.outflow_id, pair.inflow_id):
+        if not reportable(pair.outflow_id, pair.inflow_id):
             continue
         failure: LedgerRuleError | LedgerRetryableError | None = None
         group: uuid.UUID | None = None
@@ -114,5 +155,6 @@ async def pair_transfers(
             skipped.append(pair)
         else:
             paired.append(PairedTransfer(pair.outflow_id, pair.inflow_id, group))
-    ambiguous = tuple(a for a in result.ambiguous if inside(a.transaction_id, *a.candidate_ids))
-    return PairingReport(tuple(paired), ambiguous, tuple(skipped))
+    suggested = tuple(x for x in result.suggested if reportable(x.outflow_id, x.inflow_id))
+    ambiguous = tuple(a for a in result.ambiguous if reportable(a.transaction_id, *a.candidate_ids))
+    return PairingReport(tuple(paired), suggested, ambiguous, tuple(skipped))

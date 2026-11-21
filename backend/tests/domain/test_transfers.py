@@ -23,12 +23,15 @@ def c(
     amount: str,
     *,
     days: int = 0,
-    desc: str = "EXAMPLE",
+    desc: str = "TRANSFER",
     kind: str = "depository",
     cur: str = "USD",
     mask: str | None = None,
     in_transfer: bool = False,
     superseded: bool = False,
+    pending: bool = False,
+    protected: bool = False,
+    owner: uuid.UUID | None = None,
 ) -> TransferCandidate:
     return TransferCandidate(
         uuid.UUID(int=n),
@@ -41,6 +44,9 @@ def c(
         mask,
         in_transfer,
         superseded,
+        pending,
+        protected,
+        owner,
     )
 
 
@@ -145,6 +151,8 @@ def pools(draw: st.DrawFn) -> list[TransferCandidate]:
             draw(st.sampled_from(["5.00", "-5.00", "7.50", "-7.50"])),
             days=draw(st.integers(0, 8)),
             cur=draw(st.sampled_from(["USD", "USD", "EUR"])),
+            desc=draw(st.sampled_from(["TRANSFER", "EXAMPLE"])),
+            pending=draw(st.booleans()),
         )
         for i in range(n)
     ]
@@ -159,8 +167,75 @@ def test_order_independent_and_invariants(pool: list[TransferCandidate], seed: i
     used: set[uuid.UUID] = set()
     for p in match_transfers(pool).pairs:
         o, i = by_id[p.outflow_id], by_id[p.inflow_id]
+        assert not o.is_pending and not i.is_pending
         assert o.amount < 0 < i.amount and o.amount == -i.amount
         assert o.account_id != i.account_id and o.currency == i.currency
         assert abs((o.posted_date - i.posted_date).days) <= 5
         assert not {p.outflow_id, p.inflow_id} & used
         used |= {p.outflow_id, p.inflow_id}
+    for x in match_transfers(pool).suggested:
+        assert not {x.outflow_id, x.inflow_id} & used
+        used |= {x.outflow_id, x.inflow_id}
+
+
+def test_refund_on_a_card_is_suggested_never_paired() -> None:
+    r = match_transfers(
+        [
+            c(1, CHK, "-50.00", desc="EXAMPLE MART"),
+            c(2, CARD, "50.00", days=3, desc="EXAMPLE MART REFUND", kind="credit"),
+        ]
+    )
+    assert not r.pairs and not r.ambiguous
+    assert [(s.outflow_id.int, s.inflow_id.int, s.reason) for s in r.suggested] == [
+        (1, 2, "refund_candidate")
+    ]
+
+
+def test_rent_and_paycheck_are_suggested_never_paired() -> None:
+    r = match_transfers(
+        [c(1, CHK, "-1500.00", desc="RENT"), c(2, SAV, "1500.00", desc="PAYROLL EXAMPLE CO")]
+    )
+    assert not r.pairs and [s.reason for s in r.suggested] == ["no_hint"]
+
+
+def test_hints_decide_before_days() -> None:
+    r = match_transfers(
+        [
+            c(1, CHK, "-80.00", desc="TRANSFER TO SAVINGS"),
+            c(2, SAV, "80.00", days=2, desc="TRANSFER FROM CHECKING"),
+            c(3, OTHER, "80.00", days=0, desc="SALARY"),
+        ]
+    )
+    assert ids(r) == {(1, 2)} and not r.ambiguous
+
+
+def test_mask_matches_on_digit_boundaries_only() -> None:
+    near = c(1, CHK, "-9.00", desc="TO 55123 ACCT", mask="0000")
+    r = match_transfers([near, c(2, SAV, "9.00", desc="EXAMPLE", mask="5512")])
+    assert not r.pairs and r.suggested[0].reason == "no_hint"
+    ok = c(1, CHK, "-9.00", desc="TO ACCT 5512", mask="0000")
+    assert ids(match_transfers([ok, c(2, SAV, "9.00", desc="EXAMPLE", mask="5512")])) == {(1, 2)}
+    short = c(1, CHK, "-9.00", desc="TO 12", mask="0000")
+    assert not match_transfers([short, c(2, SAV, "9.00", desc="EXAMPLE", mask="12")]).pairs
+
+
+def test_pending_competes_but_is_never_a_leg() -> None:
+    assert not match_transfers([c(1, CHK, "-10.00"), c(2, SAV, "10.00", pending=True)]).pairs
+    r = match_transfers(
+        [c(1, CHK, "-10.00"), c(2, SAV, "10.00"), c(3, OTHER, "10.00", pending=True)]
+    )
+    assert not r.pairs
+    assert {a.transaction_id.int for a in r.ambiguous} == {1, 2}
+
+
+def test_user_treated_rows_are_suggested_not_paired() -> None:
+    r = match_transfers([c(1, CHK, "-10.00", protected=True), c(2, SAV, "10.00")])
+    assert not r.pairs and [s.reason for s in r.suggested] == ["user_treated_as_spending"]
+
+
+def test_accounts_of_two_owners_are_suggested() -> None:
+    a, b = uuid.UUID(int=1), uuid.UUID(int=2)
+    r = match_transfers([c(1, CHK, "-10.00", owner=a), c(2, SAV, "10.00", owner=b)])
+    assert not r.pairs and [s.reason for s in r.suggested] == ["different_owners"]
+    joint = match_transfers([c(1, CHK, "-10.00", owner=a), c(2, SAV, "10.00")])
+    assert ids(joint) == {(1, 2)}

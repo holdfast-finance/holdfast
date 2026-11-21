@@ -85,6 +85,7 @@ def bind_context(
     event.listen(session.sync_session, "after_begin", _set_context)
     session.info["household_id"] = household_id
     session.info["person_id"] = person_id
+    session.info["household_wide"] = household_wide
 
 
 async def apply_context(
