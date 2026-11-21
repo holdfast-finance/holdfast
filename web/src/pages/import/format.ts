@@ -1,4 +1,4 @@
-import type { ReconcileStatus } from '@/api/imports'
+import type { ImportResult, ReconcileStatus } from '@/api/imports'
 
 const day = new Intl.DateTimeFormat('en-US', {
   timeZone: 'UTC',
@@ -46,8 +46,7 @@ const REASON_COPY: Record<string, string> = {
 
 /**
  * Plain copy for the server's reason codes (comma-joined when there are several). A code this
- * build does not know is shown verbatim rather than hidden. Null or empty means the server did
- * not record one.
+ * build does not know is shown verbatim.
  */
 export function reasonLines(reason: string | null | undefined): string[] {
   if (!reason) return []
@@ -56,4 +55,16 @@ export function reasonLines(reason: string | null | undefined): string[] {
     .map((code) => code.trim())
     .filter((code) => code !== '')
     .map((code) => REASON_COPY[code] ?? `Flagged: ${code}`)
+}
+
+export function resultHeadline(result: ImportResult): string {
+  if (result.balances_only) return 'Balances only, needs review'
+  if (!result.created) return 'Already imported'
+  if (result.blocks.some((block) => block.reconcile_status === 'needs_review')) {
+    return 'Imported, needs review'
+  }
+  if (result.blocks.some((block) => block.reconcile_status === 'accepted')) {
+    return 'Imported and accepted'
+  }
+  return 'Imported and reconciled'
 }

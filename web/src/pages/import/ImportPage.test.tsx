@@ -51,14 +51,29 @@ describe('Import page: runs and the review queue', () => {
     expect(within(review).getByText('Sample travel card')).toBeInTheDocument()
     // opening -410.00 + -200.00 = -610.00 against a closing of -655.25.
     expect(within(review).getByText('-$45.25')).toBeInTheDocument()
-    // The savings statement has no opening balance or transaction total: say so, not zero.
+    // The savings statement has no opening balance.
     expect(within(review).getAllByText('Not found').length).toBeGreaterThan(0)
-    // The runs list carries no reason, so say so instead of guessing.
-    expect(within(review).getAllByText('Reason not recorded.')).toHaveLength(2)
+    expect(
+      within(review).getByText(/From the figures: Holdfast could not find/),
+    ).toBeInTheDocument()
+    expect(within(review).getByText(/From the figures: Opening balance plus/)).toBeInTheDocument()
     const recent = screen.getByRole('region', { name: 'Recent imports' })
     expect(within(recent).getAllByRole('listitem')).toHaveLength(5)
     expect(within(recent).getByText(/ParseError, nothing was added/)).toBeInTheDocument()
     expect(within(recent).getByText(/accepted Oct 4/)).toBeInTheDocument()
+  })
+
+  it('explains when the list cannot tell why a statement was flagged', async () => {
+    seedHousehold({ signedIn: true })
+    seedLedger()
+    seedImportRuns({ empty: true })
+    importFile('example-dates.pdf', 'dates')
+    renderApp('/import')
+    const review = await queue()
+    expect(within(review).getByText("This list doesn't carry the reason.")).toBeInTheDocument()
+    await userEvent.click(within(review).getByRole('button', { name: 'Review and accept' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Accept this statement?' })
+    expect(within(dialog).getByText("This list doesn't carry the reason.")).toBeInTheDocument()
   })
 
   it('shows an empty state with no imports', async () => {
@@ -85,7 +100,9 @@ describe('Import page: runs and the review queue', () => {
     await waitFor(() => {
       expect(within(recent).getAllByRole('listitem')).toHaveLength(20)
     })
-    await userEvent.click(within(recent).getByRole('button', { name: 'Load more' }))
+    const review = await queue()
+    expect(within(review).getByText('This queue covers loaded pages only.')).toBeInTheDocument()
+    await userEvent.click(within(review).getByRole('button', { name: 'Load more' }))
     await waitFor(() => {
       expect(within(recent).getAllByRole('listitem')).toHaveLength(25)
     })
@@ -105,7 +122,7 @@ describe('Import page: accepting a flagged statement', () => {
 
   it('shows why and the difference first, says it does not reconcile, then accepts', async () => {
     const dialog = await openAccept()
-    expect(within(dialog).getByText('Reason not recorded.')).toBeInTheDocument()
+    expect(within(dialog).getByText(/From the figures: Opening balance plus/)).toBeInTheDocument()
     expect(within(dialog).getByText('-$45.25')).toBeInTheDocument()
     expect(within(dialog).getByText(/make it reconciled/)).toBeInTheDocument()
     await userEvent.click(within(dialog).getByRole('button', { name: 'Accept statement' }))
@@ -126,6 +143,10 @@ describe('Import page: accepting a flagged statement', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    await waitFor(() => {
+      const review = screen.getByRole('region', { name: /Needs review/ })
+      expect(within(review).getAllByRole('button', { name: 'Review and accept' })[0]).toHaveFocus()
     })
     expect(db.importRuns.filter((r) => r.reconcile_status === 'needs_review')).toHaveLength(2)
   })
@@ -195,9 +216,10 @@ describe('Import page: uploading', () => {
     // The upload response carries the reason, so it is shown here too.
     expect(within(dialog).getByText(/does not equal the closing balance/)).toBeInTheDocument()
     await userEvent.click(within(dialog).getByRole('button', { name: 'Accept statement' }))
-    await waitFor(() => {
-      expect(db.importRuns[0]?.reconcile_status).toBe('accepted')
-    })
+    expect(await within(res).findByRole('heading', { name: 'Imported and accepted' })).toBeVisible()
+    expect(within(res).getByText('Accepted')).toBeInTheDocument()
+    expect(within(res).queryByRole('button', { name: 'Review and accept' })).not.toBeInTheDocument()
+    expect(db.importRuns[0]?.reconcile_status).toBe('accepted')
   })
 
   it('treats a re-upload as already imported, not an error', async () => {

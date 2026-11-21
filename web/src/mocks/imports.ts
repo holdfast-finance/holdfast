@@ -81,7 +81,7 @@ const RUNS: RunSeed[] = [
     end: '2026-10-31',
     opening: null,
     closing: '2500.00',
-    sum: null,
+    sum: '0.00',
     reconcile: 'needs_review',
     parsed: 3,
     inserted: 3,

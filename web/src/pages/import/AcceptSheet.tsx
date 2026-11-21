@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 
 import { ApiError } from '@/api/client'
 import { useAcceptRun, type ReconcileNumbers } from '@/api/imports'
@@ -20,6 +20,8 @@ export function AcceptButton({
   numbers,
   currency,
   reason,
+  fallbackFocus,
+  onAccepted,
 }: {
   runId: string
   label: string
@@ -27,9 +29,17 @@ export function AcceptButton({
   currency: string | null
   /** `undefined` when the runs list is the source: it carries no reason. */
   reason: string | null | undefined
+  fallbackFocus: RefObject<HTMLElement | null>
+  onAccepted: (runId: string) => void
 }) {
+  const trigger = useRef<HTMLButtonElement>(null)
+  const accepted = useRef(false)
   const [open, setOpen] = useState(false)
-  const accept = useAcceptRun()
+  const accept = useAcceptRun((acceptedRunId) => {
+    accepted.current = true
+    setOpen(false)
+    onAccepted(acceptedRunId)
+  })
 
   const onOpenChange = (next: boolean) => {
     setOpen(next)
@@ -39,9 +49,11 @@ export function AcceptButton({
   return (
     <>
       <Button
+        ref={trigger}
         variant="outline"
         size="lg"
         onClick={() => {
+          accepted.current = false
           setOpen(true)
         }}
       >
@@ -52,11 +64,16 @@ export function AcceptButton({
         onOpenChange={onOpenChange}
         title="Accept this statement?"
         description={label}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          const target = accepted.current ? fallbackFocus.current : trigger.current
+          target?.focus()
+        }}
       >
         <div className="flex flex-col gap-4">
           <section aria-label="Why it was flagged" className="flex flex-col gap-2">
             <h3 className="text-sm font-semibold">Why it was flagged</h3>
-            <ReasonList reason={reason} />
+            <ReasonList reason={reason} numbers={numbers} />
           </section>
           <ReconcileFacts numbers={numbers} currency={currency} />
           <p className="text-sm">
@@ -75,11 +92,7 @@ export function AcceptButton({
               size="lg"
               disabled={accept.isPending}
               onClick={() => {
-                accept.mutate(runId, {
-                  onSuccess: () => {
-                    setOpen(false)
-                  },
-                })
+                accept.mutate(runId)
               }}
             >
               {accept.isPending ? 'Accepting…' : 'Accept statement'}

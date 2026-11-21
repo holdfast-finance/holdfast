@@ -1,3 +1,5 @@
+import { useRef, type RefObject } from 'react'
+
 import type { ImportRun } from '@/api/imports'
 import { errorMessage } from '@/api/client'
 import { useImportRuns } from '@/api/imports'
@@ -13,7 +15,15 @@ function runLabel(run: ImportRun): string {
 }
 
 /** A statement that landed but did not reconcile: why, and the numbers behind it. */
-function ReviewItem({ run }: { run: ImportRun }) {
+function ReviewItem({
+  run,
+  fallbackFocus,
+  onAccepted,
+}: {
+  run: ImportRun
+  fallbackFocus: RefObject<HTMLHeadingElement | null>
+  onAccepted: (runId: string) => void
+}) {
   return (
     <li className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -25,7 +35,7 @@ function ReviewItem({ run }: { run: ImportRun }) {
         </div>
         <ReconcileBadge status={run.reconcile_status} />
       </div>
-      <ReasonList reason={undefined} />
+      <ReasonList reason={undefined} numbers={run} />
       <ReconcileFacts numbers={run} currency={run.currency} />
       <AcceptButton
         runId={run.id}
@@ -33,6 +43,8 @@ function ReviewItem({ run }: { run: ImportRun }) {
         numbers={run}
         currency={run.currency}
         reason={undefined}
+        fallbackFocus={fallbackFocus}
+        onAccepted={onAccepted}
       />
     </li>
   )
@@ -82,8 +94,9 @@ function ListSkeleton() {
   )
 }
 
-export function RunsSections() {
+export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => void }) {
   const runs = useImportRuns()
+  const reviewHeading = useRef<HTMLHeadingElement>(null)
 
   if (runs.isPending) {
     return (
@@ -109,29 +122,57 @@ export function RunsSections() {
 
   const all = runs.data.pages.flatMap((p) => p.items)
   const review = all.filter((r) => r.reconcile_status === 'needs_review')
+  const pagination = (
+    <>
+      {runs.hasNextPage && (
+        <Button
+          variant="outline"
+          size="lg"
+          disabled={runs.isFetchingNextPage}
+          onClick={() => void runs.fetchNextPage()}
+        >
+          {runs.isFetchingNextPage ? 'Loading…' : 'Load more'}
+        </Button>
+      )}
+      {runs.isFetchNextPageError && (
+        <p role="alert" className="text-sm text-destructive-text">
+          Couldn't load more. Try Load more again.
+        </p>
+      )}
+    </>
+  )
   return (
     <>
       <section aria-labelledby="review-title" className="flex flex-col gap-2">
-        <h2 id="review-title" className="font-heading text-lg font-semibold">
+        <h2
+          id="review-title"
+          ref={reviewHeading}
+          tabIndex={-1}
+          className="font-heading text-lg font-semibold"
+        >
           Needs review{' '}
           {review.length > 0 && <span className="money text-base">({review.length})</span>}
         </h2>
         {runs.hasNextPage && (
-          <p className="text-xs text-muted-foreground">
-            Showing the newest imports. Load more below to check older ones.
-          </p>
+          <p className="text-xs text-muted-foreground">This queue covers loaded pages only.</p>
         )}
         {review.length === 0 ? (
           <p className="rounded-card border border-border bg-card p-4 text-sm text-muted-foreground">
-            Nothing to review. Every imported statement reconciled.
+            Nothing to review in the loaded imports.
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-card border border-border bg-card">
             {review.map((r) => (
-              <ReviewItem key={r.id} run={r} />
+              <ReviewItem
+                key={r.id}
+                run={r}
+                fallbackFocus={reviewHeading}
+                onAccepted={onAccepted}
+              />
             ))}
           </ul>
         )}
+        {pagination}
       </section>
 
       <section aria-labelledby="runs-title" className="flex flex-col gap-2">
@@ -149,21 +190,7 @@ export function RunsSections() {
             ))}
           </ul>
         )}
-        {runs.hasNextPage && (
-          <Button
-            variant="outline"
-            size="lg"
-            disabled={runs.isFetchingNextPage}
-            onClick={() => void runs.fetchNextPage()}
-          >
-            {runs.isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </Button>
-        )}
-        {runs.isFetchNextPageError && (
-          <p role="alert" className="text-sm text-destructive-text">
-            Couldn't load more. Try Load more again.
-          </p>
-        )}
+        {pagination}
       </section>
     </>
   )

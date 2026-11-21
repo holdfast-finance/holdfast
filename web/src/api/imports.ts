@@ -156,7 +156,7 @@ export function useUploadStatement(onProgress: (fraction: number) => void) {
 }
 
 /** needs_review -> accepted. Sensitive: a stale session gets the step-up prompt, then one retry. */
-export function useAcceptRun() {
+export function useAcceptRun(onAccepted: (runId: string) => void) {
   const queryClient = useQueryClient()
   return useMutation({
     retry: false,
@@ -166,7 +166,8 @@ export function useAcceptRun() {
           api.POST('/api/imports/runs/{run_id}/accept', { params: { path: { run_id: runId } } }),
         ),
       ),
-    onSuccess: async () => {
+    onSuccess: async (_data, runId) => {
+      onAccepted(runId)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: importKeys.runs }),
         queryClient.invalidateQueries({ queryKey: ['ledger'] }),

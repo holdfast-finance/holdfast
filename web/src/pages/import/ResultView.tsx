@@ -1,4 +1,5 @@
 import { Info } from 'lucide-react'
+import { useRef, type RefObject } from 'react'
 
 import type { ImportBalance, ImportBlock, ImportResult } from '@/api/imports'
 import { Money } from '@/components/Money'
@@ -7,7 +8,15 @@ import { ReconcileBadge, ReconcileFacts } from './Facts'
 import { formatPeriod } from './format'
 import { ReasonList } from './ReasonList'
 
-function Block({ block }: { block: ImportBlock }) {
+function Block({
+  block,
+  onAccepted,
+  fallbackFocus,
+}: {
+  block: ImportBlock
+  onAccepted: (runId: string) => void
+  fallbackFocus: RefObject<HTMLHeadingElement | null>
+}) {
   const flagged = block.reconcile_status === 'needs_review'
   return (
     <li className="flex flex-col gap-3 rounded-lg border border-border p-3">
@@ -23,13 +32,15 @@ function Block({ block }: { block: ImportBlock }) {
       <ReconcileFacts numbers={block} currency={block.currency} />
       {flagged && (
         <>
-          <ReasonList reason={block.reason} />
+          <ReasonList reason={block.reason} numbers={block} />
           <AcceptButton
             runId={block.run_id}
             label={block.account_name}
             numbers={block}
             currency={block.currency}
             reason={block.reason}
+            fallbackFocus={fallbackFocus}
+            onAccepted={onAccepted}
           />
         </>
       )}
@@ -76,17 +87,22 @@ function BalanceOnly({ balance }: { balance: ImportBalance }) {
   )
 }
 
-export function ResultView({ result }: { result: ImportResult }) {
-  const flagged = result.blocks.filter((b) => b.reconcile_status === 'needs_review').length
-  let headline: string
-  if (result.balances_only) headline = 'Balances only, needs review'
-  else if (!result.created) headline = 'Already imported'
-  else if (flagged > 0) headline = 'Imported, needs review'
-  else headline = 'Imported and reconciled'
+export function ResultView({
+  result,
+  headline,
+  onAccepted,
+}: {
+  result: ImportResult
+  headline: string
+  onAccepted: (runId: string) => void
+}) {
+  const heading = useRef<HTMLHeadingElement>(null)
   return (
-    <section aria-label="Import result" aria-live="polite" className="flex flex-col gap-3">
+    <section aria-label="Import result" className="flex flex-col gap-3">
       <div>
-        <h2 className="font-heading text-base font-semibold">{headline}</h2>
+        <h2 ref={heading} tabIndex={-1} className="font-heading text-base font-semibold">
+          {headline}
+        </h2>
         <p className="truncate text-xs text-muted-foreground">{result.filename}</p>
       </div>
       {!result.created && !result.balances_only && (
@@ -110,7 +126,7 @@ export function ResultView({ result }: { result: ImportResult }) {
       )}
       <ul className="flex flex-col gap-3">
         {result.blocks.map((b) => (
-          <Block key={b.run_id} block={b} />
+          <Block key={b.run_id} block={b} onAccepted={onAccepted} fallbackFocus={heading} />
         ))}
       </ul>
     </section>

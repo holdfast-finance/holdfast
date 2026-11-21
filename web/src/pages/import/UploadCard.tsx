@@ -16,6 +16,7 @@ import { FormError } from '@/components/forms/Field'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ReauthCancelledError } from '@/stores/reauth'
+import { resultHeadline } from './format'
 import { ResultView } from './ResultView'
 
 const schema = z.object({
@@ -34,8 +35,9 @@ type FormValues = z.infer<typeof schema>
 
 function size(bytes: number): string {
   if (bytes < 1024) return `${String(bytes)} B`
-  if (bytes < MAX_UPLOAD_BYTES) return `${(bytes / 1024).toFixed(0)} KiB`
-  return `${(bytes / MAX_UPLOAD_BYTES).toFixed(1)} MiB`
+  const mib = 1024 * 1024
+  if (bytes < mib) return `${(bytes / 1024).toFixed(0)} KiB`
+  return `${(bytes / mib).toFixed(1)} MiB`
 }
 
 /** The server's fixed messages are already plain; add when to retry for a 429. */
@@ -49,11 +51,18 @@ function uploadError(error: unknown): unknown {
   return error
 }
 
-export function UploadCard() {
+export function UploadCard({
+  result,
+  setResult,
+  onAccepted,
+}: {
+  result: ImportResult | null
+  setResult: (result: ImportResult | null) => void
+  onAccepted: (runId: string) => void
+}) {
   const inputId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
   const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState<ImportResult | null>(null)
   const upload = useUploadStatement(setProgress)
   const form = useForm<FormValues>({ resolver: zodResolver(schema) })
   const file = useWatch({ control: form.control, name: 'file' }) as File | undefined
@@ -61,6 +70,7 @@ export function UploadCard() {
 
   const submit = form.handleSubmit(({ file: chosen }) => {
     setResult(null)
+    setProgress(0)
     upload.mutate(chosen, {
       onSuccess: (data) => {
         setResult(data)
@@ -76,6 +86,8 @@ export function UploadCard() {
   }
 
   const busy = upload.isPending
+  const progressText = progress < 1 ? 'Uploading…' : 'Reading the statement…'
+  const headline = result ? resultHeadline(result) : ''
 
   return (
     <Card>
@@ -87,9 +99,12 @@ export function UploadCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        <div role="status" aria-atomic="true" className="sr-only">
+          {busy ? progressText : headline}
+        </div>
         {result ? (
           <>
-            <ResultView result={result} />
+            <ResultView result={result} headline={headline} onAccepted={onAccepted} />
             <Button size="lg" variant="outline" onClick={reset}>
               Import another statement
             </Button>
@@ -151,8 +166,8 @@ export function UploadCard() {
                     style={{ width: `${String(Math.round(progress * 100))}%` }}
                   />
                 </div>
-                <p role="status" className="text-xs text-muted-foreground">
-                  {progress < 1 ? 'Uploading…' : 'Reading the statement…'}
+                <p aria-hidden="true" className="text-xs text-muted-foreground">
+                  {progressText}
                 </p>
               </div>
             )}

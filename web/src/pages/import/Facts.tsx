@@ -38,9 +38,11 @@ export function ReconcileBadge({ status }: { status: ReconcileStatus }) {
 function Cell({
   label,
   value,
+  missingLabel = 'Not found',
   currency,
 }: {
   label: string
+  missingLabel?: string
   value: string | null
   currency: string | null
 }) {
@@ -49,7 +51,7 @@ function Cell({
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm">
         {value === null ? (
-          <span className="text-muted-foreground">Not found</span>
+          <span className="text-muted-foreground">{missingLabel}</span>
         ) : (
           <Money amount={value} currency={currency ?? undefined} />
         )}
@@ -69,7 +71,12 @@ export function ReconcileFacts({
   return (
     <dl className="grid grid-cols-1 divide-y divide-border sm:grid-cols-4 sm:divide-x sm:divide-y-0 sm:[&>div]:px-3 sm:[&>div:first-child]:pl-0">
       <Cell label="Opening" value={numbers.opening_balance} currency={currency} />
-      <Cell label="Transactions" value={numbers.txn_sum} currency={currency} />
+      <Cell
+        label="Transactions"
+        value={numbers.txn_sum}
+        currency={currency}
+        missingLabel="Not recorded"
+      />
       <Cell label="Closing" value={numbers.closing_balance} currency={currency} />
       <Cell label="Difference" value={numbers.balance_diff} currency={currency} />
     </dl>
