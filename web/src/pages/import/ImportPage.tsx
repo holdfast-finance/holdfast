@@ -12,7 +12,9 @@ export function ImportPage() {
       current && {
         ...current,
         blocks: current.blocks.map((block) =>
-          block.run_id === runId ? { ...block, reconcile_status: 'accepted' } : block,
+          block.run_id === runId
+            ? { ...block, reconcile_status: 'accepted', reason: null }
+            : block,
         ),
       },
     )

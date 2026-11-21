@@ -88,6 +88,8 @@ export function UploadCard({
   const busy = upload.isPending
   const progressText = progress < 1 ? 'Uploading…' : 'Reading the statement…'
   const headline = result ? resultHeadline(result) : ''
+  // Accept closes the sheet and focuses a heading. Announce only the upload outcome here.
+  const uploadHeadline = upload.data ? resultHeadline(upload.data) : ''
 
   return (
     <Card>
@@ -100,7 +102,7 @@ export function UploadCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div role="status" aria-atomic="true" className="sr-only">
-          {busy ? progressText : headline}
+          {busy ? progressText : headline === uploadHeadline ? headline : ''}
         </div>
         {result ? (
           <>
