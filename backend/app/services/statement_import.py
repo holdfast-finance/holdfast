@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, mask_long_digit_runs
-from app.models import Account, Document, ImportRun, Transaction
+from app.models import Account, Document, ImportRun
+from app.services.ledger_service import LedgerService, NewTransaction
 
 MASK_LEN = 4
 
@@ -236,25 +237,19 @@ async def _import_block(
     s.add(run)
     await s.flush()
 
+    ledger = LedgerService(s, household_id)
     inserted = 0
     for t in block.txns:
-        stmt = (
-            pg_insert(Transaction)
-            .values(
-                id=uuid.uuid4(),
-                household_id=household_id,
-                account_id=acct.id,
-                posted_date=t.posted_date,
-                amount=t.amount,
-                description_raw=mask_long_digit_runs(t.description),
-                source="import",
-                import_fingerprint=t.fingerprint,
-                import_run_id=run.id,
-            )
-            .on_conflict_do_nothing(index_elements=["account_id", "import_fingerprint"])
-            .returning(Transaction.id)
+        new = NewTransaction(
+            account_id=acct.id,
+            posted_date=t.posted_date,
+            amount=t.amount,
+            description_raw=mask_long_digit_runs(t.description),
+            source="import",
+            import_fingerprint=t.fingerprint,
+            import_run_id=run.id,
         )
-        if (await s.execute(stmt)).scalar_one_or_none() is not None:
+        if await ledger.insert_transaction(new, skip_duplicates=True) is not None:
             inserted += 1
 
     rec = block.reconciliation
