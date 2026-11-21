@@ -20,9 +20,11 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import uuid
 import weakref
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -74,6 +76,16 @@ PARSE_SLOTS = 2  # concurrent form + PDF parses per process
 SLOT_WAIT_SECONDS = 10
 PARSE_TIMEOUT_SECONDS = 30
 LOCK_SECONDS = 120
+BALANCE_LIMIT = Decimal(10) ** 12  # NUMERIC(14,2): twelve integer digits
+# A client that stops sending must not hold a parse slot. 120 s lets a 21 MiB body arrive at about
+# 1.5 Mbit/s (slow mobile over a tailnet); a typical statement is under 1 MiB. Slower links retry.
+FORM_READ_SECONDS = 120
+# One in-flight upload per user, in Redis so it holds across API workers. The TTL covers the longest
+# legitimate request (slot wait + body + parse) so a crashed worker can't lock a user out for long.
+USER_LOCK_SECONDS = FORM_READ_SECONDS + PARSE_TIMEOUT_SECONDS + SLOT_WAIT_SECONDS + 20
+_RELEASE = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0"
+)
 log = structlog.get_logger(__name__)
 _FILENAME_OK = re.compile(r"[^A-Za-z0-9 ._()\-]")
 
@@ -249,6 +261,26 @@ class ImportService:
                 headers={"Retry-After": str(limited.retry_after)},
             )
 
+    async def release(self, key: str, token: str) -> None:
+        """Delete ``key`` only if it still holds ``token`` (never someone else's lock)."""
+        await self.ctx.redis.eval(_RELEASE, 1, key, token)  # type: ignore[misc]
+
+    async def begin(self) -> str:
+        """Claim the user's single upload slot, or refuse. Returns the token to release with."""
+        token = secrets.token_hex(16)
+        key = f"hf:import:user:{self.principal.user_id}"
+        if not await self.ctx.redis.set(key, token, nx=True, ex=USER_LOCK_SECONDS):
+            await self.refuse(
+                "upload_in_flight",
+                "rate_limited",
+                "Another upload of yours is still running. Wait for it to finish.",
+                headers={"Retry-After": "5"},
+            )
+        return token
+
+    async def end(self, token: str) -> None:
+        await self.release(f"hf:import:user:{self.principal.user_id}", token)
+
     async def refuse(
         self, reason: str, code: str, message: str, headers: dict[str, str] | None = None
     ) -> NoReturn:
@@ -285,12 +317,14 @@ class ImportService:
         store = self.ctx.settings.document_store / STORE_SUBDIR
         tmp, sha, size = await _stream_to_temp(upload, store)
         lock_key = f"hf:import:lock:{self.principal.household_id}:{sha}"
-        if not await self.ctx.redis.set(lock_key, "1", nx=True, ex=LOCK_SECONDS):
-            tmp.unlink(missing_ok=True)
-            raise UploadRefused(
-                "in_progress", "conflict", "That statement is already being imported."
-            )
+        token = secrets.token_hex(16)
+        locked = False
         try:
+            locked = bool(await self.ctx.redis.set(lock_key, token, nx=True, ex=LOCK_SECONDS))
+            if not locked:
+                raise UploadRefused(
+                    "in_progress", "conflict", "That statement is already being imported."
+                )
             statement = await self._parse(tmp, slot)
             household_dir = store / str(self.principal.household_id)
             final = household_dir / f"{sha}.pdf"
@@ -298,14 +332,17 @@ class ImportService:
             # households and no client text reaches the path.
             relative = f"{STORE_SUBDIR}/{self.principal.household_id}/{sha}.pdf"
             await asyncio.to_thread(household_dir.mkdir, exist_ok=True, mode=0o700)
-            if not final.exists():
+            if final.exists():
+                os.utime(final)  # in use again: a later sweep must not see an old orphan
+            else:
                 os.replace(tmp, final)
             # A failed import leaves the stored file: it is named by hash, and another request
             # may be using it. ``sweep_store`` removes orphans later.
             result = await self._import(statement, sha, relative, size, raw_filename)
         finally:
             tmp.unlink(missing_ok=True)
-            await self.ctx.redis.delete(lock_key)
+            if locked:
+                await self.release(lock_key, token)
         document_created, document_id, filename, blocks, balances_only = result
         await audit.record(
             self.ctx.factory,
@@ -342,7 +379,12 @@ class ImportService:
 
     async def _parse(self, path: Path, slot: ParseSlot) -> ParsedStatement:
         task = asyncio.ensure_future(asyncio.to_thread(_parse_pdf, path))
-        done, _ = await asyncio.wait({task}, timeout=PARSE_TIMEOUT_SECONDS)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=PARSE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            slot.release_when(task)  # the thread keeps running: it keeps the slot
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise
         if not done:
             # The thread can't be interrupted: keep its slot until it ends, answer now.
             slot.release_when(task)
@@ -371,6 +413,14 @@ class ImportService:
             storage_path=relative,
             size_bytes=size,
         )
+        for block in statement.blocks:
+            for value in (block.opening_balance, block.closing_balance):
+                if value is not None and abs(value) >= BALANCE_LIMIT:
+                    raise UploadRefused(
+                        "amount_out_of_range",
+                        "validation_error",
+                        "An amount in that statement is out of range.",
+                    )
         async with self._session() as s:
             existing = (
                 await s.execute(select(Document.id).where(Document.sha256 == sha))

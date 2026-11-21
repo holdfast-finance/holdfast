@@ -33,6 +33,12 @@ quadratic on long lines, so a bigger body could never be imported anyway.
   Redis), content type, then a parse slot, and only then the body is read. A rate-limited or
   anonymous request never has its body read. Refusals are audited (`import.upload_refused`, a fixed
   reason code, at most one row per user and reason a minute).
+- **Slow bodies.** Uvicorn and Caddy have no body-read timeout, so the route enforces one: reading
+  the form is wrapped in `asyncio.timeout(120)` (enough for a full 21 MiB body at about 1.5 Mbit/s;
+  statements are normally under 1 MiB), and a body that stalls is refused with 422 and gives its
+  slot back. Each user may also have only **one upload in flight**, a Redis `SET NX` with a token
+  and a 180 s TTL, released by compare-and-delete in `finally` (Redis rather than an in-process
+  counter so it holds across API workers). One person can therefore never hold both slots.
 - **Stored originals** live at `statements/<household id>/<sha256>.pdf`: one directory per household,
   named by hash, never shared across households, never derived from client text. The request path
   never deletes a hash-named file (another request may be using it); a failed import leaves an
@@ -44,6 +50,12 @@ quadratic on long lines, so a bigger body could never be imported anyway.
   (a Redis lock per household and hash, backed by the unique constraint, SQLSTATE 23505 on
   `document`). Any other database error is a fixed 500 `server_error`; only the exception class
   name is logged.
+
+## Follow-up stories
+- Wire `sweep_store` to a job (or startup).
+- Parse in a killable subprocess with memory and CPU limits.
+- Audit refusal counters (the audit log keeps one refusal row per user and reason a minute).
+- A reason column on `import_run`, and storing balances-only statements (needs a migration).
 
 ## Accepted risks
 - **Parser resource use.** PDF parsing runs in a worker thread with a 30 s wall-clock answer and at

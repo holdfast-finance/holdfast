@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated, Any
 
@@ -11,8 +12,14 @@ from starlette.formparsers import MultiPartException
 
 from app.api.deps import Ctx, CurrentPrincipal, get_principal
 from app.schemas.imports import ImportResultOut, ImportRunOut, ImportRunPage
+from app.services import imports as import_service
 from app.services.auth import require_fresh
-from app.services.imports import DEFAULT_LIMIT, MAX_LIMIT, ImportService, parse_slot
+from app.services.imports import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    ImportService,
+    parse_slot,
+)
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -42,20 +49,31 @@ async def upload_statement(request: Request, ctx: Ctx) -> ImportResultOut:
         await service.refuse(
             "not_multipart", "validation_error", "Send the PDF as multipart form data."
         )
-    async with parse_slot() as slot:
-        try:
-            form = await request.form(max_files=1, max_fields=4)
-        except MultiPartException:
-            await service.refuse("bad_form", "validation_error", "That upload couldn't be read.")
-        try:
-            part = form.get("file")
-            if not isinstance(part, UploadFile):
+    token = await service.begin()  # one upload in flight per user
+    try:
+        async with parse_slot() as slot:
+            try:
+                async with asyncio.timeout(import_service.FORM_READ_SECONDS):
+                    form = await request.form(max_files=1, max_fields=4)
+            except TimeoutError:
                 await service.refuse(
-                    "no_file", "validation_error", "Attach one PDF as the `file` part."
+                    "body_timeout", "validation_error", "That upload took too long to arrive."
                 )
-            return await service.upload(part, part.filename, slot)
-        finally:
-            await form.close()
+            except MultiPartException:
+                await service.refuse(
+                    "bad_form", "validation_error", "That upload couldn't be read."
+                )
+            try:
+                part = form.get("file")
+                if not isinstance(part, UploadFile):
+                    await service.refuse(
+                        "no_file", "validation_error", "Attach one PDF as the `file` part."
+                    )
+                return await service.upload(part, part.filename, slot)
+            finally:
+                await form.close()
+    finally:
+        await service.end(token)
 
 
 @router.get("/runs")

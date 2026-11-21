@@ -70,6 +70,28 @@ async def count(app: FastAPI, hid: uuid.UUID, model: type) -> int:
         return int((await s.execute(select(func.count()).select_from(model))).scalar_one())
 
 
+async def member_client(app: FastAPI, hid: uuid.UUID) -> httpx.AsyncClient:
+    """A second person in the same household, signed in."""
+    from app.db_context import apply_context, unscoped_session
+    from app.models import AppUser, Person
+    from app.services import sessions
+
+    async with unscoped_session(app.state.session_factory) as s:
+        await apply_context(s, hid, None)
+        person = Person(household_id=hid, display_name="Sam Example", filing_role="spouse")
+        s.add(person)
+        await s.flush()
+        user = AppUser(
+            household_id=hid, person_id=person.id, email="sam@example.com", role="member"
+        )
+        s.add(user)
+        await s.flush()
+        token = await sessions.create(s, user.id, ip=None, user_agent=None, strong=True)
+    client = make_client(app)
+    client.cookies.set("hf_session", token)
+    return client
+
+
 async def other_household(app: FastAPI) -> httpx.AsyncClient:
     _, _, token = await seed_household(app, "Other Example Household", "Bo Other", "bo@example.com")
     client = make_client(app)
@@ -441,14 +463,21 @@ async def test_concurrent_identical_uploads_one_wins_one_conflicts_file_stays(
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
     data = pdf_bytes(NFCU_CARD)
-    a, b = await asyncio.gather(upload(owner.client, data), upload(owner.client, data))
+    async with await member_client(app, hid) as sam:
+        a, b = await asyncio.gather(upload(owner.client, data), upload(sam, data))
     assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
     assert await count(app, hid, Document) == 1
     (path,) = stored_files(store)
     assert path.read_bytes() == data
-    # A later, sequential re-upload is the ordinary idempotent 200.
+    # The same user cannot run two at once, and a later sequential re-upload is the ordinary 200.
     again = await upload(owner.client, data)
     assert again.status_code == 200 and again.json()["created"] is False
+
+
+async def test_the_same_user_cannot_run_two_identical_uploads_at_once(owner: Owner) -> None:
+    data = pdf_bytes(NFCU_CARD)
+    a, b = await asyncio.gather(upload(owner.client, data), upload(owner.client, data))
+    assert sorted([a.status_code, b.status_code]) == [200, 429]
 
 
 async def test_a_failed_import_leaves_the_stored_file_and_the_sweep_removes_orphans(
@@ -628,26 +657,169 @@ async def test_balances_only_upload_returns_what_it_read_and_writes_no_run(
 async def test_a_private_account_of_another_person_gets_an_honest_409(
     app: FastAPI, owner: Owner
 ) -> None:
-    from app.db_context import apply_context, unscoped_session
-    from app.models import AppUser, Person
-    from app.services import sessions
-
     hid = uuid.UUID(owner.household["id"])
     assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
-    async with unscoped_session(app.state.session_factory) as s:
-        await apply_context(s, hid, None)
-        person = Person(household_id=hid, display_name="Sam Example", filing_role="spouse")
-        s.add(person)
-        await s.flush()
-        user = AppUser(
-            household_id=hid, person_id=person.id, email="sam@example.com", role="member"
-        )
-        s.add(user)
-        await s.flush()
-        token = await sessions.create(s, user.id, ip=None, user_agent=None, strong=True)
-    async with make_client(app) as sam:
-        sam.cookies.set("hf_session", token)
+    async with await member_client(app, hid) as sam:
         r = await upload(sam, pdf_bytes(OTHER_CARD))
     assert r.status_code == 409
     assert "belongs to another person" in r.json()["error"]["message"]
     assert "already imported" not in r.json()["error"]["message"]
+
+
+# --------------------------------------------------------------------------- round two
+
+
+def _stuck_body(boundary: str = "b") -> AsyncIterator[bytes]:
+    async def gen() -> AsyncIterator[bytes]:
+        yield (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.pdf"\r\n'
+            "Content-Type: application/pdf\r\n\r\n%PDF-1.4\n"
+        ).encode()
+        await asyncio.Event().wait()  # the client stops sending and never finishes
+        yield b""
+
+    return gen()
+
+
+def _stuck_post(owner: Owner) -> Any:
+    return owner.client.post(
+        "/api/imports/statements",
+        content=_stuck_body(),
+        headers={"content-type": "multipart/form-data; boundary=b"},
+    )
+
+
+async def test_a_body_that_never_finishes_frees_its_slot_after_the_deadline(
+    owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import imports
+
+    monkeypatch.setattr(imports, "FORM_READ_SECONDS", 0.2)
+    monkeypatch.setattr(imports, "SLOT_WAIT_SECONDS", 0.05)
+    r = await _stuck_post(owner)
+    assert r.status_code == 422 and "too long" in r.json()["error"]["message"]
+    async with imports.parse_slot(), imports.parse_slot():  # both slots are back
+        pass
+    # ...and the user's own in-flight claim was released, so they can upload again.
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+
+
+async def test_a_second_concurrent_upload_from_the_same_user_is_refused(
+    owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import imports
+
+    monkeypatch.setattr(imports, "FORM_READ_SECONDS", 1.0)
+    first = asyncio.ensure_future(_stuck_post(owner))
+    await asyncio.sleep(0.2)
+    second = await upload(owner.client, pdf_bytes(NFCU_CARD))
+    assert second.status_code == 429 and second.json()["error"]["code"] == "rate_limited"
+    assert "still running" in second.json()["error"]["message"]
+    assert (await first).status_code == 422  # the stuck one times out and releases
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+
+
+async def test_lock_release_is_compare_and_delete(app: FastAPI, owner: Owner) -> None:
+    from app.services.context import RequestContext
+    from app.services.imports import ImportService
+    from app.services.sessions import Principal
+
+    redis = app.state.redis
+    await redis.set("hf:test:lock", "mine")
+    ctx = RequestContext(app.state.session_factory, redis, app.state.settings, None, None)
+    svc = ImportService(ctx, Principal.__new__(Principal))
+    await svc.release("hf:test:lock", "someone-else")
+    assert await redis.get("hf:test:lock") == b"mine"
+    await svc.release("hf:test:lock", "mine")
+    assert await redis.get("hf:test:lock") is None
+
+
+async def test_reusing_a_stored_file_refreshes_its_age(owner: Owner, store: Path) -> None:
+    import os
+    import time
+
+    data = pdf_bytes(NFCU_CARD)
+    assert (await upload(owner.client, data)).status_code == 200
+    (path,) = stored_files(store)
+    os.utime(path, (time.time() - 7200, time.time() - 7200))
+    assert (await upload(owner.client, data)).status_code == 200
+    assert time.time() - path.stat().st_mtime < 60
+
+
+async def test_a_redis_failure_leaves_no_temp_file(
+    owner: Owner, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from redis.asyncio import Redis
+
+    real = Redis.set
+
+    async def flaky(self: Redis, name: str, *a: Any, **k: Any) -> Any:
+        if str(name).startswith("hf:import:lock:"):
+            raise ConnectionError("down")
+        return await real(self, name, *a, **k)
+
+    monkeypatch.setattr(Redis, "set", flaky)
+    with pytest.raises(ConnectionError):
+        await upload(owner.client, pdf_bytes(NFCU_CARD))
+    assert stored_files(store) == []
+
+
+async def test_a_real_unique_violation_on_document_is_the_duplicate_409(
+    app: FastAPI, owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race the household lock normally prevents: build the genuine 23505 and feed it in."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services import imports
+    from app.services.imports import _is_duplicate_document
+
+    hid = uuid.UUID(owner.household["id"])
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        doc = (await s.execute(select(Document))).scalar_one()
+        twin = Document(
+            household_id=hid, kind="statement", filename="x.pdf", sha256=doc.sha256,
+            storage_path="statements/twin.pdf", mime="application/pdf", size_bytes=1,
+        )  # fmt: skip
+        s.add(twin)
+        with pytest.raises(IntegrityError) as caught:
+            await s.flush()
+        real = caught.value
+        await s.rollback()
+    assert _is_duplicate_document(real)
+
+    async def raise_it(*a: object, **k: object) -> None:
+        raise real
+
+    monkeypatch.setattr(imports, "import_statement", raise_it)
+    r = await upload(owner.client, pdf_bytes(OTHER_CARD))
+    assert r.status_code == 409
+    assert r.json()["error"]["message"] == "That statement was already imported."
+
+    class Diag:
+        def __init__(self, table: str) -> None:
+            self.table_name = table
+
+    class Orig(Exception):
+        def __init__(self, state: str, table: str) -> None:
+            self.sqlstate, self.diag = state, Diag(table)
+
+    def err(state: str, table: str) -> IntegrityError:
+        return IntegrityError("x", {}, Orig(state, table))
+
+    assert not _is_duplicate_document(err("23505", "account"))
+    assert not _is_duplicate_document(err("23503", "document"))
+
+
+async def test_out_of_range_balances_in_a_balances_only_statement_are_refused_first(
+    app: FastAPI, owner: Owner
+) -> None:
+    text = SUMMARY.read_text()
+    big = "$1,000,000,000,000.00"
+    huge = text.replace(next(w for w in text.split() if w.startswith("$") and "." in w), big, 1)
+    assert huge != text
+    r = await upload(owner.client, pdf_bytes(huge))
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["message"] == "An amount in that statement is out of range."
+    hid = uuid.UUID(owner.household["id"])
+    assert await count(app, hid, Document) == 0
