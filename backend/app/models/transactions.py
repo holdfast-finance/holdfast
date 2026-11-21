@@ -19,6 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 from app.models._common import (
     CATEGORY_KINDS,
+    CATEGORY_ORIGINS,
     CATEGORY_SOURCES,
     CREATED_BY,
     SHA256_HEX_PATTERN,
@@ -38,14 +39,24 @@ class Category(Base):
     __table_args__ = (
         check_in("kind", CATEGORY_KINDS),
         child_fk("parent_id", "category", ondelete="SET NULL"),
+        check_in("origin", CATEGORY_ORIGINS),
         parent_key(),
+        UniqueConstraint("household_id", "slug"),
     )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
     parent_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    # Stable machine key (ADR 0022): "<group>.<category>" for a category, "<group>" for a group.
+    # Seeding and the PFC mapping key on it; renaming a category never changes it.
+    slug: Mapped[str]
     name: Mapped[str]
     kind: Mapped[str]
+    # "system": seeded from the default tree. "user": added by the household.
+    origin: Mapped[str] = mapped_column(server_default=text("'user'"))
+    is_hidden: Mapped[bool] = mapped_column(server_default=text("false"))
+    counts_toward_spending: Mapped[bool] = mapped_column(server_default=text("false"))
+    sort_order: Mapped[int] = mapped_column(server_default=text("0"))
     is_essential: Mapped[bool] = mapped_column(server_default=text("false"))
     default_tax_tag: Mapped[str | None]
     created_at: Mapped[CreatedAt]
