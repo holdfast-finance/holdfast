@@ -25,7 +25,7 @@ These constraints are real and the architecture is built around them:
 | **Credit bureaus** | There's **no consumer API** for your own Equifax/Experian/TransUnion report. Plaid's Consumer Report (Plaid Check) isn't on the Trial plan and is built for lenders with a permissible purpose. | **Manual pull + import:** download reports from AnnualCreditReport.com (free weekly from all 3 bureaus), save as PDF, and have the app parse them (Phase 6). No scraping of bureau sites. |
 | **Filing** | You self-file. The app itself doesn't transmit to the IRS, because that requires being an authorized e-file provider. | The agent does the full CPA-style review and produces a filing-ready package. **You file it yourself** (Section 9.7). |
 | **CPA agent mandate** | Tax law changes yearly (for example, OBBBA added several new deductions starting with tax year 2025). Stale numbers cost money. | The agent's job is to **exhaustively find every legal deduction, credit, exclusion, deferral and planning strategy** that applies, then rank them by dollars saved. It uses legal "loopholes" (provisions Congress wrote in on purpose) fully. The one hard line is **evasion**: hiding income, fabricating expenses or misclassifying personal spending. Every number comes from versioned yearly config with IRS source URLs. Each strategy is labeled with an audit-risk rating so you decide how aggressive to be. |
-| **Hosting** | This is the most sensitive data you own. | Run it on a **personal** machine or personal VPS, **not county-owned hardware (INF341-SCK, the work laptop) and not over the county VPN**. Access it remotely through Tailscale, never through an open port. |
+| **Hosting** | This is the most sensitive data you own. | Run it on a **personal** machine or personal VPS, **not employer-owned hardware and not over an employer VPN**. Access it remotely through Tailscale, never through an open port. |
 
 ---
 
@@ -569,7 +569,7 @@ The agent doesn't wait to be asked. It runs a **relief scanner**: a checklist of
 The catalog is maintained per tax year. Claude Code builds the initial version and verifies every item and limit against current IRS sources. Starting categories:
 
 **Retirement and health accounts**
-- 401(k)/403(b)/457(b) pre-tax vs. Roth (marginal rate now vs. projected), catch-up contributions, **457(b) on top of a 401(k)** (common for county/government employees, so check your plan), and capturing the full employer match
+- 401(k)/403(b)/457(b) pre-tax vs. Roth (marginal rate now vs. projected), catch-up contributions, **457(b) on top of a 401(k)** (common for government employees, so check your plan), and capturing the full employer match
 - Traditional/Roth/backdoor Roth IRA (pro-rata check), spousal IRA
 - HSA maxing, HSA as a long-term investment account (save receipts and reimburse yourself years later), family vs. self-only limits, last-month rule
 - Roth conversions in low-income years, Saver's Credit eligibility
@@ -935,7 +935,7 @@ Networking: Caddy binds to the Tailscale IP only. Never add a public port or por
 2. In Dashboard → Products, confirm which products the Trial bundle includes for your team.
 3. Fill in the **10-Item table** (Section 3.2). Confirm your HSA custodian and the 401(k) recordkeeper login.
 4. Get an Anthropic API key at console.anthropic.com and set a monthly spend limit.
-5. Pick the host: a personal Ubuntu machine or VPS (not county equipment). Install Tailscale on it, your phone and your laptop; set ACLs; create the `money.yourdomain.com` A record pointing to the server's Tailscale IP; create a DNS API token for Caddy's DNS-01 cert (Section 12.1).
+5. Pick the host: a personal Ubuntu machine or VPS (not employer equipment). Install Tailscale on it, your phone and your laptop; set ACLs; create the `money.yourdomain.com` A record pointing to the server's Tailscale IP; create a DNS API token for Caddy's DNS-01 cert (Section 12.1).
 6. Gather historical statements from 2020 onward: Current (in-app Documents → Statements, or request via in-app chat), NFCU and Wells Fargo (online banking statement archives).
 7. Pull all 3 credit reports from AnnualCreditReport.com and save them as PDFs.
 8. Collect last year's tax return and forms (used for engine validation).
