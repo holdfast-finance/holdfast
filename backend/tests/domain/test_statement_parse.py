@@ -388,3 +388,16 @@ def test_year_less_dates_inside_any_period_round_trip() -> None:
         for i in range(1, 8):
             d = end + timedelta(days=i)
             assert _parse_date(d.strftime("%m-%d"), "%m-%d", end, start) == d
+
+
+def test_year_less_row_a_month_before_a_long_period_takes_the_earlier_year() -> None:
+    # 6.5 months: the previous December is nearer the start than the next one is the end, but
+    # nearest-the-end used to pick 2022-12-01 and the row was flagged date_out_of_period.
+    start, end = date(2022, 1, 1), date(2022, 7, 20)
+    assert _parse_date("12-01", "%m-%d", end, start) == date(2021, 12, 1)
+    assert _parse_date("12-31", "%m-%d", end, start) == date(2021, 12, 31)
+    # A month-long statement is unchanged.
+    assert _parse_date("12-15", "%m-%d", date(2022, 1, 31), date(2022, 1, 1)) == date(2021, 12, 15)
+    assert _parse_date("01-15", "%m-%d", date(2022, 1, 31), date(2022, 1, 1)) == date(2022, 1, 15)
+    # Card statements with no printed start still allow two months back.
+    assert _parse_date("12-01", "%m-%d", date(2022, 1, 20)) == date(2021, 12, 1)
