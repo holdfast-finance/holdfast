@@ -233,16 +233,37 @@ def _apply_sign(printed: Decimal, sign: Sign) -> Decimal:
     return abs(printed)
 
 
-def _parse_date(text: str, fmt: str, period_end: date) -> date:
-    has_year = "%y" in fmt or "%Y" in fmt
-    try:
-        if has_year:
+def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None = None) -> date:
+    """Read a printed row date. A year-less date takes the year that best fits the statement.
+
+    Candidates are the period end's year and its neighbours (Dec/Jan statements, a row a few days
+    past the end). One inside ``[period_start, period_end + 7 days]`` wins (card statements with
+    no printed start allow two months back); otherwise the candidate nearest the period end. A
+    candidate year where the day does not exist (Feb 29) is skipped. Dates that print a year are
+    taken as printed.
+    """
+    if "%y" in fmt or "%Y" in fmt:
+        try:
             return datetime.strptime(text, fmt).date()
-        d = datetime.strptime(f"{text} {period_end.year}", f"{fmt} %Y").date()
+        except ValueError:
+            raise StatementParseError("unreadable date") from None
+    try:
+        # 2000 is a leap year, so Feb 29 parses; the real year is chosen below.
+        month_day = datetime.strptime(f"{text} 2000", f"{fmt} %Y").date()
     except ValueError:
         raise StatementParseError("unreadable date") from None
-    # A year-less row dated after the period end belongs to the previous year (Dec/Jan statement).
-    return d.replace(year=d.year - 1) if d > period_end and d.month > period_end.month else d
+    candidates: list[date] = []
+    for year in (period_end.year - 1, period_end.year, period_end.year + 1):
+        try:
+            candidates.append(date(year, month_day.month, month_day.day))
+        except ValueError:
+            continue  # no Feb 29 in that year
+    if not candidates:
+        raise StatementParseError("unreadable date")
+    lower = period_start if period_start is not None else _months_back(period_end, 2)
+    upper = period_end + timedelta(days=7)
+    inside = [d for d in candidates if lower <= d <= upper]
+    return min(inside or candidates, key=lambda d: abs((d - period_end).days))
 
 
 def _block_key(name: str) -> str:
@@ -372,9 +393,9 @@ def parse_statement(text: str, profile: Profile) -> ParsedStatement:
             groups_ = rm.groupdict()
             desc = " ".join(((pending_desc or "") + " " + (groups_.get("desc") or "")).split())
             if groups_.get("date"):
-                row_date = _parse_date(rm.group("date"), profile.date_format, end)
+                row_date = _parse_date(rm.group("date"), profile.date_format, end, start)
             elif pending_date is not None:
-                row_date = _parse_date(pending_date, profile.date_format, end)
+                row_date = _parse_date(pending_date, profile.date_format, end, start)
             else:
                 row_date = end
             printed = parse_amount(rm.group("amount") + ("-" if groups_.get("neg") else ""))
