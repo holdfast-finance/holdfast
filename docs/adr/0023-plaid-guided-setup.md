@@ -46,8 +46,10 @@ So the manual steps cannot be removed, but nearly every one can be *checked* by 
 6. **Probe tokens are discarded.** Link tokens minted by a check never leave the service: not
    returned, stored, audited or logged. The slot guard in `.claude/rules/plaid-and-connectors.md`
    applies to tokens handed to Link; a probe cannot create an Item.
-7. **Keys still come from one source (ADR 0015).** Self-host reads `.env`. This ADR does not add
-   in-app key entry for self-host.
+7. **How the keys get in is open (owner, 2026-11-21).** Today self-host reads them from `.env`
+   (ADR 0015), which means hand-editing a file and restarting. The owner does not accept that as
+   the flow for new users. A design and research round is under way on in-app key entry; its
+   outcome will amend this ADR and ADR 0015. Nothing in this ADR settles the question.
 8. **The client is a thin `httpx` wrapper, not `plaid-python`.** The SDK parses numbers as `float`;
    hard rule 1 needs `Decimal` from the first byte. `httpx` moves from a dev to a runtime
    dependency (BSD-3-Clause, maintained, already in the lockfile). Keys go in headers, never the
@@ -60,9 +62,9 @@ So the manual steps cannot be removed, but nearly every one can be *checked* by 
   puts every self-hoster's bank data behind the project's account (PLAN 17.3).
 - **Browser automation of Plaid's dashboard.** Brittle, needs the person's Plaid password, and is
   exactly the scraping the project refuses elsewhere.
-- **In-app key entry for self-host.** Friendlier than editing `.env`, but ADR 0015 chose a single
-  source per deployment so a stored row can never silently replace the operator's key. Left for
-  Lattice and Bulwark to reopen if the `.env` step proves to be where people give up.
+- **In-app key entry for self-host.** Friendlier than editing `.env`. ADR 0015 chose a single
+  source per deployment so a stored row can never silently replace the operator's key. Under
+  research (decision 7), not rejected.
 - **`plaid-python`.** Official, but float parsing would need a post-hoc repair of every amount.
 
 ## Consequences
