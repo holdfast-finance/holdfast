@@ -91,6 +91,9 @@ def test_equivalent_inputs_share_an_identity() -> None:
     b = parse_watch_key(f"wpkh([{FP.upper()}/84'/0'/0']{ZPUB}/0/*)")
     c = parse_watch_key(f"wpkh([{FP}/84h/0h/0h]{ZPUB}/{{0,1}}/*)")
     assert a.identity_hash == b.identity_hash == c.identity_hash
+    assert (
+        a.identity_hash == parse_watch_key(ZPUB).identity_hash
+    )  # origin is metadata, not identity
     assert a.identity_hash != parse_watch_key(YPUB).identity_hash
 
 

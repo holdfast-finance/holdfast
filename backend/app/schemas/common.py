@@ -116,6 +116,8 @@ DecimalStr = Annotated[Decimal, *_decimal_string(14, 8)]
 MoneyStr = Annotated[Decimal, *_decimal_string(12, 2)]
 PriceStr = Annotated[Decimal, *_decimal_string(10, 8)]
 QuantityStr = Annotated[Decimal, *_decimal_string(18, 10)]
+# Crypto quantities: NUMERIC(38,18) (ADR 0020).
+CryptoQuantityStr = Annotated[Decimal, *_decimal_string(20, 18)]
 
 
 class Model(BaseModel):

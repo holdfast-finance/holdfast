@@ -100,8 +100,10 @@ class WatchKey:
 
     @property
     def identity_hash(self) -> str:
-        """Stable per-wallet id: SHA-256 of the canonical descriptor (checksum included)."""
-        return hashlib.sha256(self.descriptor.encode("ascii")).hexdigest()
+        """Stable per-wallet id: SHA-256 of the canonical descriptor without its ``[origin]``
+        and checksum. The same key with or without origin metadata is the same wallet."""
+        bare = re.sub(r"\[[^\]]*\]", "", self.descriptor.rsplit("#", 1)[0])
+        return hashlib.sha256(bare.encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True)
