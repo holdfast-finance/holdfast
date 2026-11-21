@@ -1,0 +1,226 @@
+# Default category tree: group -> category (two levels). Generic names only (hard rule 13).
+#
+# A category's stable machine key is "<group slug>.<category slug>"; a group's is its own slug.
+# Households are seeded from this file once per slug and may then rename, hide or add categories
+# (ADR 0022); the slug never changes. Do not rename or remove a slug once released: add a new one.
+#
+# kind: income | expense | transfer | savings | excluded
+# counts_toward_spending: defaults to (kind == expense); set explicitly to override.
+# essential: true marks a need rather than a want; defaults to false (a group sets the default).
+version: 1
+groups:
+  - slug: income
+    name: Income
+    kind: income
+    categories:
+      - {slug: wages, name: Wages and salary}
+      - {slug: interest, name: Interest earned}
+      - {slug: dividends, name: Dividends}
+      - {slug: pension, name: Pension and retirement income}
+      - {slug: benefits, name: Benefits and unemployment}
+      - {slug: tax-refund, name: Tax refund}
+      - {slug: other, name: Other income}
+
+  - slug: transfers
+    name: Transfers
+    kind: transfer
+    categories:
+      - {slug: account, name: Account transfer}
+      - {slug: credit-card-payment, name: Credit card payment}
+      - {slug: cash-withdrawal, name: Cash withdrawal}
+      - {slug: deposit, name: Deposit}
+      - {slug: loan-proceeds, name: Loan and cash advance proceeds}
+      - {slug: other, name: Other transfer}
+      - {slug: ignored, name: Ignored, kind: excluded}
+
+  - slug: housing
+    name: Housing
+    kind: expense
+    essential: true
+    categories:
+      - {slug: rent, name: Rent}
+      - {slug: mortgage, name: Mortgage}
+      - {slug: maintenance, name: Repairs and maintenance}
+      - {slug: furnishings, name: Furniture and furnishings, essential: false}
+      - {slug: home-supplies, name: Hardware and home supplies}
+      - {slug: security, name: Home security}
+      - {slug: other, name: Other housing}
+
+  - slug: utilities
+    name: Utilities
+    kind: expense
+    essential: true
+    categories:
+      - {slug: electricity-gas, name: Electricity and gas}
+      - {slug: water, name: Water}
+      - {slug: waste, name: Sewage and waste}
+      - {slug: internet-cable, name: Internet and cable, essential: false}
+      - {slug: phone, name: Phone}
+      - {slug: other, name: Other utilities}
+
+  - slug: food
+    name: Food and drink
+    kind: expense
+    categories:
+      - {slug: groceries, name: Groceries, essential: true}
+      - {slug: restaurants, name: Restaurants}
+      - {slug: fast-food, name: Fast food}
+      - {slug: coffee, name: Coffee}
+      - {slug: alcohol, name: Beer, wine and liquor}
+      - {slug: other, name: Other food and drink}
+
+  - slug: transport
+    name: Transportation
+    kind: expense
+    categories:
+      - {slug: fuel, name: Fuel, essential: true}
+      - {slug: public-transit, name: Public transit, essential: true}
+      - {slug: parking, name: Parking}
+      - {slug: tolls, name: Tolls}
+      - {slug: rideshare, name: Taxis and ride shares}
+      - {slug: auto-service, name: Auto service and repair, essential: true}
+      - {slug: bikes-scooters, name: Bikes and scooters}
+      - {slug: other, name: Other transportation}
+
+  - slug: health
+    name: Health and personal care
+    kind: expense
+    categories:
+      - {slug: medical, name: Doctor and primary care, essential: true}
+      - {slug: dental, name: Dental, essential: true}
+      - {slug: vision, name: Eye care, essential: true}
+      - {slug: nursing, name: Nursing and home care, essential: true}
+      - {slug: pharmacy, name: Pharmacy and supplements, essential: true}
+      - {slug: fitness, name: Gym and fitness}
+      - {slug: personal-care, name: Hair, beauty and personal care}
+      - {slug: other, name: Other health, essential: true}
+
+  - slug: insurance
+    name: Insurance
+    kind: expense
+    essential: true
+    categories:
+      - {slug: health, name: Health insurance}
+      - {slug: auto, name: Auto insurance}
+      - {slug: home, name: Home and renters insurance}
+      - {slug: life, name: Life and disability insurance}
+      - {slug: other, name: Other insurance}
+
+  - slug: debt
+    name: Debt payments
+    kind: expense
+    essential: true
+    categories:
+      - {slug: car-loan, name: Car loan}
+      - {slug: student-loan, name: Student loan}
+      - {slug: personal-loan, name: Personal loan}
+      - {slug: other, name: Other loan payment}
+
+  - slug: savings
+    name: Savings and investing
+    kind: savings
+    categories:
+      - {slug: savings, name: Savings contribution}
+      - {slug: investing, name: Investment contribution}
+      - {slug: retirement, name: Retirement contribution}
+
+  - slug: shopping
+    name: Shopping
+    kind: expense
+    categories:
+      - {slug: general, name: General merchandise}
+      - {slug: clothing, name: Clothing and accessories}
+      - {slug: electronics, name: Electronics}
+      - {slug: books, name: Books and media}
+      - {slug: sporting-goods, name: Sporting goods}
+      - {slug: office-supplies, name: Office supplies}
+      - {slug: other, name: Other shopping}
+
+  - slug: entertainment
+    name: Entertainment
+    kind: expense
+    categories:
+      - {slug: streaming, name: TV, movies and streaming}
+      - {slug: music, name: Music and audio}
+      - {slug: games, name: Video games}
+      - {slug: events, name: Events, sports and attractions}
+      - {slug: gambling, name: Casinos and gambling}
+      - {slug: other, name: Other entertainment}
+
+  - slug: travel
+    name: Travel
+    kind: expense
+    categories:
+      - {slug: flights, name: Flights}
+      - {slug: lodging, name: Lodging}
+      - {slug: rental-cars, name: Rental cars}
+      - {slug: other, name: Other travel}
+
+  - slug: education
+    name: Education
+    kind: expense
+    categories:
+      - {slug: tuition, name: Tuition and courses}
+      - {slug: supplies, name: Books and school supplies}
+      - {slug: other, name: Other education}
+
+  - slug: family
+    name: Kids and family
+    kind: expense
+    categories:
+      - {slug: childcare, name: Childcare, essential: true}
+      - {slug: kids-supplies, name: Kids' clothing and supplies}
+      - {slug: kids-activities, name: Kids' activities}
+      - {slug: other, name: Other family}
+
+  - slug: pets
+    name: Pets
+    kind: expense
+    categories:
+      - {slug: food-supplies, name: Pet food and supplies}
+      - {slug: vet, name: Veterinary}
+      - {slug: other, name: Other pet costs}
+
+  - slug: gifts
+    name: Gifts and charity
+    kind: expense
+    categories:
+      - {slug: gifts, name: Gifts}
+      - {slug: charity, name: Donations and charity}
+
+  - slug: taxes
+    name: Taxes
+    kind: expense
+    essential: true
+    categories:
+      - {slug: income-tax, name: Income tax payments}
+      - {slug: property-tax, name: Property tax}
+      - {slug: government-fees, name: Government fees and services}
+      - {slug: other, name: Other taxes}
+
+  - slug: fees
+    name: Fees, interest and services
+    kind: expense
+    categories:
+      - {slug: bank-fees, name: Bank fees}
+      - {slug: interest-charges, name: Interest charges}
+      - {slug: professional-services, name: Accounting, legal and consulting}
+      - {slug: postage-shipping, name: Postage and shipping}
+      - {slug: storage, name: Storage}
+      - {slug: other-services, name: Other services}
+
+  - slug: business
+    name: Business
+    kind: expense
+    categories:
+      - {slug: supplies, name: Business supplies}
+      - {slug: software, name: Software and subscriptions}
+      - {slug: travel, name: Business travel}
+      - {slug: professional-services, name: Business professional services}
+      - {slug: other, name: Other business}
+
+  - slug: uncategorized
+    name: Uncategorized
+    kind: expense
+    categories:
+      - {slug: needs-review, name: Needs a category}
