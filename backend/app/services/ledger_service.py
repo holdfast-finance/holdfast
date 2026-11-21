@@ -320,6 +320,16 @@ class LedgerWriter:
     async def mark_transfer_pair(self, a_id: uuid.UUID, b_id: uuid.UUID) -> uuid.UUID:
         """Link two transactions as the two legs of one transfer. Returns the group id."""
         user = self._require_user()
+        return await self._pair(a_id, b_id, "ledger.transfer_paired", user)
+
+    async def apply_transfer_pair(self, a_id: uuid.UUID, b_id: uuid.UUID) -> uuid.UUID:
+        """Automated pairing (the transfer matcher). Same checks as ``mark_transfer_pair``, no
+        acting user; audited as ``ledger.transfer_auto_paired`` with a null user."""
+        return await self._pair(a_id, b_id, "ledger.transfer_auto_paired", self._user_id)
+
+    async def _pair(
+        self, a_id: uuid.UUID, b_id: uuid.UUID, action: str, user: uuid.UUID | None
+    ) -> uuid.UUID:
         if a_id == b_id:
             raise TransferPairError("a transfer pairs two different transactions")
         rows = await self._lock_group([a_id, b_id])
@@ -334,9 +344,7 @@ class LedgerWriter:
             leg.is_transfer = True
             leg.transfer_group_id = group
         await self._flush()
-        self._audit(
-            "ledger.transfer_paired", a_id, {"group_id": str(group), "other": str(b_id)}, user
-        )
+        self._audit(action, a_id, {"group_id": str(group), "other": str(b_id)}, user)
         return group
 
     async def mark_transfer_single(self, transaction_id: uuid.UUID) -> None:
@@ -540,7 +548,11 @@ class LedgerWriter:
         )
 
     def _audit(
-        self, action: str, transaction_id: uuid.UUID, detail: dict[str, object], user: uuid.UUID
+        self,
+        action: str,
+        transaction_id: uuid.UUID,
+        detail: dict[str, object],
+        user: uuid.UUID | None,
     ) -> None:
         audit.add(
             self._s,
