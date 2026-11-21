@@ -25,6 +25,7 @@ import {
   type MockCredential,
   type MockUser,
 } from '@/mocks/db'
+import { importFile } from '@/mocks/imports'
 import {
   decodeCursor,
   encodeCursor,
@@ -723,6 +724,39 @@ export const handlers = [
   http.get(
     path('/accounts'),
     authed(() => HttpResponse.json({ items: db.accounts })),
+  ),
+  // Statement import (docs: I5). The real routes are pending; see src/api/imports.ts.
+  http.get(
+    path('/imports/runs'),
+    authed(() => HttpResponse.json({ items: db.importRuns })),
+  ),
+  http.post(
+    path('/imports/statements'),
+    authed(
+      async ({ request }) => {
+        // Parse the one multipart part by hand: jsdom's File and undici's `formData()` disagree
+        // about what a File is, and jsdom's XHR can lose the filename. The mock keys its scenario
+        // and its dedupe on the filename plus the file bytes, which is all it needs.
+        const raw = await request.text()
+        const name = /filename="([^"]*)"/.exec(raw)?.[1]
+        if (!name) return apiError('validation_error', 'Choose a PDF to import.')
+        const content = raw.split('\r\n\r\n').slice(1).join('\r\n\r\n').split('\r\n--')[0] ?? ''
+        const scenario = `${name} ${content}`
+        if (/huge/i.test(scenario))
+          return apiError('payload_too_large', 'That request is too large.')
+        if (/boom/i.test(scenario)) {
+          return HttpResponse.json(
+            { error: { code: 'internal_error', message: 'The import failed on the server.' } },
+            { status: 500 },
+          )
+        }
+        if (/notpdf/i.test(scenario)) {
+          return apiError('validation_error', 'That file is not a PDF Holdfast can read.')
+        }
+        return HttpResponse.json(importFile(name, content))
+      },
+      { reauth: true },
+    ),
   ),
   http.get(
     path('/transactions/summary'),

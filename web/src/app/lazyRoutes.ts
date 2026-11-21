@@ -18,6 +18,9 @@ export const InvitePage = lazy(() =>
 export const TransactionsPage = lazy(() =>
   import('@/pages/transactions/TransactionsPage').then((m) => ({ default: m.TransactionsPage })),
 )
+export const ImportPage = lazy(() =>
+  import('@/pages/import/ImportPage').then((m) => ({ default: m.ImportPage })),
+)
 export const SettingsLayout = lazy(() =>
   import('@/pages/settings/SettingsLayout').then((m) => ({ default: m.SettingsLayout })),
 )
