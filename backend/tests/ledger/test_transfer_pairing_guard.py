@@ -8,7 +8,8 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parents[2] / "app"
 NAMES = re.compile(r"pair_transfers|apply_transfer_pair|transfer_pairing")
-GUARDED = ("api", "jobs")
+GUARDED = ("api", "jobs", "worker", "agent")
+SINGLE_FILES = ("main.py",)
 
 
 def test_matcher_is_not_wired_to_api_or_jobs() -> None:
@@ -20,4 +21,8 @@ def test_matcher_is_not_wired_to_api_or_jobs() -> None:
         for n, line in enumerate(path.read_text().splitlines(), start=1)
         if NAMES.search(line)
     ]
+    for name in SINGLE_FILES:
+        for n, line in enumerate((APP / name).read_text().splitlines(), start=1):
+            if NAMES.search(line):
+                hits.append(f"{name}:{n}")
     assert hits == [], "transfer pairing wired to a request or job path: " + ", ".join(hits)

@@ -19,11 +19,19 @@ payment wording earns nothing: it is a refund candidate, not a payment.
 hints decide before days and a real, hinted partner a few days away beats an unrelated same-day
 row. Ties are never broken by id, amount order or input order.
 
-**Auto-apply vs suggest.** A confirmed edge goes to ``pairs`` only with at least one hint. Without
-one it goes to ``suggested`` (a refund and a purchase, or rent and a paycheck, look alike). It
+**Auto-apply vs suggest.** A confirmed edge goes to ``pairs`` only when both legs carry a hint of
+their own, or a mask hint names the other account; a card or loan inflow must also say "payment"
+itself (the checking side saying "payment" does not make a card refund a payment). Otherwise it
+goes to ``suggested`` (``no_hint``, ``one_sided_hint``, ``refund_candidate``): a refund and a
+purchase, or rent and a paycheck, look alike. It
 also goes to ``suggested``, never ``pairs``, when a leg is ``protected`` (the person categorized it
 or split it, so treated it as real spending) or when the two accounts have different owners (no
 single person could undo the pair).
+
+**Closer alternative.** If either leg of a confirmed edge has another live edge with strictly
+fewer days, the edge is not resolved (neither paired nor suggested): hints outrank days, but never
+silently. Those legs stay in the pool and come back as ``AmbiguousLeg`` with all their candidates,
+so no equal-amount row that lost a contest is absent from every list.
 
 **Resolution (deterministic, input-order independent).** Repeat: each unresolved leg looks at its
 best edges (those sharing its smallest key). An edge whose two legs each have it as their one and
@@ -56,6 +64,7 @@ REASON_NO_HINT = "no_hint"
 REASON_REFUND = "refund_candidate"
 REASON_PROTECTED = "user_treated_as_spending"
 REASON_OWNERS = "different_owners"
+REASON_ONE_SIDED = "one_sided_hint"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +121,8 @@ class MatchResult:
 _Key = tuple[int, int]
 
 
-def _leg_hints(me: TransferCandidate, other: TransferCandidate) -> int:
+def _leg_hints(me: TransferCandidate, other: TransferCandidate) -> tuple[int, bool]:
+    """Hints this leg's own description earns, and whether one of them is the mask."""
     text = me.description.casefold()
     n = 0
     if _TRANSFER_WORDS.search(text):
@@ -122,18 +132,21 @@ def _leg_hints(me: TransferCandidate, other: TransferCandidate) -> int:
     ):
         n += 1
     mask = other.account_mask
-    if (
+    named = bool(
         mask
         and len(mask) == MASK_DIGITS
         and mask.isdigit()
         and re.search(rf"(?<!\d){mask}(?!\d)", text)
-    ):
-        n += 1
-    return n
+    )
+    return n + int(named), named
 
 
 def _hints(out: TransferCandidate, inn: TransferCandidate) -> int:
-    return _leg_hints(out, inn) + _leg_hints(inn, out)
+    return _leg_hints(out, inn)[0] + _leg_hints(inn, out)[0]
+
+
+def _inflow_says_payment(inn: TransferCandidate) -> bool:
+    return bool(_PAYMENT_WORDS.search(inn.description.casefold()))
 
 
 def _edge_key(out: TransferCandidate, inn: TransferCandidate) -> _Key:
@@ -159,8 +172,13 @@ def _suggest_reason(out: TransferCandidate, inn: TransferCandidate) -> str | Non
         and out.owner_person_id != inn.owner_person_id
     ):
         return REASON_OWNERS
-    if _hints(out, inn) == 0:
-        return REASON_REFUND if inn.account_type in CARD_TYPES else REASON_NO_HINT
+    (n_out, mask_out), (n_in, mask_in) = _leg_hints(out, inn), _leg_hints(inn, out)
+    if inn.account_type in CARD_TYPES and not _inflow_says_payment(inn):
+        return REASON_REFUND  # a card inflow must say "payment" itself, else it is a refund
+    if n_out + n_in == 0:
+        return REASON_NO_HINT
+    if not ((n_out > 0 and n_in > 0) or mask_out or mask_in):
+        return REASON_ONE_SIDED
     return None
 
 
@@ -207,13 +225,27 @@ def match_transfers(candidates: Iterable[TransferCandidate]) -> MatchResult:
         ]
         if not taken:
             break
+        resolved = 0
+        round_live = set(live)
         for oid, iid in taken:
+            days = edges[oid][iid][1]
+            closer = any(
+                k[1] < days
+                for leg in (oid, iid)
+                for p, k in edges[leg].items()
+                if p in round_live and p not in (oid, iid)
+            )
+            if closer:
+                continue  # a nearer equal-amount row exists: leave all of them to a person
             reason = _suggest_reason(pool[oid], pool[iid])
             if reason is None:
                 pairs.append(ProposedPair(oid, iid))
             else:
                 suggested.append(SuggestedPair(oid, iid, reason))
             live -= {oid, iid}
+            resolved += 1
+        if not resolved:
+            break
 
     ambiguous: list[AmbiguousLeg] = []
     for leg in live:

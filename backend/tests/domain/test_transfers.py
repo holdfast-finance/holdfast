@@ -134,7 +134,7 @@ def test_two_independent_pairs() -> None:
             c(1, CHK, "-10.00"),
             c(2, SAV, "10.00"),
             c(3, CHK, "-70.00"),
-            c(4, CARD, "70.00", kind="credit"),
+            c(4, CARD, "70.00", desc="TRANSFER PAYMENT", kind="credit"),
         ]
     )
     assert ids(r) == {(1, 2), (3, 4)}
@@ -198,7 +198,7 @@ def test_rent_and_paycheck_are_suggested_never_paired() -> None:
     assert not r.pairs and [s.reason for s in r.suggested] == ["no_hint"]
 
 
-def test_hints_decide_before_days() -> None:
+def test_a_nearer_row_makes_a_hinted_far_partner_ambiguous_not_paired() -> None:
     r = match_transfers(
         [
             c(1, CHK, "-80.00", desc="TRANSFER TO SAVINGS"),
@@ -206,7 +206,47 @@ def test_hints_decide_before_days() -> None:
             c(3, OTHER, "80.00", days=0, desc="SALARY"),
         ]
     )
-    assert ids(r) == {(1, 2)} and not r.ambiguous
+    assert not r.pairs and not r.suggested
+    assert {a.transaction_id.int for a in r.ambiguous} == {1, 2, 3}
+
+
+def test_no_equal_amount_row_that_lost_a_contest_is_in_no_list() -> None:
+    r = match_transfers(
+        [
+            c(1, CHK, "-100.00", desc="TRANSFER TO SAVINGS"),
+            c(2, SAV, "100.00", desc="DEPOSIT"),
+            c(3, OTHER, "100.00", days=5, desc="TRF FROM OTHER"),
+        ]
+    )
+    assert not r.pairs and not r.suggested
+    assert {a.transaction_id.int for a in r.ambiguous} == {1, 2, 3}
+
+
+def test_a_hint_on_one_leg_only_is_suggested_not_paired() -> None:
+    a = match_transfers(
+        [
+            c(1, CHK, "-100.00", desc="ONLINE TRANSFER TO EXT"),
+            c(2, SAV, "100.00", days=2, desc="ACME PAYROLL"),
+        ]
+    )
+    assert not a.pairs and [x.reason for x in a.suggested] == ["one_sided_hint"]
+    b = match_transfers(
+        [
+            c(1, CHK, "-1500.00", desc="RENT LANDLORD"),
+            c(2, CARD, "1500.00", days=1, desc="PAYMENT THANK YOU", kind="credit"),
+        ]
+    )
+    assert not b.pairs and [x.reason for x in b.suggested] == ["one_sided_hint"]
+
+
+def test_checking_payment_wording_does_not_make_a_card_refund_a_payment() -> None:
+    r = match_transfers(
+        [
+            c(1, CHK, "-120.00", desc="ELECTRIC BILL PAYMENT"),
+            c(2, CARD, "120.00", days=2, desc="AMAZON REFUND", kind="credit"),
+        ]
+    )
+    assert not r.pairs and [x.reason for x in r.suggested] == ["refund_candidate"]
 
 
 def test_mask_matches_on_digit_boundaries_only() -> None:

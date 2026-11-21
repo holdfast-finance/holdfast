@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db_context import scoped_session
 from app.domain.ledger_rules import LedgerRuleError
 from app.models import Account, AuditLog, Category, Person, Transaction
-from app.services.ledger_service import LedgerWriter, NewTransaction
+from app.services.ledger_service import LedgerWriter, NewTransaction, SplitInput
 from app.services.transfer_pairing import pair_transfers
 from tests.models import conftest as mc
 
@@ -322,3 +322,30 @@ async def test_other_households_are_untouched(
                 await pair_transfers(s, other, FROM, TO)
     finally:
         mc.delete_household(owner_engine, other)
+
+
+async def test_a_split_keeps_a_row_out_of_auto_pairing(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await _account(factory, household, "depository")
+    b = await _account(factory, household, "depository")
+    out = await _txn(factory, household, a, "-25.00", 4)
+    inn = await _txn(factory, household, b, "25.00", 4)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=uuid.uuid4()).write_splits(
+            out, [SplitInput(amount=D("-10.00")), SplitInput(amount=D("-15.00"))]
+        )
+    report = await _run(factory, household)
+    assert not report.paired
+    assert [(x.outflow_id, x.inflow_id, x.reason) for x in report.suggested] == [
+        (out, inn, "user_treated_as_spending")
+    ]
+
+
+async def test_a_spoofed_session_info_does_not_open_the_system_gate(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    async with scoped_session(factory, household, None) as s:
+        s.info["household_wide"] = True
+        with pytest.raises(LedgerRuleError):
+            await pair_transfers(s, household, FROM, TO)

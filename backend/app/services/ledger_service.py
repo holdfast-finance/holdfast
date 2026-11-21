@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.db_context import is_household_wide
 from app.domain.ledger_rules import (
     LedgerRuleError,
     TransferLeg,
@@ -332,7 +333,7 @@ class LedgerWriter:
         Needs an acting ``user_id`` or a household-wide (system job) session, so a request handler
         cannot call it as "the system". Audited as ``ledger.transfer_auto_paired``.
         """
-        if self._user_id is None and not self._s.info.get("household_wide"):
+        if self._user_id is None and not await is_household_wide(self._s):
             raise LedgerRuleError("automatic pairing needs an acting user or a system job session")
         detail: dict[str, object] = {
             "actor": "transfer_matcher",
