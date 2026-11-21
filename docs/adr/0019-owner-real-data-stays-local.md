@@ -28,9 +28,11 @@ reconciles after sanitizing proves nothing about the original.
 3. Real data never enters a commit, a PR or issue, a log line, a fixture, an image, a wheel or
    sdist, a release, or any service or tool outside the machine. That includes other vendors'
    coding CLIs (Codex, Grok): they keep working in clean worktrees with no real data.
-4. Agents report on real data in aggregate: file counts, statement families, reconcile pass rates,
-   parser errors by type. No names, account numbers, merchants or amounts in reports, commit
-   messages or PR text.
+4. Anything derived from real data is real data: extracted text, parser output, golden or
+   snapshot files, test IDs, database dumps, screenshots of an instance loaded with it, and any
+   regex or profile that embeds a name or account digits. Agents report on real data in
+   aggregate: file counts, statement families, reconcile pass rates, parser errors by type. No
+   names, account numbers, merchants or amounts in reports, commit messages or PR text.
 5. Hard rule 7 is unchanged. Repo fixtures are synthetic or sanitizer output. The sanitizer is now
    the tool that turns a real statement into a committable fixture, not a gate in front of agents.
 6. Hard rules 3 and 13 are unchanged: nothing from a statement is logged, and nothing about the
@@ -42,9 +44,11 @@ reconciles after sanitizing proves nothing about the original.
   against sanitized fixtures.
 - Statement text passes through the model the agents run on. The owner accepted that. It is the
   same trust decision as choosing the advisor's provider in Phase 8, made earlier.
-- The protection is now mostly placement plus discipline, with `.gitignore`, the `*.pdf` ignore,
-  `.dockerignore`, gitleaks and the guard hook as backstops. A reviewer must reject any fixture
-  that is not sanitizer output.
+- The protection is placement plus discipline, with backstops: `.gitignore`, `.dockerignore`,
+  gitleaks, the guard hook, a pre-commit check that refuses statement-type files and greps the
+  staged diff against a private denylist kept outside the repo, and a CI check that fails on any
+  tracked-but-ignored file or statement-type file outside the fixture allowlist. A reviewer must
+  reject any fixture that is not sanitizer output.
 - This is a decision by one instance owner about their own data. It grants nothing over anyone
   else's data and does not change what Holdfast Cloud may do.
 
