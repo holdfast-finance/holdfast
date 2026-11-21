@@ -34,10 +34,9 @@ dependencies = [
     "pyotp>=2.12.0",
     "webauthn>=3.0.1",
     "pyyaml>=6.0",
+    # Statement import reads PDFs in the api and worker, so this is not optional.
+    "pdfplumber>=0.11.10",
 ]
-
-[project.optional-dependencies]
-sanitize = ["pdfplumber>=0.11.10"]
 
 [dependency-groups]
 dev = [
