@@ -48,7 +48,7 @@ Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 - [ ] Plaid: sign up, apply for the Trial plan, confirm which products the bundle includes (needed before Phase 2 goes live; sandbox work doesn't need it, but sandbox keys do)
 - [ ] Fill in the 10-Item budget (PLAN 3.2). Confirm the HSA custodian and 401(k) login
 - [ ] Anthropic API key with a monthly spend limit (Phase 8)
-- [ ] Pick the host: a personal machine or VPS, **not** county equipment. Tailscale on server, phone and laptop
+- [ ] Pick the host: a personal machine or VPS, **not** employer equipment. Tailscale on server, phone and laptop
 - [ ] Domain + DNS API token for Caddy DNS-01 (Phase 8.5). Check that `holdfast` trademark/domain is available
 - [ ] Gather statements from 2020 onward (Phase 3). Provide **sanitized** samples for fixtures
 - [ ] Pull 3 credit reports from AnnualCreditReport.com (Phase 6)

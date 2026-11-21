@@ -17,7 +17,10 @@ SCANNED = ("api", "services", "domain", "security")
 # the household-wide view. app/db_context.py (where the flag is defined) sits outside SCANNED.
 # security/rotation.py: the rotate-keys job re-seals every person's bank connections (ADR 0015).
 ALLOWED: frozenset[str] = frozenset({"security/rotation.py"})
-WIDE = re.compile(r"household_wide\s*=\s*True|set_config\(\s*'app\.household_wide'")
+WIDE = re.compile(
+    r"household_wide\s*=\s*True|set_config\(\s*'app\.household_wide'"
+    r"|info\[\s*[\"']household_wide[\"']\s*\]\s*=\s*True"
+)
 
 
 def test_request_paths_never_set_household_wide() -> None:

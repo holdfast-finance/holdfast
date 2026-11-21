@@ -109,6 +109,14 @@ class Account(Base):
         # private account never silently turns joint. Household deletes still cascade.
         child_fk("owner_person_id", "person", ondelete="NO ACTION"),
         UniqueConstraint("bank_connection_id", "external_account_id"),
+        # Imported accounts have no connection, so the key above never fires for them.
+        Index(
+            "uq_account_household_id_external_account_id_import",
+            "household_id",
+            "external_account_id",
+            unique=True,
+            postgresql_where=text("source = 'import'"),
+        ),
         parent_key(),
     )
 

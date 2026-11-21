@@ -1,0 +1,11 @@
+# Example columns for a fictional export, oldest transaction first.
+# The optional balance is the signed balance after each transaction.
+date: Example Posting Date
+description: Example Payee
+amount: Example Net Amount
+balance: Example Running Balance
+date_format: '%Y-%m-%d'
+sign: as_printed
+header: auto
+delimiter: ','
+encoding: utf-8

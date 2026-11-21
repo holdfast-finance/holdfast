@@ -54,16 +54,13 @@ class Base(DeclarativeBase):
     }
 
 
-def create_engine(settings: Settings, *, hide_parameters: bool = False) -> AsyncEngine:
-    """Build the async engine. No connection is opened until first use.
-
-    ``hide_parameters`` keeps bound values out of SQLAlchemy error text (ciphertext, for jobs
-    that handle it).
-    """
+def create_engine(settings: Settings) -> AsyncEngine:
+    """Build the async engine. No connection is opened until first use."""
     return create_async_engine(
         settings.sqlalchemy_url,
         pool_pre_ping=True,
-        hide_parameters=hide_parameters,
+        # Keep statement parameters (amounts, descriptions) out of every error message and log.
+        hide_parameters=True,
         connect_args={"connect_timeout": CONNECT_TIMEOUT_SECONDS},
     )
 

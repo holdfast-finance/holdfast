@@ -1,8 +1,9 @@
 """SQLAlchemy ORM models (PLAN Section 5, as amended by the Phase 1 contract).
 
 Importing this package registers every table on ``app.db.Base.metadata`` (Alembic relies on it).
-RLS policies, grants and SQL functions are not expressed here: they live in the migrations
-(``0002_core_schema``) and are documented in ADR 0008.
+RLS policies, grants, triggers and SQL functions are not expressed here: they live in the
+migrations (``0002_core_schema``, ``0005_import_sync_runs``) and are documented in ADRs 0008 and
+0017.
 """
 
 from app.models.accounts import Account, BalanceSnapshot, BankConnection, Institution
@@ -13,6 +14,7 @@ from app.models.credit import CreditInquiry, CreditReport, CreditScoreEntry, Tra
 from app.models.documents import Document, ParsedField
 from app.models.household import Household, HouseholdSetting, Person
 from app.models.identity import AppUser, AuthSession, TotpRecoveryCode, WebauthnCredential
+from app.models.imports import ImportRun, SyncRun
 from app.models.investments import Holding, InvestmentTxn, Liability, Security
 from app.models.jobs import JobRun
 from app.models.tax import EstimateSnapshot, TaxItem, TaxScenario, TaxYear
@@ -39,6 +41,7 @@ __all__ = [
     "Holding",
     "Household",
     "HouseholdSetting",
+    "ImportRun",
     "Institution",
     "InvestmentTxn",
     "JobRun",
@@ -47,6 +50,7 @@ __all__ = [
     "Person",
     "Rule",
     "Security",
+    "SyncRun",
     "TaxItem",
     "TaxScenario",
     "TaxYear",

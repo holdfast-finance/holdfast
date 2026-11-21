@@ -175,37 +175,42 @@ export function OverviewPage() {
               <DemoTag />
             </CardTitle>
           </CardHeader>
-          <CardContent className="overflow-x-auto">
-            <table className="w-full min-w-[32rem] text-left text-sm">
-              <thead className="text-muted-foreground">
-                <tr className="border-b border-border">
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Account
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Type
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Status
-                  </th>
-                  <th scope="col" className="py-2 text-right font-medium">
-                    Balance
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {DEMO_ACCOUNTS.map((account) => (
-                  <tr key={account.name} className="border-b border-border last:border-0">
-                    <td className="py-3 pr-4">{account.name}</td>
-                    <td className="py-3 pr-4 text-muted-foreground">{account.type}</td>
-                    <td className="py-3 pr-4">
-                      <StatusChip status={account.status} />
-                    </td>
-                    <td className="money py-3 text-right">{account.balance}</td>
+          <CardContent>
+            <p className="pb-2 text-xs text-muted-foreground sm:hidden">
+              Swipe sideways for more columns.
+            </p>
+            <div tabIndex={0} role="region" aria-label="Accounts table" className="overflow-x-auto">
+              <table className="w-full min-w-[32rem] text-left text-sm">
+                <thead className="text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Account
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Type
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Status
+                    </th>
+                    <th scope="col" className="py-2 text-right font-medium">
+                      Balance
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {DEMO_ACCOUNTS.map((account) => (
+                    <tr key={account.name} className="border-b border-border last:border-0">
+                      <td className="py-3 pr-4">{account.name}</td>
+                      <td className="py-3 pr-4 text-muted-foreground">{account.type}</td>
+                      <td className="py-3 pr-4">
+                        <StatusChip status={account.status} />
+                      </td>
+                      <td className="money py-3 text-right">{account.balance}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </CardContent>
         </Card>
 

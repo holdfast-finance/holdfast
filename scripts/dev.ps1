@@ -10,7 +10,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check')]
+        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check', 'dist')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -52,6 +52,7 @@ $Help = [ordered]@{
     'sync'    = 'Fast-forward main to origin/main; elsewhere print ahead/behind'
     'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
     'test-locked' = 'test under an exclusive lock (${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock) so parallel worktrees share the test DB safely'
+    'dist' = 'Build wheel + sdist (holdfast-finance) and SHA256SUMS into ./dist. Does not publish.'
     'release-check' = 'Compare product SemVer and Python version. Does not tag or publish.'
 }
 
@@ -197,6 +198,14 @@ switch ($Target) {
     }
     'release-check' {
         & $Python scripts/cut_release.py check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    'dist' {
+        if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+        Push-Location backend
+        try { uv build --out-dir ../dist; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } finally { Pop-Location }
+        Remove-Item -Force dist/.gitignore -ErrorAction SilentlyContinue
+        & $Python scripts/dist_checksums.py dist
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     'test-locked' {

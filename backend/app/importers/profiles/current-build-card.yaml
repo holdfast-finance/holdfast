@@ -1,0 +1,17 @@
+# Current Build Card statement. Printed amounts and balances are amounts OWED: a charge is
+# positive, a payment negative. Holdfast sign is the opposite (charge = outflow = negative).
+id: current-build-card
+institution: Current
+kind: card
+balance_sign: invert
+fingerprint:
+  - 'current\.com'
+  - '^\s*Build\s+Card\s+Statement\s*$'
+period: 'Statement Period (?P<start>\d\d/\d\d/\d\d) - (?P<end>\d\d/\d\d/\d\d)'
+period_date_format: '%m/%d/%y'
+account: 'Account Number \*+(?P<last4>\d{4})'
+opening: '^\s*Starting Balance\s+(?P<v>-?\$[\d,]+\.\d\d)\s*$'
+closing: '^\s*Ending Balance\s+(?P<v>-?\$[\d,]+\.\d\d)\s*$'
+groups:
+  - sign: invert
+    row: '^\s*(?P<date>\d\d/\d\d/\d\d)\s+(?P<desc>.+?)\s+(?P<amount>-?\$[\d,]+\.\d\d)\s+(?P<balance>-?\$[\d,]+\.\d\d)\s*$'

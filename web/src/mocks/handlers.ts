@@ -25,6 +25,21 @@ import {
   type MockCredential,
   type MockUser,
 } from '@/mocks/db'
+import {
+  UPLOAD_ERRORS,
+  balancesOnlyResult,
+  importFile,
+  uploadErrorKey,
+  type ScenarioError,
+} from '@/mocks/imports'
+import {
+  decodeCursor,
+  encodeCursor,
+  filterFromParams,
+  matching,
+  newestFirst,
+  totalsByCurrency,
+} from '@/mocks/ledger'
 
 /*
  * MSW handlers mirroring docs/phases/PHASE-1-contract.md "API contract", backed by `./db.ts`.
@@ -62,6 +77,16 @@ export function apiError(code: KnownErrorCode, message: string) {
 }
 
 const path = (p: string) => `*/api${p}`
+
+/** An upload refusal with the server's fixed message (and `Retry-After` on a 429). */
+export function uploadFailure(e: ScenarioError) {
+  const headers: Record<string, string> = {}
+  if ('retryAfter' in e && e.retryAfter) headers['Retry-After'] = String(e.retryAfter)
+  return HttpResponse.json(
+    { error: { code: e.code, message: e.message } },
+    { status: e.status, headers },
+  )
+}
 
 // --- Serializers (never include passwords, TOTP secrets or public keys) ------------------------
 
@@ -709,5 +734,77 @@ export const handlers = [
       },
       { owner: true },
     ),
+  ),
+
+  // Accounts and transactions (read-only; docs: U1a). Any signed-in member may read.
+  http.get(
+    path('/accounts'),
+    authed(() => HttpResponse.json({ items: db.accounts })),
+  ),
+  // Statement import (I5 / I5b). Upload needs no step-up; accepting a run does.
+  http.get(
+    path('/imports/runs'),
+    authed(({ request }) => {
+      const params = new URL(request.url).searchParams
+      const limit = Number(params.get('limit') ?? 20)
+      const start = Number(params.get('cursor') ?? 0)
+      const items = db.importRuns.slice(start, start + limit)
+      const next = start + limit < db.importRuns.length ? String(start + limit) : null
+      return HttpResponse.json({ items, next_cursor: next })
+    }),
+  ),
+  http.post(
+    path('/imports/runs/:id/accept'),
+    authed(
+      ({ params }) => {
+        const run = db.importRuns.find((r) => r.id === params.id)
+        if (!run) return apiError('not_found', "That import run doesn't exist.")
+        if (run.reconcile_status !== 'needs_review') {
+          return apiError('conflict', 'Only a run that needs review can be accepted.')
+        }
+        run.reconcile_status = 'accepted'
+        run.reason = null
+        run.reviewed_at = now()
+        return HttpResponse.json(run)
+      },
+      { reauth: true },
+    ),
+  ),
+  http.post(
+    path('/imports/statements'),
+    authed(async ({ request }) => {
+      // Parse the one multipart part by hand: jsdom's File and undici's `formData()` disagree
+      // about what a File is, and jsdom's XHR can lose the filename. The mock keys its scenario
+      // and its dedupe on the filename plus the file bytes, which is all it needs.
+      const raw = await request.text()
+      const name = /filename="([^"]*)"/.exec(raw)?.[1]
+      if (!name) return apiError('validation_error', 'Choose a PDF to import.')
+      const content = raw.split('\r\n\r\n').slice(1).join('\r\n\r\n').split('\r\n--')[0] ?? ''
+      const scenario = `${name} ${content}`.toLowerCase()
+      const failure = uploadErrorKey(scenario)
+      if (failure) return uploadFailure(UPLOAD_ERRORS[failure])
+      if (scenario.includes('balances')) return HttpResponse.json(balancesOnlyResult(name))
+      return HttpResponse.json(importFile(name, content))
+    }),
+  ),
+  http.get(
+    path('/transactions/summary'),
+    authed(({ request }) => {
+      const filters = filterFromParams(new URL(request.url).searchParams)
+      return HttpResponse.json({ totals: totalsByCurrency(matching(filters)) })
+    }),
+  ),
+  http.get(
+    path('/transactions'),
+    authed(({ request }) => {
+      const url = new URL(request.url)
+      const filters = filterFromParams(url.searchParams)
+      const limit = Math.min(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 200)
+      const start = decodeCursor(url.searchParams.get('cursor'))
+      const rows = newestFirst(matching(filters))
+      const items = rows.slice(start, start + limit)
+      const next = start + limit < rows.length ? encodeCursor(start + limit) : null
+      return HttpResponse.json({ items, next_cursor: next })
+    }),
   ),
 ]

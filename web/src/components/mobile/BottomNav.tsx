@@ -50,7 +50,10 @@ function MoreSheet() {
           </button>
         </SheetTrigger>
       </li>
-      <SheetContent side="bottom" className="max-h-[85dvh] rounded-t-[var(--radius-card)] pb-6">
+      <SheetContent
+        side="bottom"
+        className="max-h-[85dvh] rounded-t-[var(--radius-card)] pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+      >
         <SheetHeader>
           <SheetTitle className="font-heading text-lg font-semibold">More</SheetTitle>
           <SheetDescription>Every account. One root.</SheetDescription>
@@ -98,7 +101,7 @@ export function BottomNav() {
       data-testid="mobile-tabbar"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur"
     >
-      <ul className="mx-auto flex max-w-lg items-stretch gap-1 px-2 py-1">
+      <ul className="mx-auto flex max-w-lg items-stretch gap-1 py-1 pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))]">
         {MOBILE_TABS.map((id) => (
           <Tab key={id} id={id} />
         ))}

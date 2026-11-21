@@ -9,10 +9,15 @@ export interface MoneyProps extends FormatMoneyOptions {
 
 /** Renders an amount in the theme mono with tabular figures. Negative amounts use destructive. */
 export function Money({ amount, className, ...options }: MoneyProps) {
-  const { text, negative } = formatMoney(amount, options)
+  const { text, negative, positive } = formatMoney(amount, options)
   return (
     <span
-      className={cn('money', negative && 'text-destructive-text', className)}
+      className={cn(
+        'money',
+        negative && 'text-destructive-text',
+        positive && options.showPlus && 'text-success-text',
+        className,
+      )}
       data-negative={negative ? 'true' : undefined}
     >
       {text}

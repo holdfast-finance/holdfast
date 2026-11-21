@@ -226,8 +226,8 @@ async def _audit_failure(
 
 async def _run() -> int:
     settings = get_settings()
-    # hide_parameters: a chained SQLAlchemy error would otherwise carry ciphertext bind values.
-    engine = create_engine(settings, hide_parameters=True)
+    # The engine hides bind parameters, so a chained SQLAlchemy error carries no ciphertext.
+    engine = create_engine(settings)
     factory = create_session_factory(engine)
     counts = Counts()
     try:

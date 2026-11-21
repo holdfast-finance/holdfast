@@ -410,7 +410,11 @@ async def test_userless_household_with_an_unopenable_row_shows_as_failed_and_res
 
 
 async def test_rotator_engine_hides_bound_parameters(app_url: str) -> None:
-    """L3: a chained SQLAlchemy error must not carry ciphertext bind values."""
+    """L3: a chained SQLAlchemy error must not carry ciphertext bind values.
+
+    Every engine hides bind parameters now (``app.db.create_engine``), so there is no louder
+    default engine left to compare against.
+    """
     from sqlalchemy.exc import SQLAlchemyError
 
     from app.db import create_engine
@@ -418,7 +422,7 @@ async def test_rotator_engine_hides_bound_parameters(app_url: str) -> None:
 
     settings = make_settings(database_url=SecretStr(app_url))
     canary = b"hf1.0123456789abcdef.gAAAACIPHERCANARY"
-    engine = create_engine(settings, hide_parameters=True)
+    engine = create_engine(settings)
     try:
         with pytest.raises(SQLAlchemyError) as ei:
             async with engine.begin() as c:
@@ -430,14 +434,6 @@ async def test_rotator_engine_hides_bound_parameters(app_url: str) -> None:
         assert "CIPHERCANARY" not in repr(ei.value)
     finally:
         await engine.dispose()
-    loud = create_engine(settings)
-    try:
-        with pytest.raises(SQLAlchemyError) as ei2:
-            async with loud.begin() as c:
-                await c.execute(text("UPDATE no_such_table SET x = :new"), {"new": canary})
-        assert "CIPHERCANARY" in str(ei2.value)  # control: the default engine would leak
-    finally:
-        await loud.dispose()
 
 
 async def test_cli_audits_a_failure_row_when_rotate_raises(

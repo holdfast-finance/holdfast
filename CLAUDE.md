@@ -36,7 +36,7 @@ the plan is `docs/planning/ROADMAP.md` and the sprint log `docs/planning/SPRINTS
 Commits: Conventional Commits (`feat(plaid): …`, `fix(import): …`, `docs: …`, `chore: …`, `test: …`).
 Explain *why* in the body. **Attribution:** end every commit with
 `Co-Authored-By: <Agent> (Holdfast) <agents@holdfastfinance.app>` and PRs with `— <Agent>, Holdfast`.
-Never credit a model vendor. Remote: `holdfast-finance/holdfast` (private). Never force-push or rewrite `main`.
+Never credit a model vendor. Remote: `holdfast-finance/holdfast` (public). Never force-push or rewrite `main`.
 
 ## Commands
 
@@ -76,7 +76,7 @@ Docker Compose for services.
 6. **Imports are idempotent.** Every statement reconciles (opening + Σ txns = closing ± $0.01) or
    gets flagged `needs_review`. Never silently accept an unreconciled statement.
 7. **Every new module gets tests.** Fixtures are synthetic or sanitized. Real statements, credit
-   reports, tax forms and exports never go in the repo.
+   reports, tax forms and exports never go in the repo: they stay in a private directory outside it (ADR 0019).
 8. **Migrations go through Alembic only.** No manual schema edits. Every table with household data
    carries `household_id` and an RLS policy. The app connects as `holdfast_app` (no superuser, no
    BYPASSRLS), and migrations run as `holdfast_owner` (ADR 0007). Never give the app role DDL.
@@ -129,4 +129,4 @@ Docker Compose for services.
 - Plaid Transactions gives about 24 months, so older history comes from statement import.
 - No consumer credit-bureau API exists. Use manual AnnualCreditReport.com PDF import only, with no scraping.
 - HWI is winding down (Aug 2026). Never build signing on server-side USB.
-- Never run anything on county-owned hardware or over the county VPN (PLAN Section 0).
+- Never run anything on employer-owned hardware or over an employer VPN (PLAN Section 0).

@@ -74,7 +74,7 @@ async def test_health_ok_with_fakes() -> None:
     assert resp.status_code == 200
     assert resp.json() == {
         "status": "ok",
-        "version": "0.0.0",
+        "version": "0.0.0-alpha",
         "checks": {"db": "ok", "redis": "ok"},
     }
 
