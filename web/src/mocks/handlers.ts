@@ -43,6 +43,7 @@ import {
   newestFirst,
   totalsByCurrency,
 } from '@/mocks/ledger'
+import { MOCK_CHECK_LIMIT, plaidSetup } from '@/mocks/plaid'
 
 /*
  * MSW handlers mirroring docs/phases/PHASE-1-contract.md "API contract", backed by `./db.ts`.
@@ -820,6 +821,32 @@ export const handlers = [
       row.category_source = null
       return HttpResponse.json(row)
     }),
+  ),
+  // Plaid setup checklist (P3). Owner only; the check is limited like the real one.
+  http.get(
+    path('/plaid/setup'),
+    authed(() => HttpResponse.json(plaidSetup(db.plaid, false)), { owner: true }),
+  ),
+  http.post(
+    path('/plaid/setup/check'),
+    authed(
+      () => {
+        if (db.plaid.checks >= MOCK_CHECK_LIMIT) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: ERROR_CODES.rateLimited,
+                message: 'Too many attempts. Try again in 5 minutes.',
+              },
+            },
+            { status: 429, headers: { 'Retry-After': '300' } },
+          )
+        }
+        db.plaid.checks += 1
+        return HttpResponse.json(plaidSetup(db.plaid, true))
+      },
+      { owner: true },
+    ),
   ),
   http.get(
     path('/transactions/summary'),

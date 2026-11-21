@@ -1,6 +1,7 @@
 import type { ImportRun } from '@/api/imports'
 import type { Account, Transaction } from '@/api/ledger'
 import type { AuditEntry, FilingRole, UserRole } from '@/api/contracts'
+import { defaultPlaidScenario, type PlaidScenario } from '@/mocks/plaid'
 
 /*
  * In-memory state behind the MSW handlers. Mirrors the shape of the Phase 1 tables closely enough
@@ -68,6 +69,8 @@ export interface MockState {
   /** Statement import runs and the filenames already imported (see `./imports.ts`). */
   importRuns: ImportRun[]
   importedFiles: string[]
+  /** Plaid setup scenario (see `./plaid.ts`). */
+  plaid: PlaidScenario
   session: MockSession | null
   challenges: Set<string>
   failedLogins: number
@@ -85,6 +88,7 @@ function emptyState(): MockState {
     transactions: [],
     importRuns: [],
     importedFiles: [],
+    plaid: defaultPlaidScenario(),
     session: null,
     challenges: new Set(),
     failedLogins: 0,
