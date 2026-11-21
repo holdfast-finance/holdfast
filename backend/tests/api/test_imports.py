@@ -316,6 +316,7 @@ async def test_accept_needs_review_then_again_is_idempotent(app: FastAPI, owner:
     assert first.status_code == 200, first.text
     run = first.json()
     assert run["reconcile_status"] == "accepted" and run["reviewed_at"]
+    assert block["reason"] == "balance_mismatch" and run["reason"] is None
     # Accepting is not reconciling: the numbers still show the gap.
     assert run["balance_diff"] == block["balance_diff"] != "0.00"
     again = await owner.client.post(f"/api/imports/runs/{run_id}/accept")
@@ -332,7 +333,7 @@ async def test_accept_needs_review_then_again_is_idempotent(app: FastAPI, owner:
     assert str(rows[0].entity_id) == run_id and rows[0].user_id is not None
     assert stored.reviewed_by_user_id == rows[0].user_id
     listed = (await owner.client.get("/api/imports/runs")).json()["items"][0]
-    assert listed["reconcile_status"] == "accepted"
+    assert listed["reconcile_status"] == "accepted" and listed["reason"] is None
     # A re-upload still reports the accepted state, with nothing written.
     re = (await upload(owner.client, pdf_bytes(BAD_CARD))).json()
     assert re["created"] is False and re["blocks"][0]["reconcile_status"] == "accepted"
@@ -463,15 +464,22 @@ async def test_concurrent_identical_uploads_one_wins_one_conflicts_file_stays(
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
     data = pdf_bytes(NFCU_CARD)
-    async with await member_client(app, hid) as sam:
-        a, b = await asyncio.gather(upload(owner.client, data), upload(sam, data))
-    assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
-    assert await count(app, hid, Document) == 1
-    (path,) = stored_files(store)
-    assert path.read_bytes() == data
-    # The same user cannot run two at once, and a later sequential re-upload is the ordinary 200.
-    again = await upload(owner.client, data)
-    assert again.status_code == 200 and again.json()["created"] is False
+    async with await member_client(app, hid) as sam_client:
+        a, b = await asyncio.gather(upload(owner.client, data), upload(sam_client, data))
+        assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
+        assert await count(app, hid, Document) == 1
+        (path,) = stored_files(store)
+        assert path.read_bytes() == data
+        # A later sequential re-upload by whoever won is the ordinary 200. Not by the loser: the
+        # winner's document and account are that person's own and private (ADR 0008), so the
+        # other member correctly gets a 409. Which of the two wins is a race, so follow it.
+        a_won = a.status_code == 200
+        winner, loser = (owner.client, sam_client) if a_won else (sam_client, owner.client)
+        counts = (await count(app, hid, Transaction), await count(app, hid, ImportRun))
+        again = await upload(winner, data)
+        assert again.status_code == 200 and again.json()["created"] is False
+        assert (await upload(loser, data)).status_code == 409
+        assert (await count(app, hid, Transaction), await count(app, hid, ImportRun)) == counts
 
 
 async def test_the_same_user_cannot_run_two_identical_uploads_at_once(owner: Owner) -> None:

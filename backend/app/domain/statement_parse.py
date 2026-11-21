@@ -233,14 +233,25 @@ def _apply_sign(printed: Decimal, sign: Sign) -> Decimal:
     return abs(printed)
 
 
+def _row_lower_bound(start: date | None, end: date) -> date:
+    """The earliest date a row may carry: a month before the printed start, else two before the end.
+
+    One bound for both reading a year-less date and flagging ``date_out_of_period``, so a row the
+    check accepts is never read into a different year.
+    """
+    return _months_back(start, 1) if start else _months_back(end, 2)
+
+
 def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None = None) -> date:
     """Read a printed row date. A year-less date takes the year that best fits the statement.
 
     Candidates are the period end's year and its neighbours (Dec/Jan statements, a row a few days
     past the end). Prefer a candidate inside the period, then one in the posting grace, then
-    any candidate. Within each group the candidate nearest the period end wins. Card statements
-    with no printed start allow two months back. A candidate year where the day does not exist
-    (Feb 29) is skipped. Dates that print a year are taken as printed.
+    any candidate. Within each group the candidate nearest the period end wins.
+    Rows may sit a month before a printed start (see ``_row_lower_bound``); card
+    statements with no printed start allow two months back.
+    A candidate year where the day does not exist (Feb 29) is skipped.
+    Dates that print a year are taken as printed.
     """
     if "%y" in fmt or "%Y" in fmt:
         try:
@@ -260,7 +271,7 @@ def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None
             continue  # no Feb 29 in that year
     if not candidates:
         raise StatementParseError("unreadable date")
-    lower = period_start if period_start is not None else _months_back(period_end, 2)
+    lower = _row_lower_bound(period_start, period_end)
     upper = period_end + timedelta(days=7)
     inside = [d for d in candidates if lower <= d <= period_end]
     with_grace = [d for d in candidates if lower <= d <= upper]
@@ -443,7 +454,7 @@ def _finish_block(b: _Block, profile: Profile, start: date | None, end: date) ->
     rec = reconcile(opening, closing, [t.amount for t in txns])
     # A row dated well outside the statement period means a misread date or the wrong document.
     # A card statement has no printed start, so allow its whole cycle plus posting lag.
-    lower = _months_back(start, 1) if start else _months_back(end, 2)
+    lower = _row_lower_bound(start, end)
     upper = end + timedelta(days=7)
     if rec.status == "reconciled" and any(not lower <= t.posted_date <= upper for t in txns):
         rec = Reconciliation("needs_review", "date_out_of_period", rec.diff)
