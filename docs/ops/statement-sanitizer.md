@@ -1,14 +1,17 @@
 # Statement sanitizer (owner guide)
 
 Turns your real bank, card and brokerage statements into safe fixtures for bank profiles. It runs
-offline on your machine. **No agent reads the input.** Agents only ever see the reviewed output.
+offline on your machine. Its output is the **only** form of a real statement that may be committed as a
+fixture. Whether agents may read the originals on your machine is your call as the instance owner
+([ADR 0019](../adr/0019-owner-real-data-stays-local.md)); either way the originals stay outside the repository.
 
 ## Run it
 
-Put the zip (or PDFs, CSVs, OFX/QFX) under `data/inbox/` (git-ignored). Then:
+Put the zip (or PDFs, CSVs, OFX/QFX) in a private directory **outside the repository**, mode `0700`
+(the examples use `$HOME/holdfast-private/`; write `$HOME`, not `~`, because zsh does not expand `~` after `=`). Never under the repo tree, not even a git-ignored folder. Then:
 
 ```
-make sanitize IN=data/inbox/statements.zip OUT=data/outbox/run1
+make sanitize IN=$HOME/holdfast-private/inbox/statements.zip OUT=$HOME/holdfast-private/outbox/run1
 ```
 
 `IN` can be a zip, a directory, or one file. `OUT` is created `0700`; files are `0600`, created
@@ -18,7 +21,7 @@ one. Add `CLEAR=1` (CLI: `--clear-out`) to empty an existing `OUT` first. It onl
 tool's own output names (`doc-NNNN.txt`, `.layout.json`, `.report.json`, `SUMMARY.json`). Every
 entry is checked before the first delete, and anything else (a PDF, a subdirectory, an unrelated
 file) makes it refuse and delete nothing. `OUT` may not equal `IN` or contain it or sit inside
-it, so `OUT=data/inbox CLEAR=1` is refused.
+it, so `OUT=$HOME/holdfast-private/inbox CLEAR=1` is refused.
 Outputs per document: `doc-0001.txt` (layout text), `doc-0001.layout.json` (tokens with
 positions), `doc-0001.report.json`, plus a top-level `SUMMARY.json`. Output names are numbered;
 original file names are never copied. The report holds counts by kind and a 12-char SHA-256 of
@@ -67,7 +70,7 @@ labels, pass them back with `--keep mobile --keep card --keep stock`.
 ## Review before anyone else sees it
 
 ```
-make sanitize IN=data/inbox/statements.zip REVIEW=1 | less
+make sanitize IN=$HOME/holdfast-private/inbox/statements.zip REVIEW=1 | less
 ```
 
 `REVIEW=1` prints only sanitized text and writes nothing. Dollars in that text are synthetic.
@@ -80,7 +83,7 @@ paste originals into chat.
 Only after review, copy the files you approve into
 `backend/tests/fixtures/statements/<bank>/` (for example `first-example-bank/`). Keep the
 `doc-NNNN.txt` and `.layout.json`; leave the `.report.json` out unless you want it. Then hand the
-bank name to an agent and say the fixtures are ready. Never copy anything from `data/inbox/`.
+bank name to an agent and say the fixtures are ready. Never copy anything from the private inbox into the repository.
 
 ## Safety limits
 

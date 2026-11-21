@@ -2,6 +2,7 @@
 """Plan a public Holdfast version release. This does not create a tag or a GitHub Release.
 
 `check` compares the committed product SemVer with the Python package version.
+`verify-tag --tag` is the release workflow gate (annotated, on main, manifests agree).
 `plan --sha` prints the commands Keel runs, and only when that commit is on main.
 A product release is an annotated ``v`` tag plus a GitHub Release on that same commit.
 Phase tags are milestones and are refused here.
@@ -172,15 +173,53 @@ def check(root: Path) -> str:
     return f"{tag}\nproduct {product}\npython {python}\n"
 
 
+def verify_tag(root: Path, tag: str, main_ref: str = "origin/main") -> str:
+    """Release-workflow gate: ``tag`` is annotated, on ``main_ref``, and matches the manifests.
+
+    Returns ``key=value`` lines for ``$GITHUB_OUTPUT``. Nothing is created or moved.
+    """
+    ref = f"refs/tags/{tag}"
+    kind = _git(root, "cat-file", "-t", ref)
+    if kind.returncode != 0:
+        raise ReleaseError(f"{tag} does not exist")
+    if kind.stdout.strip() != "tag":
+        raise ReleaseError(f"{tag} is a lightweight tag; releases need an annotated tag")
+    commit = _git(root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    if commit.returncode != 0:
+        raise ReleaseError(f"{tag} does not point at a commit")
+    sha = commit.stdout.strip()
+    if _git(root, "merge-base", "--is-ancestor", sha, main_ref).returncode != 0:
+        raise ReleaseError(f"{tag} points at {sha}, which is not on {main_ref}")
+    product, python = versions_at(root, sha)
+    expected = python_version(product)
+    if python != expected:
+        raise ReleaseError(f"Python version {python} does not match product {product} ({expected})")
+    if tag_name(product) != tag:
+        raise ReleaseError(f"tag {tag} does not match manifest version {product}")
+    notes = Path("docs/releases") / f"{tag}.md"
+    _show(root, sha, notes.as_posix())
+    prerelease = "-" in product
+    return (
+        f"tag={tag}\nsha={sha}\nproduct={product}\npython={python}\n"
+        f"prerelease={str(prerelease).lower()}\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "plan"))
+    parser.add_argument("command", choices=("check", "plan", "verify-tag"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--sha", default="HEAD")
+    parser.add_argument("--tag", help="verify-tag: the pushed tag, such as v0.0.0-alpha")
+    parser.add_argument("--main-ref", default="origin/main", help="verify-tag: the main branch ref")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             sys.stdout.write(check(args.root))
+        elif args.command == "verify-tag":
+            if not args.tag:
+                raise ReleaseError("verify-tag needs --tag")
+            sys.stdout.write(verify_tag(args.root, args.tag, args.main_ref))
         else:
             sys.stdout.write(format_plan(describe(args.root, args.sha)))
     except ReleaseError as exc:

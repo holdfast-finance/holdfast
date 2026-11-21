@@ -1,0 +1,5 @@
+# Deny everything, then allow only what the image needs.
+*
+!Caddyfile
+!Caddyfile.prod
+!Dockerfile.prod

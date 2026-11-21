@@ -35,7 +35,7 @@ def commit_release(repo: Path, product: str, python: str, notes: bool) -> str:
     (repo / "backend").mkdir()
     (repo / "web" / "package.json").write_text(json.dumps({"version": product}) + "\n")
     (repo / "backend" / "pyproject.toml").write_text(
-        f'[project]\nname = "holdfast"\nversion = "{python}"\n'
+        f'[project]\nname = "holdfast-finance"\nversion = "{python}"\n'
     )
     if notes:
         tag = f"v{product}"
@@ -123,6 +123,37 @@ class PlanTests(unittest.TestCase):
             sha = commit_release(repo, "0.0.0-alpha", "0.0.0a0", notes=False)
             with self.assertRaises(cut_release.ReleaseError):
                 cut_release.describe(repo, sha)
+
+    def test_verify_tag_accepts_an_annotated_tag_on_main(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-q", "-b", "main")
+            sha = commit_release(repo, "0.0.0-alpha", "0.0.0a0", notes=True)
+            git(repo, "tag", "-a", "v0.0.0-alpha", sha, "-m", "cut")
+            out = cut_release.verify_tag(repo, "v0.0.0-alpha", "main")
+        self.assertIn("tag=v0.0.0-alpha\n", out)
+        self.assertIn(f"sha={sha}\n", out)
+        self.assertIn("python=0.0.0a0\n", out)
+        self.assertIn("prerelease=true\n", out)
+
+    def test_verify_tag_refuses_lightweight_off_main_and_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-q", "-b", "main")
+            sha = commit_release(repo, "0.0.0-alpha", "0.0.0a0", notes=True)
+            git(repo, "tag", "v0.0.0-alpha", sha)
+            with self.assertRaises(cut_release.ReleaseError):
+                cut_release.verify_tag(repo, "v0.0.0-alpha", "main")
+            git(repo, "tag", "-a", "v9.9.9", sha, "-m", "wrong name")
+            with self.assertRaises(cut_release.ReleaseError):
+                cut_release.verify_tag(repo, "v9.9.9", "main")
+            with self.assertRaises(cut_release.ReleaseError):
+                cut_release.verify_tag(repo, "v0.0.1", "main")
+            git(repo, "checkout", "-q", "-b", "side")
+            git(repo, "commit", "-q", "--allow-empty", "-m", "side")
+            git(repo, "tag", "-a", "v0.0.0-beta", "side", "-m", "off main")
+            with self.assertRaises(cut_release.ReleaseError):
+                cut_release.verify_tag(repo, "v0.0.0-beta", "main")
 
     def test_this_checkout_matches_one_prerelease(self) -> None:
         text = cut_release.check(ROOT)

@@ -55,3 +55,15 @@ CLAUDE.local.md
 
 # Cloudflare CLI local cache (account id/name)
 .cloudflare/
+
+# Statement-type files and local captures: real data never lands here (ADR 0019)
+*.ofx
+*.qfx
+*.qbo
+*.xls
+*.xlsx
+*.zip
+screenshots/
+.hypothesis/
+# An unexpanded ~ in a path argument creates a literal directory; never track it
+/~/

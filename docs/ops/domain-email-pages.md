@@ -28,7 +28,7 @@ Manage with: `cf email-routing rules list-account -z holdfastfinance.app`, `cf e
   - `www` CNAME → `holdfast-finance.github.io` (GitHub redirects www → apex)
 - Pages custom domain `holdfastfinance.app`, HTTPS enforced.
 - **Verified domain** for the org (2026-11-19), which prevents takeover by other GitHub accounts. TXT `_github-pages-challenge-holdfast-finance` = `481396e08071f8a5b67f592ee1f1fa`. **Keep this record**, because GitHub re-checks it.
-- Org profile: name "Holdfast Finance", website https://holdfastfinance.app, public and billing email `hello@holdfastfinance.app`. Owner: GrayManSam (admin).
+- Org profile: name "Holdfast Finance", website https://holdfastfinance.app, public and billing email `hello@holdfastfinance.app`. One admin owner.
 - Why not proxied (orange cloud): proxying interferes with GitHub's certificate issuance and renewal, and GitHub Pages already serves over a CDN.
 
 ## GitHub org: `holdfast-finance`
