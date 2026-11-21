@@ -34,7 +34,7 @@ def _extensions(database_url: str) -> set[str]:
 
 def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0005_import_sync_runs"]
+    assert script.get_heads() == ["0006_account_import_unique"]
 
 
 @pytest.mark.services

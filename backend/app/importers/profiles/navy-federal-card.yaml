@@ -1,0 +1,26 @@
+# Navy Federal credit card statement. Printed balances are amounts owed (Holdfast sign is the
+# opposite). Payments and credits print positive but reduce the balance (inflow); purchases and
+# interest print positive and increase it (outflow). Interest rows have no date: period end.
+id: navy-federal-card
+institution: Navy Federal Credit Union
+kind: card
+balance_sign: invert
+fingerprint:
+  - '~SUMMARY OF ACCOUNT ACTIVITY~'
+  - '~Navy Federal~'
+period: '~Statement Closing Date~\s*(?P<end>\d\s*\d\s*/\s*\d\s*\d\s*/\s*\d\s*\d\s*\d\s*\d)'
+period_date_format: '%m/%d/%Y'
+date_format: '%m/%d/%y'
+account: 'ACCOUNT NUMBER\s+xxx xxxx xxxx (?P<last4>\d{4})'
+opening: '~Previous Balance~\s*(?P<v>-?\$\s*[\d,\s]*\d\s*\.\s*\d\s*\d)'
+closing: '~New Balance~\s*(?P<v>-?\$\s*[\d,\s]*\d\s*\.\s*\d\s*\d)'
+groups:
+  - enter: '^\s*~TRANSACTIONS~\s*$'
+    sign: outflow
+    row: '^\s*(?:[^\d\s]\S*\s+)?(?P<date>\d\d/\d\d/\d\d)\s+\d\d/\d\d/\d\d\s+\S+\s+(?P<desc>.+?)\s+(?P<amount>-?\$[\d,]+\.\d\d)\s*$'
+  - enter: '^\s*~PAYMENTS AND CREDITS~\s*$'
+    sign: inflow
+    row: '^\s*(?:[^\d\s]\S*\s+)?(?P<date>\d\d/\d\d/\d\d)\s+\d\d/\d\d/\d\d\s+\S+\s+(?P<desc>.+?)\s+(?P<amount>-?\$[\d,]+\.\d\d)\s*$'
+  - enter: '^\s*(~INTEREST~|~FEES~)\s*~CHARGED~\s*$'
+    sign: outflow
+    row: '^\s*(?P<desc>(?:~INTEREST~|~FEE~S?)\s*~CHARGE~[\w\- ]*?)\s+(?P<amount>\$[\d,]+\.\d\d)\s*$'
