@@ -42,7 +42,7 @@ function Cell({
 }: {
   label: string
   value: string | null
-  currency: string
+  currency: string | null
 }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1.5 sm:flex-col sm:items-start sm:gap-0.5">
@@ -51,7 +51,7 @@ function Cell({
         {value === null ? (
           <span className="text-muted-foreground">Not found</span>
         ) : (
-          <Money amount={value} currency={currency} />
+          <Money amount={value} currency={currency ?? undefined} />
         )}
       </dd>
     </div>
@@ -64,7 +64,7 @@ export function ReconcileFacts({
   currency,
 }: {
   numbers: ReconcileNumbers
-  currency: string
+  currency: string | null
 }) {
   return (
     <dl className="grid grid-cols-1 divide-y divide-border sm:grid-cols-4 sm:divide-x sm:divide-y-0 sm:[&>div]:px-3 sm:[&>div:first-child]:pl-0">

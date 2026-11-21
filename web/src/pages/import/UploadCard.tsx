@@ -4,14 +4,14 @@ import { useId, useRef, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
-import { ApiError } from '@/api/client'
-import { ERROR_CODES } from '@/api/contracts'
 import {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_LABEL,
+  UploadError,
   useUploadStatement,
   type ImportResult,
 } from '@/api/imports'
+import { ApiError } from '@/api/client'
 import { FormError } from '@/components/forms/Field'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -38,14 +38,13 @@ function size(bytes: number): string {
   return `${(bytes / MAX_UPLOAD_BYTES).toFixed(1)} MiB`
 }
 
+/** The server's fixed messages are already plain; add when to retry for a 429. */
 function uploadError(error: unknown): unknown {
-  if (error instanceof ReauthCancelledError) return new Error('Import cancelled.')
-  if (error instanceof ApiError && error.code === ERROR_CODES.payloadTooLarge) {
-    return new ApiError(
-      error.status,
-      error.code,
-      `The server refused that file as too large (limit ${MAX_UPLOAD_LABEL}).`,
-    )
+  if (error instanceof ReauthCancelledError)
+    return new ApiError(0, 'cancelled', 'Import cancelled.')
+  if (error instanceof UploadError && error.status === 429 && error.retryAfter !== null) {
+    const when = `${String(error.retryAfter)} second${error.retryAfter === 1 ? '' : 's'}`
+    return new ApiError(error.status, error.code, `${error.message} Try again in ${when}.`)
   }
   return error
 }

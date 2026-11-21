@@ -1,7 +1,4 @@
-import Decimal from 'decimal.js'
-
-import type { ReconcileNumbers, ReconcileStatus } from '@/api/imports'
-import { parseMoney } from '@/lib/money'
+import type { ReconcileStatus } from '@/api/imports'
 
 const day = new Intl.DateTimeFormat('en-US', {
   timeZone: 'UTC',
@@ -38,20 +35,25 @@ export const RECONCILE_LABEL: Record<ReconcileStatus, string> = {
   accepted: 'Accepted',
 }
 
+const REASON_COPY: Record<string, string> = {
+  missing_balance:
+    'Holdfast could not find the opening or closing balance, so it could not check the math.',
+  balance_mismatch:
+    'Opening balance plus the transactions does not equal the closing balance. A row may be missing or misread.',
+  date_out_of_period: 'Some transactions are dated outside the statement period.',
+  no_transactions_in_document: 'This statement had balances but no transactions.',
+}
+
 /**
- * Why a statement did not reconcile, in plain words. Only the three stored numbers are used, so
- * the explanation can never disagree with the figures shown beside it.
+ * Plain copy for the server's reason codes (comma-joined when there are several). A code this
+ * build does not know is shown verbatim rather than hidden. Null or empty means the server did
+ * not record one.
  */
-export function reviewReason(n: ReconcileNumbers): string {
-  const missing: string[] = []
-  if (n.opening_balance === null) missing.push('opening balance')
-  if (n.closing_balance === null) missing.push('closing balance')
-  if (n.txn_sum === null) missing.push('transaction total')
-  if (missing.length > 0) {
-    return `Holdfast could not find the ${missing.join(' and ')} on this statement, so it could not check the math.`
-  }
-  if (n.balance_diff !== null && !new Decimal(parseMoney(n.balance_diff)).abs().lte('0.01')) {
-    return 'Opening balance plus the transactions does not equal the closing balance. A row may be missing or misread.'
-  }
-  return 'Holdfast flagged this statement for a manual look.'
+export function reasonLines(reason: string | null | undefined): string[] {
+  if (!reason) return []
+  return reason
+    .split(',')
+    .map((code) => code.trim())
+    .filter((code) => code !== '')
+    .map((code) => REASON_COPY[code] ?? `Flagged: ${code}`)
 }

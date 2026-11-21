@@ -4,7 +4,9 @@ import { useImportRuns } from '@/api/imports'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ReconcileBadge, ReconcileFacts } from './Facts'
-import { formatPeriod, formatWhen, reviewReason } from './format'
+import { AcceptButton } from './AcceptSheet'
+import { ReasonList } from './ReasonList'
+import { formatPeriod, formatWhen } from './format'
 
 function runLabel(run: ImportRun): string {
   return run.account_name ?? run.filename
@@ -23,8 +25,15 @@ function ReviewItem({ run }: { run: ImportRun }) {
         </div>
         <ReconcileBadge status={run.reconcile_status} />
       </div>
-      <p className="text-sm text-warning-text">{reviewReason(run)}</p>
+      <ReasonList reason={undefined} />
       <ReconcileFacts numbers={run} currency={run.currency} />
+      <AcceptButton
+        runId={run.id}
+        label={runLabel(run)}
+        numbers={run}
+        currency={run.currency}
+        reason={undefined}
+      />
     </li>
   )
 }
@@ -50,6 +59,7 @@ function RunItem({ run }: { run: ImportRun }) {
       </div>
       <p className="text-xs text-muted-foreground">
         {formatWhen(run.created_at)}
+        {run.reviewed_at ? ` · accepted ${formatWhen(run.reviewed_at)}` : ''}
         {failed
           ? ` · ${run.error_class ?? 'Error'}, nothing was added`
           : ` · ${String(run.rows_inserted)} added, ${String(run.rows_duplicate)} duplicate of ${String(run.rows_parsed)} rows`}
@@ -82,7 +92,7 @@ export function RunsSections() {
       </div>
     )
   }
-  if (runs.isError) {
+  if (runs.isError && !runs.isFetchNextPageError) {
     return (
       <div
         role="alert"
@@ -97,7 +107,8 @@ export function RunsSections() {
     )
   }
 
-  const review = runs.data.filter((r) => r.reconcile_status === 'needs_review')
+  const all = runs.data.pages.flatMap((p) => p.items)
+  const review = all.filter((r) => r.reconcile_status === 'needs_review')
   return (
     <>
       <section aria-labelledby="review-title" className="flex flex-col gap-2">
@@ -105,6 +116,11 @@ export function RunsSections() {
           Needs review{' '}
           {review.length > 0 && <span className="money text-base">({review.length})</span>}
         </h2>
+        {runs.hasNextPage && (
+          <p className="text-xs text-muted-foreground">
+            Showing the newest imports. Load more below to check older ones.
+          </p>
+        )}
         {review.length === 0 ? (
           <p className="rounded-card border border-border bg-card p-4 text-sm text-muted-foreground">
             Nothing to review. Every imported statement reconciled.
@@ -122,16 +138,31 @@ export function RunsSections() {
         <h2 id="runs-title" className="font-heading text-lg font-semibold">
           Recent imports
         </h2>
-        {runs.data.length === 0 ? (
+        {all.length === 0 ? (
           <p className="rounded-card border border-border bg-card p-4 text-sm text-muted-foreground">
             No imports yet. Choose a statement PDF above.
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-card border border-border bg-card">
-            {runs.data.map((r) => (
+            {all.map((r) => (
               <RunItem key={r.id} run={r} />
             ))}
           </ul>
+        )}
+        {runs.hasNextPage && (
+          <Button
+            variant="outline"
+            size="lg"
+            disabled={runs.isFetchingNextPage}
+            onClick={() => void runs.fetchNextPage()}
+          >
+            {runs.isFetchingNextPage ? 'Loading…' : 'Load more'}
+          </Button>
+        )}
+        {runs.isFetchNextPageError && (
+          <p role="alert" className="text-sm text-destructive-text">
+            Couldn't load more. Try Load more again.
+          </p>
         )}
       </section>
     </>
