@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -151,7 +152,8 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
                     )
                 )
 
-        # A transaction on a system category, one user-cleared, one on the household's own.
+        # System assignments on shared and private accounts, a user-cleared assignment, and a
+        # transaction on the household's own category.
         with engine.begin() as c:
             ctx(c, hid)
             acct = c.execute(
@@ -161,21 +163,42 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
                 ),
                 {"h": hid},
             ).scalar_one()
+            person = c.execute(
+                text(
+                    "INSERT INTO person (household_id, display_name, filing_role)"
+                    " VALUES (:h, 'Example Person', 'primary') RETURNING id"
+                ),
+                {"h": hid},
+            ).scalar_one()
+            private_acct = c.execute(
+                text(
+                    "INSERT INTO account (household_id, owner_person_id, source, name,"
+                    " type, visibility, currency)"
+                    " VALUES (:h, :p, 'manual', 'Example Private', 'depository', 'private', 'USD')"
+                    " RETURNING id"
+                ),
+                {"h": hid, "p": person},
+            ).scalar_one()
             sys_cat = c.execute(
                 text("SELECT id FROM category WHERE slug = 'food.groceries'")
             ).scalar_one()
             own_cat = c.execute(text("SELECT id FROM category WHERE name = 'Mine'")).scalar_one()
             ids = []
-            for cat, src in ((sys_cat, "user"), (None, "user"), (own_cat, "user")):
+            for account_id, cat in (
+                (acct, sys_cat),
+                (acct, None),
+                (acct, own_cat),
+                (private_acct, sys_cat),
+            ):
                 ids.append(
                     c.execute(
                         text(
                             'INSERT INTO "transaction" (household_id, account_id, posted_date,'
                             " amount, description_raw, source, category_id, category_source)"
-                            " VALUES (:h, :a, '2026-01-01', -1.00, 'x', 'manual', :c, :s)"
+                            " VALUES (:h, :a, '2026-01-01', :amount, 'x', 'manual', :c, 'user')"
                             " RETURNING id"
                         ),
-                        {"h": hid, "a": acct, "c": cat, "s": src},
+                        {"h": hid, "a": account_id, "c": cat, "amount": Decimal("-1.00")},
                     ).scalar_one()
                 )
             budget = c.execute(
@@ -216,6 +239,7 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
         assert by_id[ids[0]] == (None, None)  # its category is gone: no stranded source
         assert by_id[ids[1]] == (None, None)  # a user's "no category" is reset on downgrade
         assert by_id[ids[2]] == (own_cat, "user")  # the household's own category is untouched
+        assert by_id[ids[3]] == (None, None)  # the person-owned account's source is cleared
 
         command.upgrade(cfg, "head")
         assert total() == (n + 3, n)

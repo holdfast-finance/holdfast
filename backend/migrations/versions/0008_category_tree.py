@@ -320,6 +320,9 @@ def downgrade() -> None:
     op.execute("ALTER TABLE household FORCE ROW LEVEL SECURITY")
     for hid in household_ids:
         conn.execute(sa.text("SELECT set_config('app.household_id', :h, true)"), {"h": str(hid)})
+        # Person-owned accounts hide their rows behind the restrictive person policies; without
+        # household-wide access the source cleanup below would silently skip them.
+        conn.execute(sa.text("SELECT set_config('app.household_wide', 'on', true)"))
         lines = conn.execute(
             sa.text(
                 "SELECT count(*) FROM budget_line b JOIN category c"
@@ -347,6 +350,7 @@ def downgrade() -> None:
             )
         )
     conn.execute(sa.text("SELECT set_config('app.household_id', '', true)"))
+    conn.execute(sa.text("SELECT set_config('app.household_wide', '', true)"))
     op.drop_constraint(SPENDING_CHECK, "category", type_="check")
     op.drop_constraint(CHECK, "category", type_="check")
     op.create_check_constraint(CHECK, "category", OLD_KINDS)
