@@ -8,7 +8,14 @@ from decimal import Decimal, DecimalException
 from xml.etree import ElementTree as ET
 
 from app.domain.statement_parse import StatementParseError
-from app.domain.tabular_statement import ExportRows, TransactionExport, resolve_encoding
+from app.domain.tabular_statement import (
+    ExportRows,
+    TransactionExport,
+    check_id_key,
+    check_opening_balance,
+    external_id_token,
+    resolve_encoding,
+)
 
 _DECLARATION = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 _OFX_ROOT = re.compile(r"<OFX\s*>", re.IGNORECASE)
@@ -28,6 +35,20 @@ _XML_ENCODING = re.compile(
 _CHARSET = re.compile(rb"(?im)^CHARSET:[ \t]{0,8}([A-Za-z0-9_-]{1,40})[ \t]*\r?$")
 
 
+@dataclass(frozen=True)
+class OfxCorrection:
+    """A CORRECTACTION=DELETE row. It is not a transaction and is never summed or emitted as one.
+
+    ``corrects`` is the keyed token of the CORRECTFITID it deletes (``None`` if the row named
+    none), ``external_id`` the token of the delete row's own FITID. The persistence story acts on
+    these; until then the statement is ``needs_review``.
+    """
+
+    action: str
+    corrects: str | None
+    external_id: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class OfxStatement(TransactionExport):
     account_last4: str
@@ -35,6 +56,7 @@ class OfxStatement(TransactionExport):
     period_start: date | None
     period_end: date | None
     ledger_as_of: date | None = None  # LEDGERBAL DTASOF: when the closing balance was struck
+    corrections: tuple[OfxCorrection, ...] = ()
 
 
 def _decode(source: str | bytes) -> str:
@@ -140,7 +162,11 @@ def _balance(element: ET.Element) -> Decimal | None:
 
 
 def _statement(
-    element: ET.Element, *, investments_skipped: bool, opening_balance: Decimal | None
+    element: ET.Element,
+    *,
+    investments_skipped: bool,
+    opening_balance: Decimal | None,
+    id_key: bytes,
 ) -> OfxStatement:
     account_tag = "BANKACCTFROM" if element.tag == "STMTRS" else "CCACCTFROM"
     account = _value(element, f"{account_tag}/ACCTID", required=True)
@@ -155,6 +181,7 @@ def _statement(
     ledger_as_of = _date(as_of_text) if as_of_text else None
     start = end = ""
     rows = ExportRows()
+    corrections: list[OfxCorrection] = []
     if investments_skipped:
         rows.flag("investment_data_skipped")
     if transaction_list is not None:
@@ -165,17 +192,36 @@ def _statement(
             try:
                 posted = _date(_value(txn, "DTPOSTED", required=True))
                 amount = _amount(_value(txn, "TRNAMT", required=True))
-                fitid = _value(txn, "FITID", required=True)
+                fitid = external_id_token(_value(txn, "FITID", required=True), id_key)
                 if fitid in seen:
                     # Both rows are kept (the ordinal separates them); a person decides.
                     rows.flag("duplicate_fitid")
                 seen.add(fitid)
-                if txn.find("CORRECTFITID") is not None or txn.find("CORRECTACTION") is not None:
+                action = _value(txn, "CORRECTACTION").upper()
+                target = _value(txn, "CORRECTFITID")
+                if action not in {"", "DELETE", "REPLACE"} or (target and not action):
+                    raise StatementParseError("invalid OFX CORRECTACTION")
+                if action:
                     # A correction replaces or deletes an earlier row. Applying that needs the
                     # earlier row, so never import it as an ordinary new transaction silently.
                     rows.flag("ofx_correction")
+                if action == "DELETE":
+                    # Not a transaction: summing it would double-count the row it deletes.
+                    corrections.append(
+                        OfxCorrection(
+                            "delete", external_id_token(target, id_key) if target else None, fitid
+                        )
+                    )
+                    continue
                 description = _value(txn, "NAME") or _value(txn, "MEMO")
-                rows.add(posted, description, amount, _balance(txn), fitid)
+                rows.add(
+                    posted,
+                    description,
+                    amount,
+                    _balance(txn),
+                    fitid,
+                    "replace" if action == "REPLACE" else None,
+                )
             except StatementParseError as exc:
                 raise StatementParseError(f"OFX transaction row {row_number}: {exc}") from None
             except DecimalException:
@@ -208,6 +254,7 @@ def _statement(
         period_start=period_start,
         period_end=period_end,
         ledger_as_of=ledger_as_of,
+        corrections=tuple(corrections),
     )
 
 
@@ -219,16 +266,28 @@ def _check_status(root: ET.Element) -> None:
 
 
 def parse_ofx(
-    source: str | bytes, *, opening_balance: Decimal | None = None
+    source: str | bytes, *, id_key: bytes, opening_balance: Decimal | None = None
 ) -> tuple[OfxStatement, ...]:
     """Return one export per bank or card statement.
 
     Real OFX carries a closing balance only, so the result is ``needs_review`` /
     ``missing_balance`` unless the caller knows the opening balance (the prior statement's
-    closing) and passes it, which is allowed for a single-statement file. Duplicate FITIDs,
-    correction rows and skipped investment data make the statement ``needs_review`` with a named
-    reason instead of failing the file or dropping data silently.
+    closing) and passes it, which is allowed for a single-statement file. ``opening_balance``
+    must be a ``Decimal`` with at most 2 decimals and 12 integer digits, in Holdfast's sign: a
+    card balance owed is negative. Duplicate FITIDs, correction rows and skipped investment data
+    make the statement ``needs_review`` with every applicable reason, comma-joined in a stable
+    order (flags first, then the balance reason), instead of failing the file or dropping data.
+
+    ``id_key`` (required, at least 16 bytes) keys the HMAC-SHA256 that replaces every FITID with a
+    32-hex token, because a FITID can embed an account or card number. The domain never reads
+    settings or the environment; the persistence layer derives a per-household key and passes it.
+
+    CORRECTACTION=DELETE rows are not transactions: they are returned in ``corrections`` and
+    excluded from ``txns`` and from the reconciliation sum. REPLACE rows stay in ``txns`` with
+    ``correction="replace"``.
     """
+    check_id_key(id_key)
+    check_opening_balance(opening_balance)
     root = _tree(_decode(source))
     for element in root.iter():
         element.tag = element.tag.rsplit("}", 1)[-1].upper()
@@ -242,6 +301,8 @@ def parse_ofx(
         raise StatementParseError("an opening balance applies to a single-statement file")
     investments = any(e.tag == "INVSTMTRS" for e in root.iter())
     return tuple(
-        _statement(e, investments_skipped=investments, opening_balance=opening_balance)
+        _statement(
+            e, investments_skipped=investments, opening_balance=opening_balance, id_key=id_key
+        )
         for e in elements
     )

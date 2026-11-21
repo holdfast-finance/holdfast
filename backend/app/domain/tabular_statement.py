@@ -1,6 +1,7 @@
 """Shared results and normalization for CSV and OFX transaction exports."""
 
 import hashlib
+import hmac
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -9,7 +10,13 @@ from decimal import Decimal
 
 from app.domain.fingerprint import import_fingerprint, normalize_description
 from app.domain.money import ZERO, quantize_cents
-from app.domain.statement_parse import ParsedTxn, Reconciliation, mask_long_digit_runs, reconcile
+from app.domain.statement_parse import (
+    ParsedTxn,
+    Reconciliation,
+    StatementParseError,
+    mask_long_digit_runs,
+    reconcile,
+)
 
 # Text encodings an export may declare. Anything else (utf-7, codecs with side effects, unknown
 # names) is refused: an attacker-chosen codec must never decide how a file is decoded.
@@ -46,7 +53,8 @@ _ENCODINGS = {
 _SEPARATED_CARD = re.compile(
     r"(?<![0-9])(?:[0-9]{4}(?:[ -][0-9]{4}){3}|[0-9]{4}[ -][0-9]{6}[ -][0-9]{5})(?![0-9])"
 )
-_DIGIT_RUN = re.compile(r"[0-9]{8,}")
+MIN_ID_KEY_BYTES = 16
+_MAX_INTEGER_DIGITS = 12  # NUMERIC(14,2)
 
 
 def resolve_encoding(name: str) -> str | None:
@@ -60,12 +68,44 @@ def mask_identifiers(text: str) -> str:
     return mask_long_digit_runs(text)
 
 
-def mask_external_id(value: str) -> str:
-    """Replace each digit run of 8+ with ``#`` and a short hash of the run.
+def check_id_key(id_key: bytes) -> None:
+    """Reject a missing or weak id key (a programming error, so ``ValueError``)."""
+    if not isinstance(id_key, bytes) or len(id_key) < MIN_ID_KEY_BYTES:
+        raise ValueError(f"id_key must be at least {MIN_ID_KEY_BYTES} bytes")
 
-    Deterministic, so the id still works as a dedupe key, but the digits themselves are gone.
+
+def external_id_token(value: str, id_key: bytes) -> str:
+    """Replace a source-supplied id with HMAC-SHA256(key, id), 128 bits as 32 hex characters.
+
+    A FITID can embed a card or account number, so no character of the original is kept and an
+    unkeyed hash (which a short digit string could be brute-forced from) is not enough. The token
+    is deterministic per key, so it still works as a dedupe key. The domain never reads settings
+    or the environment: the caller supplies the key. Deriving a per-household key (so tokens do
+    not correlate across households) belongs to the persistence layer.
     """
-    return _DIGIT_RUN.sub(lambda m: "#" + hashlib.sha256(m[0].encode()).hexdigest()[:8], value)
+    check_id_key(id_key)
+    return hmac.new(id_key, value.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()[:32]
+
+
+def check_amount_bounds(value: Decimal) -> Decimal:
+    """At most 12 integer digits, like MoneyStr and NUMERIC(14,2)."""
+    if not value.is_finite() or abs(value) >= Decimal(10) ** _MAX_INTEGER_DIGITS:
+        raise StatementParseError("amount out of range")
+    return value
+
+
+def check_opening_balance(value: Decimal | None) -> Decimal | None:
+    """An opening balance: ``Decimal``, at most 2 decimals and 12 integer digits."""
+    if value is None:
+        return None
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise StatementParseError("opening balance must be a Decimal")
+    exponent = value.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent < -2:
+        raise StatementParseError("opening balance allows at most 2 decimal places")
+    if abs(value) >= Decimal(10) ** _MAX_INTEGER_DIGITS:
+        raise StatementParseError("opening balance allows at most 12 integer digits")
+    return value
 
 
 def _zero_clean(value: Decimal) -> Decimal:
@@ -75,7 +115,8 @@ def _zero_clean(value: Decimal) -> Decimal:
 
 @dataclass(frozen=True)
 class ExportTxn(ParsedTxn):
-    external_id: str | None = None
+    external_id: str | None = None  # keyed token, never the source id
+    correction: str | None = None  # "replace": this row replaces an earlier one
 
 
 @dataclass(frozen=True)
@@ -105,12 +146,11 @@ class ExportRows:
         amount: Decimal,
         balance: Decimal | None,
         external_id: str | None = None,
+        correction: str | None = None,
     ) -> None:
         amount = _zero_clean(amount)
         balance = None if balance is None else _zero_clean(balance)
         description = mask_identifiers(" ".join(description.split()))
-        if external_id is not None:
-            external_id = mask_external_id(external_id)
         key = (posted, str(quantize_cents(amount)), normalize_description(description))
         self._ordinals[key] += 1
         ordinal = self._ordinals[key]
@@ -122,6 +162,7 @@ class ExportRows:
                 ordinal=ordinal,
                 fingerprint=import_fingerprint(posted, amount, description, ordinal),
                 external_id=external_id,
+                correction=correction,
             )
         )
         self.balances.append(balance)
@@ -129,7 +170,11 @@ class ExportRows:
     def _flagged(self, result: Reconciliation) -> Reconciliation:
         if not self._flags:
             return result
-        return Reconciliation("needs_review", ",".join(self._flags), result.diff)
+        # Every applicable reason, flags first: a flag must never hide a balance mismatch.
+        reasons = list(self._flags)
+        if result.reason and result.reason not in reasons:
+            reasons.append(result.reason)
+        return Reconciliation("needs_review", ",".join(reasons), result.diff)
 
     def reconcile(
         self,
@@ -141,10 +186,12 @@ class ExportRows:
     ) -> tuple[Decimal | None, Reconciliation]:
         """Compare chronological post-transaction balances and the statement closing balance.
 
-        ``opening`` is a known opening balance (from the prior statement). Without one, the
-        opening is derived from the first running balance, and a file with neither stays
-        ``needs_review`` / ``missing_balance``.
+        ``opening`` is a known opening balance (from the prior statement), a ``Decimal`` in
+        Holdfast's sign: a card balance owed is negative. Without one, the opening is derived
+        from the first running balance, and a file with neither stays ``needs_review`` /
+        ``missing_balance``.
         """
+        opening = check_opening_balance(opening)
         running_total = ZERO
         indices = range(len(self.txns))
         order = reversed(indices) if newest_first else iter(indices)

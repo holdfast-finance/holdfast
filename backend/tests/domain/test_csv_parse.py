@@ -193,3 +193,21 @@ def test_separated_card_numbers_are_masked_in_csv_descriptions() -> None:
     (txn,) = parse_csv(body, csv_profile_from_mapping(INDEXED)).txns
     assert "4111" not in txn.description and "1111" not in txn.description
     assert "2026-01-15" in txn.description
+
+
+SEMI = csv_profile_from_mapping(dict(INDEXED, delimiter=";", date_format="%d/%m/%Y", balance=3))
+
+
+@pytest.mark.parametrize("amount", ["1000000000000.00", "-1000000000000.00"])
+def test_csv_amounts_are_capped_at_twelve_integer_digits(amount: str) -> None:
+    with pytest.raises(StatementParseError, match="out of range"):
+        parse_csv(f"05/02/2026;Big;{amount};1.00", SEMI)
+    with pytest.raises(StatementParseError, match="out of range"):
+        parse_csv(f"05/02/2026;Big;1.00;{amount}", SEMI)
+    (txn,) = parse_csv("05/02/2026;Big;999999999999.99;1.00", SEMI).txns
+    assert txn.amount == Decimal("999999999999.99")
+
+
+def test_csv_lone_surrogate_is_a_decode_error_not_a_date_error() -> None:
+    with pytest.raises(StatementParseError, match="decoded"):
+        parse_csv("05/02/2026;Ca\ud800fe;2.00;1.00", SEMI)

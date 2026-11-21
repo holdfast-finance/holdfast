@@ -4,8 +4,15 @@ from decimal import Decimal
 
 import pytest
 
-from app.domain.ofx_parse import parse_ofx
+from app.domain.ofx_parse import parse_ofx as _parse_ofx
 from app.domain.statement_parse import StatementParseError
+
+KEY = b"synthetic-test-key-0123456789"
+
+
+def parse_ofx(source: str | bytes, **kwargs: Decimal | bytes | None):  # type: ignore[no-untyped-def]
+    return _parse_ofx(source, **{"id_key": KEY, **kwargs})  # type: ignore[arg-type]
+
 
 SGML = """OFXHEADER:100
 DATA:OFXSGML
@@ -57,7 +64,8 @@ def test_sgml_bank_statement_reconciles_running_balance_to_ledger() -> None:
     assert debit.posted_date == date(2026, 1, 2)
     assert debit.description == "Café & Books"
     assert credit.description == "Refund"
-    assert (debit.external_id, credit.external_id) == ("example-debit", "example-credit")
+    assert debit.external_id != credit.external_id
+    assert "example" not in f"{debit.external_id}{credit.external_id}"
     assert (debit.amount, credit.amount) == (Decimal("-3"), Decimal("2.50"))
     assert all(isinstance(t.amount, Decimal) for t in result.txns)
     assert result.opening_balance == Decimal("10.00")
@@ -167,7 +175,7 @@ def test_duplicate_fitid_keeps_both_rows_and_needs_review() -> None:
     assert len({t.fingerprint for t in result.txns}) == 2
     assert (result.reconciliation.status, result.reconciliation.reason) == (
         "needs_review",
-        "duplicate_fitid",
+        "duplicate_fitid,missing_balance",
     )
 
 
@@ -214,14 +222,90 @@ def test_empty_unclosed_leaf_does_not_fail_the_file() -> None:
     assert len(result.txns) == 2
 
 
-def test_fitid_digits_are_masked_but_stay_a_stable_key() -> None:
-    def run(fitid: str) -> str | None:
-        return parse_ofx(STANDARD.replace("example-debit", fitid))[0].txns[0].external_id
+def test_fitid_is_replaced_by_a_keyed_token_with_no_original_characters() -> None:
+    def run(fitid: str, key: bytes = KEY) -> str | None:
+        source = STANDARD.replace("example-debit", fitid)
+        return _parse_ofx(source, id_key=key)[0].txns[0].external_id
 
-    a, b = run("4111111111111111-x"), run("4111111111111112-x")
-    assert a and b and a != b and "4111111111111111" not in a
-    assert a == run("4111111111111111-x")
-    assert run("short-1234567") == "short-1234567"  # under 8 digits is left alone
+    token = run("4111-1111-1111-1111")
+    assert token and len(token) == 32 and all(c in "0123456789abcdef" for c in token)
+    assert "4111" not in token
+    assert run("4111-1111-1111-1111") == token
+    assert run("4111-1111-1111-1112") != token
+    assert run("4111-1111-1111-1111", b"another-synthetic-key-9876") != token
+    assert run("short-1234567") != "short-1234567"
+
+
+def test_duplicate_fitid_detection_compares_the_tokens() -> None:
+    (result,) = parse_ofx(STANDARD.replace("example-credit", "example-debit"))
+    assert result.txns[0].external_id == result.txns[1].external_id
+    assert "duplicate_fitid" in (result.reconciliation.reason or "")
+
+
+@pytest.mark.parametrize("key", [b"", b"short-key", b"fifteen-bytes-!"])
+def test_id_key_is_required_and_strong(key: bytes) -> None:
+    with pytest.raises(ValueError, match="id_key"):
+        _parse_ofx(STANDARD, id_key=key)
+    with pytest.raises(TypeError):
+        _parse_ofx(STANDARD)  # type: ignore[call-arg]
+
+
+def test_delete_correction_is_not_emitted_or_summed() -> None:
+    delete = (
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3<FITID>example-del"
+        "<CORRECTFITID>example-debit<CORRECTACTION>DELETE<NAME>Delete</STMTTRN>"
+    )
+    source = STANDARD.replace("</BANKTRANLIST>", delete + "</BANKTRANLIST>")
+    (plain,) = parse_ofx(STANDARD, opening_balance=Decimal("10.00"))
+    (result,) = parse_ofx(source, opening_balance=Decimal("10.00"))
+    assert [t.amount for t in result.txns] == [t.amount for t in plain.txns]
+    assert all(t.correction is None for t in result.txns)
+    (correction,) = result.corrections
+    assert correction.action == "delete"
+    assert correction.corrects == plain.txns[0].external_id
+    assert correction.external_id not in {t.external_id for t in result.txns}
+    assert (result.reconciliation.status, result.reconciliation.reason) == (
+        "needs_review",
+        "ofx_correction",
+    )
+    assert result.reconciliation.diff == plain.reconciliation.diff
+
+
+def test_replace_correction_stays_emitted_and_is_marked() -> None:
+    corrected = STANDARD.replace(
+        "<MEMO>Refund", "<CORRECTFITID>example-debit<CORRECTACTION>REPLACE<MEMO>Refund"
+    )
+    (result,) = parse_ofx(corrected, opening_balance=Decimal("10.00"))
+    assert [t.correction for t in result.txns] == [None, "replace"]
+    assert result.corrections == ()
+
+
+@pytest.mark.parametrize("extra", ["<CORRECTACTION>REMOVE", "<CORRECTFITID>example-debit"])
+def test_unknown_or_missing_correction_action_is_rejected(extra: str) -> None:
+    with pytest.raises(StatementParseError, match="CORRECTACTION"):
+        parse_ofx(STANDARD.replace("<MEMO>Refund", extra + "<MEMO>Refund"))
+
+
+def test_reasons_are_joined_and_never_hide_a_mismatch() -> None:
+    source = STANDARD.replace("example-credit", "example-debit")
+    (result,) = parse_ofx(source, opening_balance=Decimal("500.00"))
+    assert result.reconciliation.reason == "duplicate_fitid,balance_mismatch"
+    corrected = source.replace("<MEMO>Refund", "<CORRECTFITID>x<CORRECTACTION>REPLACE<MEMO>Refund")
+    (both,) = parse_ofx(corrected, opening_balance=Decimal("500.00"))
+    assert both.reconciliation.reason == "duplicate_fitid,ofx_correction,balance_mismatch"
+
+
+@pytest.mark.parametrize(
+    "bad", [Decimal("1.234"), Decimal("1" * 13), Decimal("NaN"), Decimal("Infinity"), 5.0, "5.00"]
+)
+def test_opening_balance_is_validated(bad: object) -> None:
+    with pytest.raises(StatementParseError, match="opening balance"):
+        parse_ofx(STANDARD, opening_balance=bad)  # type: ignore[arg-type]
+
+
+def test_opening_balance_bounds_accept_the_edge() -> None:
+    parse_ofx(STANDARD, opening_balance=Decimal("-999999999999.99"))
+    parse_ofx(STANDARD, opening_balance=Decimal("10"))
 
 
 def test_separated_card_numbers_are_masked_in_descriptions() -> None:

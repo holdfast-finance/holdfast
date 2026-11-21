@@ -14,7 +14,12 @@ from typing import Literal
 
 from app.domain.money import ZERO
 from app.domain.statement_parse import StatementParseError, parse_amount
-from app.domain.tabular_statement import ExportRows, TransactionExport, resolve_encoding
+from app.domain.tabular_statement import (
+    ExportRows,
+    TransactionExport,
+    check_amount_bounds,
+    resolve_encoding,
+)
 
 Column = str | int
 
@@ -152,14 +157,14 @@ def _records(text: str, delimiter: str) -> Iterator[tuple[int, list[str]]]:
 
 def _row_amount(cells: Mapping[Column, str], profile: CsvProfile) -> Decimal:
     if profile.amount is not None:
-        amount = parse_amount(cells[profile.amount])
+        amount = check_amount_bounds(parse_amount(cells[profile.amount]))
         return amount.copy_negate() if profile.sign == "inverted" else amount
     elif profile.debit is not None and profile.credit is not None:
         debit_cell, credit_cell = cells[profile.debit], cells[profile.credit]
         if not (debit_cell or credit_cell):
             raise StatementParseError("missing debit and credit amounts")
-        debit = parse_amount(debit_cell) if debit_cell else ZERO
-        credit = parse_amount(credit_cell) if credit_cell else ZERO
+        debit = check_amount_bounds(parse_amount(debit_cell)) if debit_cell else ZERO
+        credit = check_amount_bounds(parse_amount(credit_cell)) if credit_cell else ZERO
         if debit and credit:
             raise StatementParseError("both debit and credit amounts are nonzero")
         if (debit < 0 or credit < 0) and profile.negative_split == "reject":
@@ -220,7 +225,11 @@ def parse_csv(source: str | bytes, profile: CsvProfile) -> TransactionExport:
             if not description:
                 raise StatementParseError("missing description")
             amount = _row_amount(cells, profile)
-            balance = parse_amount(cells[profile.balance]) if profile.balance is not None else None
+            balance = (
+                check_amount_bounds(parse_amount(cells[profile.balance]))
+                if profile.balance is not None
+                else None
+            )
             if balance is not None and profile.balance_sign == "invert":
                 balance = -balance
             result.add(posted, description, amount, balance)
@@ -228,6 +237,8 @@ def parse_csv(source: str | bytes, profile: CsvProfile) -> TransactionExport:
             raise StatementParseError(f"CSV row {line}: {exc}") from None
         except IndexError:
             raise StatementParseError(f"CSV row {line}: missing column") from None
+        except UnicodeError:
+            raise StatementParseError(f"CSV row {line}: cannot be decoded") from None
         except ValueError:
             raise StatementParseError(f"CSV row {line}: unreadable date") from None
         except DecimalException:
