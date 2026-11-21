@@ -29,6 +29,11 @@ export function ResponsiveSheet({
       <SheetContent
         side={isDesktop ? 'right' : 'bottom'}
         className="max-h-[90dvh] gap-5 overflow-y-auto p-5 pb-8"
+        onOpenAutoFocus={(event) => {
+          // Don't focus the first field: on iOS that pops the keyboard over the sheet.
+          event.preventDefault()
+          if (event.target instanceof HTMLElement) event.target.focus()
+        }}
         {...(description ? {} : { 'aria-describedby': undefined })}
       >
         <SheetHeader className="p-0">

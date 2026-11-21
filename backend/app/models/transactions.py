@@ -149,6 +149,14 @@ class Transaction(Base):
             postgresql_where=text("superseded_by_id IS NOT NULL"),
         ),
         Index("ix_transaction_account_id_posted_date", "account_id", "posted_date"),
+        # Keyset list of live rows across accounts: (household, posted_date desc, id desc).
+        Index(
+            "ix_transaction_household_id_posted_date_id_live",
+            "household_id",
+            text("posted_date DESC"),
+            text("id DESC"),
+            postgresql_where=text("superseded_by_id IS NULL"),
+        ),
         Index("ix_transaction_category_id_posted_date", "category_id", "posted_date"),
         Index("ix_transaction_merchant_name", "merchant_name"),
         Index(

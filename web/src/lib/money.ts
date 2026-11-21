@@ -14,6 +14,8 @@ export interface FormattedMoney {
   text: string
   /** True for amounts below zero. "-0.00" is zero, not negative. */
   negative: boolean
+  /** True for amounts above zero after rounding. */
+  positive: boolean
 }
 
 export interface FormatMoneyOptions {
@@ -21,6 +23,8 @@ export interface FormatMoneyOptions {
   locale?: string
   /** Display precision. Rounds half-even at this presentation boundary only. */
   fractionDigits?: number
+  /** Prefix positive amounts with "+", so inflow reads as inflow without relying on colour. */
+  showPlus?: boolean
 }
 
 export function parseMoney(amount: MoneyString): Decimal {
@@ -33,7 +37,12 @@ export function parseMoney(amount: MoneyString): Decimal {
 
 export function formatMoney(
   amount: MoneyString,
-  { currency = 'USD', locale = 'en-US', fractionDigits = 2 }: FormatMoneyOptions = {},
+  {
+    currency = 'USD',
+    locale = 'en-US',
+    fractionDigits = 2,
+    showPlus = false,
+  }: FormatMoneyOptions = {},
 ): FormattedMoney {
   const rounded = parseMoney(amount).toDecimalPlaces(fractionDigits, Decimal.ROUND_HALF_EVEN)
   const negative = rounded.isNegative() && !rounded.isZero()
@@ -48,6 +57,8 @@ export function formatMoney(
   // Intl.NumberFormat.format accepts a decimal string (ES2023) and keeps it exact.
   // The cast only narrows string -> numeric-literal string; the value is validated above.
   const literal = (negative ? `-${magnitude}` : magnitude) as Intl.StringNumericLiteral
-  const text = formatter.format(literal)
-  return { text, negative }
+  const formatted = formatter.format(literal)
+  const positive = !negative && !rounded.isZero()
+  const text = showPlus && positive ? `+${formatted}` : formatted
+  return { text, negative, positive }
 }
