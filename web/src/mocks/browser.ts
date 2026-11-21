@@ -2,6 +2,7 @@ import { setupWorker } from 'msw/browser'
 
 import { MOCK_SETUP_TOKEN, MOCK_TOTP_CODE, db, type MockState } from '@/mocks/db'
 import { handlers } from '@/mocks/handlers'
+import { seedImportRuns } from '@/mocks/imports'
 import { seedLedger } from '@/mocks/ledger'
 
 /*
@@ -38,6 +39,8 @@ function save(): void {
       audit: db.audit,
       accounts: db.accounts,
       transactions: db.transactions,
+      importRuns: db.importRuns,
+      importedFiles: db.importedFiles,
       session: db.session,
       failedLogins: db.failedLogins,
       seq: db.seq,
@@ -50,7 +53,10 @@ function save(): void {
 
 export async function startMockApi(): Promise<void> {
   load()
-  if (db.accounts.length === 0) seedLedger()
+  if (db.accounts.length === 0) {
+    seedLedger()
+    seedImportRuns()
+  }
   const worker = setupWorker(...handlers)
   worker.events.on('response:mocked', save)
   await worker.start({ onUnhandledRequest: 'bypass', quiet: true })

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 
 import {
   Sheet,
@@ -16,19 +16,22 @@ export function ResponsiveSheet({
   title,
   description,
   children,
+  onCloseAutoFocus,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
   description?: string
   children: ReactNode
+  onCloseAutoFocus?: ComponentProps<typeof SheetContent>['onCloseAutoFocus']
 }) {
   const isDesktop = useIsDesktop()
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side={isDesktop ? 'right' : 'bottom'}
-        className="max-h-[90dvh] gap-5 overflow-y-auto p-5 pb-8"
+        className="max-h-[90dvh] gap-5 overflow-y-auto p-5 pb-[max(2rem,env(safe-area-inset-bottom))]"
+        onCloseAutoFocus={onCloseAutoFocus}
         onOpenAutoFocus={(event) => {
           // Don't focus the first field: on iOS that pops the keyboard over the sheet.
           event.preventDefault()

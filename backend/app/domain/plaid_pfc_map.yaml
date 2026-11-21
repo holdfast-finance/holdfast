@@ -1,0 +1,149 @@
+# Plaid Personal Finance Category (PFC) -> default category slug.
+#
+# Every PRIMARY and DETAILED code in the official taxonomy file is either under `map:` (a slug from
+# category_tree.yaml) or under `unmapped:` with a reason. tests/domain/test_category_tree.py fails
+# when a taxonomy code is in neither, when a code is in both, or when a slug does not exist.
+# A detailed code resolves first; a primary code is the fallback for a detailed code Plaid adds
+# later. Mapping is a suggestion for automated categorisation; a user's own choice always wins.
+taxonomy_file: plaid_pfc_taxonomy.yaml  # source URL, retrieval date and upstream hash live there
+
+primary:
+  INCOME: income.other
+  TRANSFER_IN: transfers.other
+  TRANSFER_OUT: transfers.other
+  LOAN_PAYMENTS: debt.other
+  BANK_FEES: fees.bank-fees
+  ENTERTAINMENT: entertainment.other
+  FOOD_AND_DRINK: food.other
+  HOME_IMPROVEMENT: housing.other
+  MEDICAL: health.other
+  PERSONAL_CARE: health.personal-care
+  GENERAL_SERVICES: fees.other-services
+  TRANSPORTATION: transport.other
+  TRAVEL: travel.other
+  RENT_AND_UTILITIES: utilities.other
+
+detailed:
+  INCOME_DIVIDENDS: income.dividends
+  INCOME_INTEREST_EARNED: income.interest
+  INCOME_RETIREMENT_PENSION: income.pension
+  INCOME_TAX_REFUND: income.tax-refund
+  INCOME_UNEMPLOYMENT: income.benefits
+  INCOME_WAGES: income.wages
+  INCOME_OTHER_INCOME: income.other
+
+  TRANSFER_IN_CASH_ADVANCES_AND_LOANS: transfers.loan-proceeds
+  TRANSFER_IN_DEPOSIT: transfers.deposit
+  TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS: transfers.account
+  TRANSFER_IN_SAVINGS: transfers.account
+  TRANSFER_IN_ACCOUNT_TRANSFER: transfers.account
+  TRANSFER_IN_OTHER_TRANSFER_IN: transfers.other
+  TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS: savings.investing
+  TRANSFER_OUT_SAVINGS: savings.savings
+  TRANSFER_OUT_WITHDRAWAL: transfers.cash-withdrawal
+  TRANSFER_OUT_ACCOUNT_TRANSFER: transfers.account
+  TRANSFER_OUT_OTHER_TRANSFER_OUT: transfers.other
+
+  LOAN_PAYMENTS_CAR_PAYMENT: debt.car-loan
+  LOAN_PAYMENTS_CREDIT_CARD_PAYMENT: transfers.credit-card-payment
+  LOAN_PAYMENTS_PERSONAL_LOAN_PAYMENT: debt.personal-loan
+  LOAN_PAYMENTS_MORTGAGE_PAYMENT: housing.mortgage
+  LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT: debt.student-loan
+  LOAN_PAYMENTS_OTHER_PAYMENT: debt.other
+
+  BANK_FEES_ATM_FEES: fees.bank-fees
+  BANK_FEES_FOREIGN_TRANSACTION_FEES: fees.bank-fees
+  BANK_FEES_INSUFFICIENT_FUNDS: fees.bank-fees
+  BANK_FEES_INTEREST_CHARGE: fees.interest-charges
+  BANK_FEES_OVERDRAFT_FEES: fees.bank-fees
+  BANK_FEES_OTHER_BANK_FEES: fees.bank-fees
+
+  ENTERTAINMENT_CASINOS_AND_GAMBLING: entertainment.gambling
+  ENTERTAINMENT_MUSIC_AND_AUDIO: entertainment.music
+  ENTERTAINMENT_SPORTING_EVENTS_AMUSEMENT_PARKS_AND_MUSEUMS: entertainment.events
+  ENTERTAINMENT_TV_AND_MOVIES: entertainment.streaming
+  ENTERTAINMENT_VIDEO_GAMES: entertainment.games
+  ENTERTAINMENT_OTHER_ENTERTAINMENT: entertainment.other
+
+  FOOD_AND_DRINK_BEER_WINE_AND_LIQUOR: food.alcohol
+  FOOD_AND_DRINK_COFFEE: food.coffee
+  FOOD_AND_DRINK_FAST_FOOD: food.fast-food
+  FOOD_AND_DRINK_GROCERIES: food.groceries
+  FOOD_AND_DRINK_RESTAURANT: food.restaurants
+  FOOD_AND_DRINK_VENDING_MACHINES: food.other
+  FOOD_AND_DRINK_OTHER_FOOD_AND_DRINK: food.other
+
+  GENERAL_MERCHANDISE_BOOKSTORES_AND_NEWSSTANDS: shopping.books
+  GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES: shopping.clothing
+  GENERAL_MERCHANDISE_DEPARTMENT_STORES: shopping.general
+  GENERAL_MERCHANDISE_DISCOUNT_STORES: shopping.general
+  GENERAL_MERCHANDISE_ELECTRONICS: shopping.electronics
+  GENERAL_MERCHANDISE_GIFTS_AND_NOVELTIES: gifts.gifts
+  GENERAL_MERCHANDISE_OFFICE_SUPPLIES: shopping.office-supplies
+  GENERAL_MERCHANDISE_PET_SUPPLIES: pets.food-supplies
+  GENERAL_MERCHANDISE_SPORTING_GOODS: shopping.sporting-goods
+  GENERAL_MERCHANDISE_TOBACCO_AND_VAPE: shopping.other
+  GENERAL_MERCHANDISE_OTHER_GENERAL_MERCHANDISE: shopping.other
+
+  HOME_IMPROVEMENT_FURNITURE: housing.furnishings
+  HOME_IMPROVEMENT_HARDWARE: housing.home-supplies
+  HOME_IMPROVEMENT_REPAIR_AND_MAINTENANCE: housing.maintenance
+  HOME_IMPROVEMENT_SECURITY: housing.security
+  HOME_IMPROVEMENT_OTHER_HOME_IMPROVEMENT: housing.other
+
+  MEDICAL_DENTAL_CARE: health.dental
+  MEDICAL_EYE_CARE: health.vision
+  MEDICAL_NURSING_CARE: health.nursing
+  MEDICAL_PHARMACIES_AND_SUPPLEMENTS: health.pharmacy
+  MEDICAL_PRIMARY_CARE: health.medical
+  MEDICAL_VETERINARY_SERVICES: pets.vet
+  MEDICAL_OTHER_MEDICAL: health.other
+
+  PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS: health.fitness
+  PERSONAL_CARE_HAIR_AND_BEAUTY: health.personal-care
+  PERSONAL_CARE_LAUNDRY_AND_DRY_CLEANING: health.personal-care
+  PERSONAL_CARE_OTHER_PERSONAL_CARE: health.personal-care
+
+  GENERAL_SERVICES_ACCOUNTING_AND_FINANCIAL_PLANNING: fees.professional-services
+  GENERAL_SERVICES_AUTOMOTIVE: transport.auto-service
+  GENERAL_SERVICES_CHILDCARE: family.childcare
+  GENERAL_SERVICES_CONSULTING_AND_LEGAL: fees.professional-services
+  GENERAL_SERVICES_EDUCATION: education.tuition
+  GENERAL_SERVICES_INSURANCE: insurance.other
+  GENERAL_SERVICES_POSTAGE_AND_SHIPPING: fees.postage-shipping
+  GENERAL_SERVICES_STORAGE: fees.storage
+  GENERAL_SERVICES_OTHER_GENERAL_SERVICES: fees.other-services
+
+  GOVERNMENT_AND_NON_PROFIT_DONATIONS: gifts.charity
+  GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT: taxes.other  # covers income and property tax alike
+
+  TRANSPORTATION_BIKES_AND_SCOOTERS: transport.bikes-scooters
+  TRANSPORTATION_GAS: transport.fuel
+  TRANSPORTATION_PARKING: transport.parking
+  TRANSPORTATION_PUBLIC_TRANSIT: transport.public-transit
+  TRANSPORTATION_TAXIS_AND_RIDE_SHARES: transport.rideshare
+  TRANSPORTATION_TOLLS: transport.tolls
+  TRANSPORTATION_OTHER_TRANSPORTATION: transport.other
+
+  TRAVEL_FLIGHTS: travel.flights
+  TRAVEL_LODGING: travel.lodging
+  TRAVEL_RENTAL_CARS: travel.rental-cars
+  TRAVEL_OTHER_TRAVEL: travel.other
+
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY: utilities.electricity-gas
+  RENT_AND_UTILITIES_INTERNET_AND_CABLE: utilities.internet-cable
+  RENT_AND_UTILITIES_RENT: housing.rent
+  RENT_AND_UTILITIES_SEWAGE_AND_WASTE_MANAGEMENT: utilities.waste
+  RENT_AND_UTILITIES_TELEPHONE: utilities.phone
+  RENT_AND_UTILITIES_WATER: utilities.water
+  RENT_AND_UTILITIES_OTHER_UTILITIES: utilities.other
+
+# Deliberately left for the user: the category depends on what was bought, which Plaid does not say.
+unmapped:
+  GENERAL_MERCHANDISE: "Spans groceries, clothing, household and gifts; the detailed code decides."
+  GENERAL_MERCHANDISE_CONVENIENCE_STORES: "Could be food, fuel or household goods."
+  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES: "A marketplace sells anything."
+  GENERAL_MERCHANDISE_SUPERSTORES: "Groceries and general goods share one receipt."
+  GOVERNMENT_AND_NON_PROFIT: "Taxes, fees and donations differ; the detailed code decides."
+  GOVERNMENT_AND_NON_PROFIT_GOVERNMENT_DEPARTMENTS_AND_AGENCIES: "Fees, fines or taxes: unclear."
+  GOVERNMENT_AND_NON_PROFIT_OTHER_GOVERNMENT_AND_NON_PROFIT: "Too broad to guess."

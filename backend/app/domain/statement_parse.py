@@ -233,16 +233,49 @@ def _apply_sign(printed: Decimal, sign: Sign) -> Decimal:
     return abs(printed)
 
 
-def _parse_date(text: str, fmt: str, period_end: date) -> date:
-    has_year = "%y" in fmt or "%Y" in fmt
-    try:
-        if has_year:
+def _row_lower_bound(start: date | None, end: date) -> date:
+    """The earliest date a row may carry: a month before the printed start, else two before the end.
+
+    One bound for both reading a year-less date and flagging ``date_out_of_period``, so a row the
+    check accepts is never read into a different year.
+    """
+    return _months_back(start, 1) if start else _months_back(end, 2)
+
+
+def _parse_date(text: str, fmt: str, period_end: date, period_start: date | None = None) -> date:
+    """Read a printed row date. A year-less date takes the year that best fits the statement.
+
+    Candidates are the period end's year and its neighbours (Dec/Jan statements, a row a few days
+    past the end). Prefer a candidate inside the period, then one in the posting grace, then
+    any candidate. Within each group the candidate nearest the period end wins.
+    Rows may sit a month before a printed start (see ``_row_lower_bound``); card
+    statements with no printed start allow two months back.
+    A candidate year where the day does not exist (Feb 29) is skipped.
+    Dates that print a year are taken as printed.
+    """
+    if "%y" in fmt or "%Y" in fmt:
+        try:
             return datetime.strptime(text, fmt).date()
-        d = datetime.strptime(f"{text} {period_end.year}", f"{fmt} %Y").date()
+        except ValueError:
+            raise StatementParseError("unreadable date") from None
+    try:
+        # 2000 is a leap year, so Feb 29 parses; the real year is chosen below.
+        month_day = datetime.strptime(f"{text} 2000", f"{fmt} %Y").date()
     except ValueError:
         raise StatementParseError("unreadable date") from None
-    # A year-less row dated after the period end belongs to the previous year (Dec/Jan statement).
-    return d.replace(year=d.year - 1) if d > period_end and d.month > period_end.month else d
+    candidates: list[date] = []
+    for year in (period_end.year - 1, period_end.year, period_end.year + 1):
+        try:
+            candidates.append(date(year, month_day.month, month_day.day))
+        except ValueError:
+            continue  # no Feb 29 in that year
+    if not candidates:
+        raise StatementParseError("unreadable date")
+    lower = _row_lower_bound(period_start, period_end)
+    upper = period_end + timedelta(days=7)
+    inside = [d for d in candidates if lower <= d <= period_end]
+    with_grace = [d for d in candidates if lower <= d <= upper]
+    return min(inside or with_grace or candidates, key=lambda d: abs((d - period_end).days))
 
 
 def _block_key(name: str) -> str:
@@ -372,9 +405,9 @@ def parse_statement(text: str, profile: Profile) -> ParsedStatement:
             groups_ = rm.groupdict()
             desc = " ".join(((pending_desc or "") + " " + (groups_.get("desc") or "")).split())
             if groups_.get("date"):
-                row_date = _parse_date(rm.group("date"), profile.date_format, end)
+                row_date = _parse_date(rm.group("date"), profile.date_format, end, start)
             elif pending_date is not None:
-                row_date = _parse_date(pending_date, profile.date_format, end)
+                row_date = _parse_date(pending_date, profile.date_format, end, start)
             else:
                 row_date = end
             printed = parse_amount(rm.group("amount") + ("-" if groups_.get("neg") else ""))
@@ -421,7 +454,7 @@ def _finish_block(b: _Block, profile: Profile, start: date | None, end: date) ->
     rec = reconcile(opening, closing, [t.amount for t in txns])
     # A row dated well outside the statement period means a misread date or the wrong document.
     # A card statement has no printed start, so allow its whole cycle plus posting lag.
-    lower = _months_back(start, 1) if start else _months_back(end, 2)
+    lower = _row_lower_bound(start, end)
     upper = end + timedelta(days=7)
     if rec.status == "reconciled" and any(not lower <= t.posted_date <= upper for t in txns):
         rec = Reconciliation("needs_review", "date_out_of_period", rec.diff)

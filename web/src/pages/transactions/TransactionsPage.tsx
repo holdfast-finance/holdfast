@@ -1,6 +1,6 @@
 import { Landmark, ListFilter, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 
 import { errorMessage } from '@/api/client'
 import { useAccounts, useTransactionSummary, useTransactions } from '@/api/ledger'
@@ -278,6 +278,9 @@ function EmptyState() {
         Import a statement PDF and its transactions land here, newest first. Nothing leaves your
         server.
       </p>
+      <Button asChild size="lg" className="mt-2 self-start">
+        <Link to="/import">Import a statement</Link>
+      </Button>
     </div>
   )
 }
