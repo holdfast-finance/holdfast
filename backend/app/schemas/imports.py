@@ -30,6 +30,9 @@ class ImportRunOut(ReconcileNumbers):
     currency: str | None  # the account's currency; null when the run has no account
     status: RunStatus
     reconcile_status: ReconcileStatus
+    # Why a needs_review run was flagged (a fixed code such as ``balance_mismatch``; ``unknown``
+    # when an older run never stored one). Null for reconciled runs.
+    reason: str | None
     period_start: date | None
     period_end: date | None
     rows_parsed: int
@@ -63,7 +66,7 @@ class ImportBlockOut(ReconcileNumbers):
     # False: this file was already imported and nothing was written for this block.
     created: bool
     # Why a block that isn't reconciled needs a look (a fixed code such as ``balance_mismatch`` or
-    # ``missing_balance``). Not stored: only the upload response carries it (no column yet).
+    # ``missing_balance``), stored on the run.
     reason: str | None
 
 
