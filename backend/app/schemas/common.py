@@ -1,4 +1,8 @@
-"""Field types shared by request schemas. Validation errors become ``validation_error`` 422."""
+"""Field types shared by request schemas. Validation errors become ``validation_error`` 422.
+
+Prefer ``MoneyStr``, ``PriceStr``, or ``QuantityStr`` for fields backed by the matching
+storage column. ``DecimalStr`` retains the generic fixed-point bounds.
+"""
 
 from __future__ import annotations
 
@@ -66,53 +70,52 @@ Code = Annotated[str, Field(min_length=1, max_length=64)]
 WebAuthnCredential = Annotated[dict[str, Any], AfterValidator(_credential)]
 
 
-# API bounds are separate from storage precision. Fields can impose tighter limits.
-# Use ASCII fixed-point strings and preserve signed zero, including "-0".
-_DECIMAL_MAX_INTEGER_DIGITS = 14
-_DECIMAL_MAX_SCALE = 8
-_DECIMAL_PATTERN = re.compile(
-    rf"^-?(?:0|[1-9][0-9]{{0,{_DECIMAL_MAX_INTEGER_DIGITS - 1}}})"
-    rf"(?:\.[0-9]{{1,{_DECIMAL_MAX_SCALE}}})?$"
-)
-
-
-def _parse_decimal_str(value: object) -> Decimal:
-    """Validate strings before parsing and bound Python Decimals before serialization."""
-    if isinstance(value, str) and _DECIMAL_PATTERN.fullmatch(value):
-        return Decimal(value)
-    if not isinstance(value, Decimal):
-        raise ValueError("Amount must be a fixed-point decimal string within bounds.")
-
-    _, digits, exponent = value.as_tuple()
-    if not isinstance(exponent, int):
-        raise ValueError("Amount must be finite.")
-    # A zero coefficient has only one integer digit even with a positive exponent.
-    if exponent < -_DECIMAL_MAX_SCALE or (
-        digits != (0,) and len(digits) + exponent > _DECIMAL_MAX_INTEGER_DIGITS
-    ):
-        raise ValueError("Amount exceeds the decimal string bounds.")
-    return value
-
-
-def _dump_decimal_str(value: Decimal) -> str:
-    return format(value, "f")
-
-
 class _DecimalString:
     """Marks an API decimal whose JSON schema is a string, not a number."""
 
 
 DECIMAL_STRING = _DecimalString()
 
-# One schema for every money, quantity and price field. Bare ``Decimal`` is a JSON number
-# on the way in (Pydantic validation schema), which violates the money rule.
-DecimalStr = Annotated[
-    Decimal,
-    BeforeValidator(_parse_decimal_str),
-    PlainSerializer(_dump_decimal_str, return_type=str, when_used="json"),
-    WithJsonSchema({"type": "string", "pattern": _DECIMAL_PATTERN.pattern}),
-    DECIMAL_STRING,
-]
+
+def _decimal_string(
+    integer_digits: int, scale: int
+) -> tuple[BeforeValidator, PlainSerializer, WithJsonSchema, _DecimalString]:
+    pattern = re.compile(
+        rf"^-?(?:0|[1-9][0-9]{{0,{integer_digits - 1}}})(?:\.[0-9]{{1,{scale}}})?$"
+    )
+
+    def check_bounds(value: Decimal) -> Decimal:
+        sign, digits, exponent = value.as_tuple()
+        if not isinstance(exponent, int):
+            raise ValueError("Amount must be finite.")
+        # A zero coefficient has only one integer digit even with a positive exponent.
+        if exponent < -scale or (digits != (0,) and len(digits) + exponent > integer_digits):
+            raise ValueError("Amount exceeds the decimal string bounds.")
+        return Decimal("0") if sign and digits == (0,) else value
+
+    def _parse_decimal_str(value: object) -> Decimal:
+        if isinstance(value, str) and pattern.fullmatch(value):
+            value = Decimal(value)
+        if not isinstance(value, Decimal):
+            raise ValueError("Amount must be a fixed-point decimal string within bounds.")
+        return check_bounds(value)
+
+    def _dump_decimal_str(value: Decimal) -> str:
+        return format(check_bounds(value), "f")
+
+    return (
+        BeforeValidator(_parse_decimal_str),
+        PlainSerializer(_dump_decimal_str, return_type=str, when_used="json"),
+        WithJsonSchema({"type": "string", "pattern": pattern.pattern}),
+        DECIMAL_STRING,
+    )
+
+
+DecimalStr = Annotated[Decimal, *_decimal_string(14, 8)]
+# Match the NUMERIC columns in app.models._common.
+MoneyStr = Annotated[Decimal, *_decimal_string(12, 2)]
+PriceStr = Annotated[Decimal, *_decimal_string(10, 8)]
+QuantityStr = Annotated[Decimal, *_decimal_string(18, 10)]
 
 
 class Model(BaseModel):

@@ -1,9 +1,22 @@
 [project]
-name = "holdfast"
+name = "holdfast-finance"
 version = "0.0.0a0"
 description = "Holdfast API and worker: self-hosted personal finance."
 readme = "README.md"
 license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Holdfast contributors" }]
+keywords = ["personal-finance", "self-hosted", "fastapi", "privacy"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+]
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.115",
@@ -22,6 +35,9 @@ dependencies = [
     "webauthn>=3.0.1",
 ]
 
+[project.optional-dependencies]
+sanitize = ["pdfplumber>=0.11.10"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
@@ -32,10 +48,41 @@ dev = [
     "pip-audit>=2.7",
     "hypothesis>=6.170.15",
     "import-linter>=2.17",
+    "reportlab>=5.1.0",
+    "pdfplumber>=0.11.10",
 ]
 
+[project.urls]
+Homepage = "https://github.com/holdfast-finance/holdfast"
+Source = "https://github.com/holdfast-finance/holdfast"
+Issues = "https://github.com/holdfast-finance/holdfast/issues"
+Changelog = "https://github.com/holdfast-finance/holdfast/releases"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# Distribution name is `holdfast-finance` (PyPI `holdfast` belongs to someone else).
+# The import package stays `app`; the Docker image still runs from source.
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# Alembic ships inside the package so a wheel install can migrate: point alembic at
+# `<site-packages>/app/alembic.ini`, which resolves `migrations` relative to itself.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "app/migrations"
+"alembic.ini" = "app/alembic.ini"
+
+[tool.hatch.build.targets.sdist]
+include = ["/app", "/migrations", "/alembic.ini", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../LICENSE" = "LICENSE"
+
 [tool.uv]
-# The app is run from source (`app` package); it is not built as a wheel.
+# The Docker image runs from source (`app` package), so `uv sync` does not install the project.
+# `uv build` still produces the wheel and sdist from [build-system].
 package = false
 
 [tool.ruff]

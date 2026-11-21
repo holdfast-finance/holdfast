@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked release-check dist
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -98,6 +98,14 @@ migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` 
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
 
+.PHONY: sanitize
+sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-private/inbox OUT=$$HOME/holdfast-private/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
+	@test -n "$(IN)" || { echo "usage: make sanitize IN=<dir|zip|file> OUT=<dir> [REVIEW=1] [KEEP=Word]"; exit 2; }
+	@for p in "$(abspath $(IN))" $(if $(OUT),"$(abspath $(OUT))"); do \
+	  case "$$p/" in "$(CURDIR)"/*) echo "sanitize: $$p is inside the repository. Real statements and sanitizer output stay outside it (ADR 0019). Use an absolute path such as $$HOME/holdfast-private/..." >&2; exit 2;; esac; \
+	done
+	@cd backend && uv run --extra sanitize python -m app.importers.sanitize "$(abspath $(IN))" $(if $(REVIEW),--review,"$(abspath $(OUT))") $(if $(CLEAR),--clear-out) $(foreach w,$(KEEP),--keep "$(w)")
+
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)
 	python3 scripts/gen-keys.py --write
 
@@ -106,6 +114,15 @@ check: lint test ## lint + test
 sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 	@git fetch origin --quiet
 	@if [ "$$(git rev-parse --abbrev-ref HEAD)" = main ]; then git merge --ff-only origin/main; else git rev-list --left-right --count HEAD...origin/main | awk '{print "ahead " $$1 ", behind " $$2 " vs origin/main"}'; fi
+
+release-check: ## Compare product SemVer and Python version. Does not tag or publish.
+	python3 scripts/cut_release.py check
+
+dist: ## Build wheel + sdist (holdfast-finance) and SHA256SUMS into ./dist. Does not publish.
+	rm -rf dist
+	cd backend && uv build --out-dir ../dist
+	rm -f dist/.gitignore
+	python3 scripts/dist_checksums.py dist
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
 	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \

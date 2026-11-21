@@ -1,7 +1,20 @@
 # Prod edge Caddy with the Cloudflare DNS provider, for DNS-01 certs (PLAN 12.1).
 FROM caddy:2-builder@sha256:aef223d1f943bc12a29a9e0a0a73983aa19a36672daede7507da4201a6b1016a AS builder
-RUN xcaddy build --with github.com/caddy-dns/cloudflare
+RUN xcaddy build --with github.com/caddy-dns/cloudflare@v0.2.4
 
 FROM caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 COPY Caddyfile.prod /etc/caddy/Caddyfile
+
+# OCI image labels. VERSION and REVISION are build args set by the release workflow.
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="holdfast-caddy" \
+      org.opencontainers.image.description="Holdfast edge Caddy with the Cloudflare DNS provider (binds the Tailscale IP via compose)" \
+      org.opencontainers.image.source="https://github.com/holdfast-finance/holdfast" \
+      org.opencontainers.image.url="https://github.com/holdfast-finance/holdfast" \
+      org.opencontainers.image.documentation="https://github.com/holdfast-finance/holdfast#readme" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.vendor="Holdfast" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"

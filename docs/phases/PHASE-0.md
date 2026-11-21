@@ -46,7 +46,7 @@
 - 0007: Postgres role split (admin / owner / app)
 
 ## Blocked: what the owner must do
-- Run `./scripts/dev.ps1 keys` then `./scripts/dev.ps1 up` once on a Windows machine with PowerShell 7 and Docker Desktop, and report any error. **Never on county equipment** (PLAN Section 0).
+- Run `./scripts/dev.ps1 keys` then `./scripts/dev.ps1 up` once on a Windows machine with PowerShell 7 and Docker Desktop, and report any error. **Never on employer equipment** (PLAN Section 0).
 
 ## Known gaps / follow-ups
 - Phase 9 hardening list above.
