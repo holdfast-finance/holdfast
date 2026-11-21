@@ -1,4 +1,4 @@
-# 0026. Transfer pairs need one owner, and "not a transfer" is a stored correction
+# 0027. Transfer pairs need one owner, and "not a transfer" is a stored correction
 
 - Status: Accepted
 - Date: 2026-11-21

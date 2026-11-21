@@ -1,4 +1,4 @@
-# 0028. Rules run where rows are written; transfers and recurring run in one refresh job
+# 0029. Rules run where rows are written; transfers and recurring run in one refresh job
 
 - Status: Accepted
 - Date: 2026-11-21
@@ -40,7 +40,7 @@ Constraints:
       suggestions (delete and insert in one transaction).
    3. Recurring detection: household-wide load of live, posted, non-transfer rows; `detect_recurring`
       runs in a `ProcessPoolExecutor(max_workers=1)` owned by the worker, with a 120 s timeout
-      (timeout fails the attempt; the retry policy applies); `reconcile_series` (ADR 0027) is
+      (timeout fails the attempt; the retry policy applies); `reconcile_series` (ADR 0028) is
       written in the runner's final transaction with the success mark.
    Payload `{household_id}` only. Idempotency keys: `refresh:import:<document_id>` after a statement
    upload, `refresh:sync:<sync_run_id>` after a sync (Phase 2a), and `refresh:manual:<UTC time

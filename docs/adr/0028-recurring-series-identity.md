@@ -1,4 +1,4 @@
-# 0027. Recurring series keep their identity across runs; status is computed when read
+# 0028. Recurring series keep their identity across runs; status is computed when read
 
 - Status: Accepted
 - Date: 2026-11-21

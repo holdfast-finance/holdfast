@@ -1,4 +1,4 @@
-# 0025. Who sees and who writes rules, transfer suggestions and recurring series
+# 0026. Who sees and who writes rules, transfer suggestions and recurring series
 
 - Status: Accepted
 - Date: 2026-11-21
