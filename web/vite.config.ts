@@ -110,6 +110,8 @@ const config = {
     setupFiles: ['./src/test/setup.ts'],
     css: false,
     restoreMocks: true,
+    // Above asyncUtilTimeout in src/test/setup.ts, so a slow wait reports its own error.
+    testTimeout: 15_000,
   },
 } satisfies UserConfig
 
