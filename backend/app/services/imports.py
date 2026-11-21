@@ -464,12 +464,10 @@ class ImportService:
             doc = (
                 await s.execute(select(Document.filename).where(Document.id == result.document_id))
             ).scalar_one()
-        blocks = await self._blocks(result.blocks, statement)
+        blocks = await self._blocks(result.blocks)
         return existing is None, result.document_id, doc, blocks, result.balances_only
 
-    async def _blocks(
-        self, results: tuple[BlockResult, ...], statement: ParsedStatement
-    ) -> list[ImportBlockOut]:
+    async def _blocks(self, results: tuple[BlockResult, ...]) -> list[ImportBlockOut]:
         if not results:
             return []
         created = {r.run_id: r.created for r in results}
@@ -481,7 +479,7 @@ class ImportService:
         async with self._session() as s:
             rows = {run.id: (run, name, cur) for run, name, cur in (await s.execute(stmt)).all()}
         out: list[ImportBlockOut] = []
-        for r, parsed in zip(results, statement.blocks, strict=True):
+        for r in results:
             run, name, cur = rows[r.run_id]
             out.append(
                 ImportBlockOut.model_validate(
@@ -501,9 +499,7 @@ class ImportService:
                         "rows_inserted": r.rows_inserted,
                         "rows_duplicate": r.rows_duplicate,
                         "created": r.created,
-                        "reason": parsed.reconciliation.reason
-                        if run.reconcile_status == "needs_review"
-                        else None,
+                        "reason": r.reason if run.reconcile_status == "needs_review" else None,
                     }
                 )
             )

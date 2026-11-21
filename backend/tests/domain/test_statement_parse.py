@@ -10,6 +10,7 @@ import pytest
 from app.domain.fingerprint import import_fingerprint
 from app.domain.statement_parse import (
     StatementParseError,
+    _parse_date,
     detect_profile,
     mask_long_digit_runs,
     parse_amount,
@@ -331,3 +332,59 @@ def test_very_long_lines_are_skipped() -> None:
     st = parse_statement(_text("$10.00", "$7.00", [long]), _profile())
     assert st.blocks[0].txns == ()
     assert st.status == "needs_review"
+
+
+def _yearless(period: str, rows: list[str], closing: str) -> list[date]:
+    extra = {
+        "date_format": "%m-%d",
+        "groups": [
+            {
+                "sign": "as_is",
+                "row": r"^\s*(?P<date>\d\d-\d\d)\s+(?P<desc>.+?)\s+(?P<amount>[\d,]+\.\d\d)\s*$",
+            }
+        ],
+    }
+    text = (
+        f"First Example Bank\nPeriod {period}\nAccount ******0000\n"
+        f"Opening   $0.00\n" + "\n".join(rows) + f"\nClosing   {closing}\n"
+    )
+    return [t.posted_date for t in parse_statement(text, _profile(extra=extra)).blocks[0].txns]
+
+
+@pytest.mark.parametrize("period", ["01/01/25 - 12/31/25", "12/01/24 - 12/31/25"])
+def test_year_less_rows_prefer_the_statement_period_over_grace(period: str) -> None:
+    assert _yearless(period, ["01-01 First post 1.00", "12-31 Last post 1.00"], "$2.00") == [
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+    ]
+
+
+def test_year_less_row_just_after_a_january_period_end_stays_in_the_period_year() -> None:
+    # 02-03 is 3 days after 01/31/25: inside the +7 day grace, so 2025, not 2024.
+    assert _yearless("01/04/25 - 01/31/25", ["02-03 Late post 1.00"], "$1.00") == [date(2025, 2, 3)]
+
+
+def test_year_less_row_in_january_after_a_december_end_rolls_forward() -> None:
+    assert _yearless("12/01/25 - 12/31/25", ["01-02 Early post 1.00"], "$1.00") == [
+        date(2026, 1, 2)
+    ]
+
+
+def test_year_less_leap_day_skips_years_where_it_does_not_exist() -> None:
+    assert _yearless("02/01/24 - 02/29/24", ["02-29 Leap 1.00"], "$1.00") == [date(2024, 2, 29)]
+    # Period end in 2025 (no Feb 29 that year): the leap day belongs to 2024, never an error.
+    assert _parse_date("02-29", "%m-%d", date(2025, 3, 5), date(2025, 2, 1)) == date(2024, 2, 29)
+
+
+def test_year_less_dates_inside_any_period_round_trip() -> None:
+    from datetime import timedelta
+
+    for start in (date(2023, 12, 20), date(2024, 1, 4), date(2024, 2, 10), date(2024, 12, 15)):
+        end = start + timedelta(days=30)
+        for i in range(31):
+            d = start + timedelta(days=i)
+            assert _parse_date(d.strftime("%m-%d"), "%m-%d", end, start) == d
+        # and the grace days after the end
+        for i in range(1, 8):
+            d = end + timedelta(days=i)
+            assert _parse_date(d.strftime("%m-%d"), "%m-%d", end, start) == d
