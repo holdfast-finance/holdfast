@@ -1,4 +1,19 @@
-"""Pure categorisation rule matching and change previews for C3a."""
+"""Pure categorisation rule matching and change previews for C3a.
+
+A lower priority number wins, with ties resolved by rule ID order. Amount
+bounds are inclusive and signed. A spending range of 10 to 20 uses bounds
+of -20 and -10. Use an outflow sign condition to match spending of any amount.
+
+The highest-priority matching rule can replace a category set by a lower-priority
+rule. Replaying the same rule produces no change once its action is reflected in
+the row. Disabling a rule does not undo its earlier changes. If another enabled
+rule matches, its action applies under the usual precedence.
+
+Open storage decisions include whether to apply rules to split parents, whose
+category is invisible in reports when their splits own reporting, how to handle
+transfer legs, and where to store ``transfer_candidate``. Preview only sets the
+flag when requested and never clears a stale flag.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +25,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
+from app.domain.category_precedence import can_replace_category
 from app.domain.fingerprint import normalize_description
 from app.domain.money import ZERO
 
@@ -31,16 +47,26 @@ class RuleValidationError(ValueError):
 def _compile_safe_regex(pattern: str) -> re.Pattern[str]:
     """Compile a bounded subset of Python regex syntax.
 
-    Allow one plain group, alternation, classes, anchors, one open-ended
-    repeat and up to four optional atoms. Groups cannot be repeated. This caps
-    backtracking paths per search start to a constant times the subject length.
-    Searches also cap subject length. This bounds work without guaranteeing a
-    wall-clock timeout. Valid Python patterns outside this subset are rejected.
+    Accept Python literals, dot, character classes, anchors, the escapes in
+    _REGEX_TOKEN, and at most one plain capturing group. Quantifiers apply
+    only to single consuming atoms. Allow up to four optional atoms and at
+    most one greedy unbounded repeat (* or +). Alternation is allowed at
+    either level only without an unbounded repeat. Branches and the group
+    must be nonempty. The total number of pipes plus one is at most eight,
+    and that count times 2**optional is at most sixteen.
+
+    For pattern length m <= 128 and subject length n <= 1024, search tries
+    at most n + 1 starts. Each start has at most 16 paths before considering
+    the unbounded repeat, which can try up to n + 1 lengths. Checking any
+    single path takes O(m) work, giving O(16 * m * (n + 1)**2) search work
+    with a repeat and O(16 * m * (n + 1)) without one. This is a static check,
+    with no wall-clock timeout.
     """
     if len(pattern) > MAX_REGEX_LENGTH:
         raise RuleValidationError("Regex pattern is too long.")
 
     groups = repeats = optional = 0
+    branches = 1
     previous = ""
     offset = 0
     while offset < len(pattern):
@@ -52,6 +78,10 @@ def _compile_safe_regex(pattern: str) -> re.Pattern[str]:
             groups += 1
             if groups > 1 or pattern.startswith("?", atom_match.end()):
                 raise RuleValidationError("Regex allows only one plain group.")
+        if atom in ("|", ")") and previous in ("", "(", "|"):
+            raise RuleValidationError("Regex cannot contain empty branches or groups.")
+        if atom == "|":
+            branches += 1
         if atom in ("*", "+", "?"):
             if previous in (")", "*", "+", "?"):
                 raise RuleValidationError("Regex cannot repeat groups or quantifiers.")
@@ -63,6 +93,13 @@ def _compile_safe_regex(pattern: str) -> re.Pattern[str]:
                 raise RuleValidationError("Regex contains too many quantifiers.")
         previous = atom
         offset = atom_match.end()
+
+    if previous == "|":
+        raise RuleValidationError("Regex cannot contain empty branches or groups.")
+    if branches > 8 or branches * 2**optional > 16:
+        raise RuleValidationError("Regex has too many branch and optional paths.")
+    if branches > 1 and repeats:
+        raise RuleValidationError("Regex cannot combine alternation with * or +.")
 
     try:
         return re.compile(pattern, re.IGNORECASE)
@@ -82,6 +119,8 @@ class DescriptionCondition:
     def __post_init__(self) -> None:
         if self.mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
+        if not self.value.strip():
+            raise RuleValidationError("Description text is required.")
         literal = normalize_description(self.value) if self.mode != "regex" else ""
         regex = _compile_safe_regex(self.value) if self.mode == "regex" else None
         object.__setattr__(self, "_literal", literal)
@@ -102,7 +141,12 @@ class DescriptionCondition:
 
 @dataclass(frozen=True, slots=True)
 class RuleConditions:
-    """Populated fields are ANDed. Amount and date bounds are inclusive and may be open."""
+    """Require at least one condition and AND the populated fields.
+
+    Amount and date bounds are inclusive and may be open. Outflows are
+    negative, so a spending range of 10 to 20 uses bounds of -20 and -10.
+    An outflow sign condition matches spending of any amount when used alone.
+    """
 
     description: DescriptionCondition | None = None
     merchant_key: str | None = None
@@ -115,7 +159,21 @@ class RuleConditions:
     date_through: date | None = None
 
     def __post_init__(self) -> None:
-        for amount in (self.amount_equals, self.amount_min, self.amount_max):
+        amounts = (self.amount_equals, self.amount_min, self.amount_max)
+        if all(
+            condition is None
+            for condition in (
+                self.description,
+                self.merchant_key,
+                *amounts,
+                self.amount_sign,
+                self.account_ids,
+                self.date_from,
+                self.date_through,
+            )
+        ):
+            raise RuleValidationError("A rule needs at least one condition.")
+        for amount in amounts:
             if amount is not None and (not isinstance(amount, Decimal) or not amount.is_finite()):
                 raise RuleValidationError("Amount conditions require finite Decimal values.")
         if (
@@ -133,7 +191,10 @@ class RuleConditions:
         ):
             raise RuleValidationError("Start date is after end date.")
         if self.account_ids is not None:
-            object.__setattr__(self, "account_ids", frozenset(self.account_ids))
+            accounts = frozenset(self.account_ids)
+            if not accounts:
+                raise RuleValidationError("An account filter needs at least one account.")
+            object.__setattr__(self, "account_ids", accounts)
 
     def matches(self, txn: RuleTransaction, normalized: str) -> bool:
         return (
@@ -160,6 +221,13 @@ class RuleAction:
 
 @dataclass(frozen=True, slots=True)
 class Rule:
+    """Lower priority numbers win, with ties resolved by rule ID.
+
+    The winning rule can replace a lower-priority rule's category. Replaying
+    its applied action produces no change. Disabling a rule leaves its earlier
+    changes in place unless another enabled rule supplies a new action.
+    """
+
     id: UUID
     priority: int
     enabled: bool
@@ -189,7 +257,7 @@ class RuleMatch:
 
 def can_apply_rule(current_source: str | None) -> bool:
     """Under ADR 0022 only the user outranks a rule, including a user's clear."""
-    return current_source != "user"
+    return can_replace_category(current_source, "rule")
 
 
 def _ordered_rules(rules: Iterable[Rule]) -> list[Rule]:

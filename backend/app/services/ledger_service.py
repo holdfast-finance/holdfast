@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.domain.category_precedence import can_replace_category
 from app.domain.ledger_rules import (
     LedgerRuleError,
     TransferLeg,
@@ -92,14 +93,6 @@ class AutoCategorySource(enum.StrEnum):
     RULE = "rule"
     PLAID = "plaid"
     ML = "ml"
-
-
-# Higher wins. "user" is not an AutoCategorySource; an unknown or missing source ranks lowest.
-SOURCE_RANK = {"ml": 1, "plaid": 2, "rule": 3, "user": 4}
-
-
-def _rank(source: str | None) -> int:
-    return SOURCE_RANK.get(source or "", 0)
 
 
 @dataclass(frozen=True)
@@ -279,7 +272,7 @@ class LedgerWriter:
             await self._require_category(category_id)
         txn = (await self._lock_group([transaction_id]))[transaction_id]
         self._require_live(txn)
-        if _rank(txn.category_source) > _rank(auto.value):
+        if not can_replace_category(txn.category_source, auto.value):
             return False
         txn.category_id = category_id
         txn.category_source = None if category_id is None else auto.value
