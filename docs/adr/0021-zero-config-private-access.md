@@ -1,503 +1,583 @@
-# 0021. Zero-config private access: a bundled tsnet `access` service and a phone onboarding wizard
+# 0021. Zero-config private access: localhost first, phone through a stock Tailscale sidecar
 
-- Status: Proposed
+- Status: Proposed (revision 2)
 - Date: 2026-11-21
-- Deciders: Lattice (architect), Keel; owner asked for it (paraphrased: people who download Holdfast
-  shouldn't have to understand reverse proxies or tunnels). Bulwark and Gadfly review before the
-  first build. Owner-queue items are listed at the end.
+- Deciders: Lattice (architect), Keel. The owner asked for it (paraphrased: people who download
+  Holdfast shouldn't have to understand reverse proxies or tunnels).
+- Reviews: Gadfly, `docs/adr/reviews/0021-gadfly.md` (it rejected revision 1). §10 answers it point
+  by point. Bulwark threat-models the design before PA1.
+- Revision 2 changes:
+  - The custom Go/tsnet `access` service is replaced by the stock `tailscale/tailscale` container.
+  - The app works on the PC at `http://localhost` straight after install. Phone access becomes an
+    optional second step inside the app.
+  - Credentials can belong to more than one accepted RP id, replacing the single pinned RP id.
+  - The story list is cut to a verification spike plus the smallest Linux slice. Everything else is
+    deferred to Phase 8.5.
 
 ## Context
 
-PLAN 12.1 and Phase 8.5 describe private access for someone who already knows networking: Tailscale
-on the host, an owned domain, a Cloudflare DNS-01 token, Caddy bound to the Tailscale IP, ufw rules
-and tailnet ACLs. `infra/docker-compose.prod.yml` implements that path. Most of the people PLAN 20.1
-calls the beachhead can follow it, but a household that only wants "Holdfast on my PC, open it on my
-phone" can't.
+PLAN 12.1 and Phase 8.5 describe private access for someone who already knows networking:
+- Tailscale on the host
+- an owned domain and a Cloudflare DNS-01 token
+- Caddy bound to the Tailscale IP
+- ufw rules and tailnet ACLs
+
+`infra/docker-compose.prod.yml` implements that path.
 
 The owner's machine works today because of a manual setup: Tailscale on the host, `tailscale serve`
 (tailnet only, real `*.ts.net` certificate) in front of Caddy on `127.0.0.1:443`, `APP_HOST` set to
-the ts.net name, `default_sni` in the dev Caddyfile, and a passkey registered on the phone against
-that name. It has one known problem. Serve terminates TLS and reconnects to Caddy from loopback, so
-Caddy sees `127.0.0.1` as the peer for every client. Per-IP rate limits and audit IPs collapse into
-one bucket (`docs/ops/client-ip-check.md`, ADR 0010).
+the ts.net name, and a phone passkey registered against that name. Serve reconnects to Caddy from
+loopback, so Caddy sees one peer for every client. Per-IP rate limits and audit IPs collapse
+(`docs/ops/client-ip-check.md`, ADR 0010).
 
-Constraints that shape the design:
-- **Hard rule 12:** no public port, no port-forward. Caddy binds to the Tailscale IP only.
-- **Hard rule 9:** a new external service needs an ADR. This ADR covers Tailscale's coordination,
-  DERP relay and certificate services as a dependency of the default install.
-- **Hard rule 13:** no personal assumptions. The owner's tailnet name is personal data. It never
-  appears in code, fixtures or docs. Examples use `holdfast.tail0000.ts.net`.
-- **ADR 0013:** no paid plan or service for the project. Users bring their own free accounts, as
-  they already do for Plaid and AI (PLAN 17.1).
-- **ADR 0009:** a relay run by Holdfast belongs to Holdfast Cloud, not to self-host.
-- **ADR 0010:** the WebAuthn RP id is `APP_HOST` and the expected origin is `https://APP_HOST`. A
-  passkey is bound to its RP id when it's registered.
-- **ADR 0018:** the supported install is compose with images from GHCR. PLAN 17.6 asks for a
-  one-command installer. No native launcher exists yet.
-- **Rule 10:** Windows scripts target PowerShell 7.
+The owner wants strangers to get the same result without knowing any of that.
 
-Claims about Tailscale behaviour, limits, pricing and licences are marked **VERIFY** with the page to
-check. They aren't stated as fact. Tailscale changes these often. Any VERIFY item that turns out
-false reopens the parts of this ADR that depend on it (the list at the end shows which).
+Constraints:
+- **Hard rule 9:** this ADR covers Tailscale's coordination, DERP and certificate services, plus the
+  upstream `tailscale/tailscale` image, as dependencies of the optional phone path.
+- **Hard rule 12:** nothing public.
+- **Hard rule 13:** the owner's tailnet name is personal. It never appears in the repo. Examples use
+  `holdfast.tail0000.ts.net`.
+- **ADR 0013:** no paid service for the project.
+- **ADR 0009:** a relay run by Holdfast belongs to Holdfast Cloud.
+- **ADR 0010:** today's RP id is `APP_HOST`.
+- **ADR 0018:** compose plus GHCR is the supported install.
+- **Roadmap:** this is **Phase 8.5 work**. It must not displace the Q1 finish line (Phase 5,
+  `docs/planning/ROADMAP.md`).
+
+Every claim marked **VERIFY** is unchecked. The items the decision depends on are in the PA0 spike
+(§9) and are checked before the ADR is accepted.
 
 ## Decision
 
-### 1. Mechanism: a small Holdfast `access` service built on tsnet
-
-The default install gains one container, **`access`**. It is a Holdfast-built Go binary that embeds
-Tailscale's **tsnet** library (userspace networking, so no TUN device, no `NET_ADMIN` and no host
-Tailscale). It's the only component that touches the tailnet, and it does five things:
-
-1. **Joins the tailnet** as the machine `holdfast`, which the installer can change. With no auth
-   key, this uses Tailscale's interactive login URL. The service surfaces the URL to the console and
-   never logs it.
-2. **Listens on the tailnet at `:443` only**, through `tsnet.Server.ListenTLS`. TLS uses the node's
-   own `*.ts.net` certificate, which tsnet fetches and renews (VERIFY:
-   https://pkg.go.dev/tailscale.com/tsnet). The only ALPN is `http/1.1`.
-3. **Forwards each decrypted connection to Caddy** over a dedicated internal network (`edge`). Each
-   connection starts with a **PROXY protocol v2** header that carries the tailnet peer address from
-   `conn.RemoteAddr()`. Caddy keeps every header, CSP, body cap and route it has today
-   (`Caddyfile.access`, which is derived from `Caddyfile.prod`).
-4. **Reports status** on a control endpoint that only the API can reach (§5). Status covers:
-   backend state, FQDN, MagicDNS and HTTPS availability, key expiry, the login URL while one is
-   pending, the signed-in account's login name, and a count of online peers by OS (no peer names).
-5. **Logs out** when the owner disconnects (step-up required).
-
-It has no code path to Funnel, `ServeConfig`, exit nodes, subnet routes, SSH or the web client. A
-source test fails the build if any of those identifiers appear (`ListenFunnel`, `SetServeConfig`,
-`RunWebClient`, `AdvertiseRoutes`, `ExitNode`). The never-public invariant lives in one place: this
-binary.
+### 1. Two ingresses, one Caddy
 
 ```
-phone (Wi-Fi/LTE) ──WireGuard (Tailscale)──▶ access  (tsnet, :443 on tailnet, ts.net cert)
-                                               │  plaintext over `edge` (internal), PROXY v2
-                                               ▼
-                                             caddy  (bind <edge ip>:8080, proxy_protocol allow edge/29)
-                                               │  X-Forwarded-For {remote_host}  (overwrite)
-                                               ▼
-                                             api / web  (frontend network, unchanged)
-
-PC browser ──▶ 127.0.0.1:47800 ──▶ caddy console site (setup + connect only, token-gated)
+PC browser ──▶ http://localhost:47800 ──▶ caddy "local" site (plain HTTP, host loopback only)
+                                              │
+phone ──WireGuard──▶ tailscale (stock image, userspace)        ├──▶ api / web (frontend, unchanged)
+                     serve: :443 TLS-terminated TCP            │
+                     + PROXY v2 ──(unix socket | edge net)──▶ caddy "tailnet" site
 ```
 
-**Why tsnet and not the stock Tailscale image plus `tailscale serve` (Keel's starting position):**
-the sidecar idea stands, but the stock image puts a full `tailscaled`, its CLI and the LocalAPI in
-the container. Anything that can reach the LocalAPI can turn on Funnel. With tsnet, one process holds
-the node key and exposes only the verbs listed above. It also gets the real peer address natively,
-renews certificates natively (no copying cert files into Caddy) and reads the login URL from the
-in-process client instead of parsing logs. The comparison is in *Alternatives*.
+- **Local ingress (always on).** Caddy publishes one host port, `127.0.0.1:47800`. It's a
+  plain-HTTP site that answers only `Host: localhost:47800` and redirects `127.0.0.1:47800` to it,
+  because WebAuthn doesn't allow an IP literal as the RP id.
+- **Tailnet ingress (off until the owner turns it on).** A digest-pinned **stock
+  `tailscale/tailscale`** container in userspace mode (no TUN device, no `NET_ADMIN`) runs Tailscale
+  Serve from a **committed, read-only `TS_SERVE_CONFIG`**: one TCP handler on `443`, TLS terminated
+  with the node's own `${TS_CERT_DOMAIN}` certificate, forwarded to Caddy's tailnet site with a
+  PROXY v2 header (VERIFY, PA0 item 1).
+  - The forward target is a **unix socket** on a volume that only `tailscale` and `caddy` mount, if
+    Serve can forward TCP to one (PA0 item 2). That way nothing is trusted by IP.
+  - Otherwise it's an **unpinned** internal network `edge` whose only members are `tailscale` and
+    `caddy`. The accepted risk is that a compromised `frontend` container could connect to Caddy's
+    tailnet listener and forge client IPs. That affects rate-limit buckets and audit rows, not
+    authentication.
+  - No new pinned subnet either way (Gadfly S7).
+- **Caddy tags the ingress.** Each site overwrites `X-Holdfast-Ingress: local|tailnet` and
+  `X-Forwarded-For {remote_host}`, and strips any client-sent copies. The API trusts both headers
+  only from `TRUSTED_PROXIES`, as today. Caddy's security headers, CSP and 1 MB body cap apply to
+  both sites. HSTS goes on the tailnet site only.
 
-**Kernel versus userspace:** userspace. Inbound connections are all the service needs. Userspace
-runs unchanged on Docker Desktop for Windows and macOS, on rootless Docker, on Podman and on NAS
-boxes. Kernel mode needs `/dev/net/tun` plus `NET_ADMIN`, and it breaks under rootless Docker.
+**What the container is allowed to do,** enforced by CI:
+- `scripts/check-serve-config.py` parses the committed JSON and fails unless:
+  - the only top-level key is `TCP`
+  - the only port is `"443"`
+  - the handler has only `TerminateTLS: "${TS_CERT_DOMAIN}"`, `TCPForward` set to the Caddy target,
+    and `ProxyProtocol: 2`
+  - there is no `Web`, `AllowFunnel`, `Services` or `Foreground` key anywhere
+- `check-compose-ports.py` extends to the `tailscale` service. It fails unless:
+  - no `ports`, `TS_USERSPACE=true` and `TS_ACCEPT_DNS=false`
+  - `TS_SERVE_CONFIG` is mounted read-only
+  - `TS_TAILSCALED_EXTRA_ARGS` contains `--no-logs-no-support` (VERIFY, PA0 item 5) and
+    `TS_EXTRA_ARGS` contains no `--advertise-*`, `--exit-node*` or `--ssh`
+  - the LocalAPI socket is shared with no service except `api`, read-only (below)
 
-**Telemetry:** tsnet uploads logs to Tailscale's log service by default. `access` disables that with
-`TS_NO_LOGS_NO_SUPPORT=true` or the tsnet equivalent (VERIFY:
-https://tailscale.com/kb/1011/log-mesh-traffic). This follows the "no telemetry by default" rule
-in `.claude/rules/security.md`.
+**Off until the owner turns it on.** Without consent, the sidecar must not contact Tailscale at all.
+An unauthenticated node already registers with Tailscale's control plane to get a login URL.
+- The compose `entrypoint` wraps the stock `containerboot` in about 10 lines of `sh`. It waits for a
+  flag file, `phone-access/enabled`, on a volume that `api` can write and `tailscale` mounts
+  read-only, then starts `containerboot`.
+- When the flag disappears, the wrapper runs `tailscale logout` and goes idle.
+- That one bit is the app's only write channel to the sidecar. CI runs shellcheck on the wrapper and
+  a compose test.
 
-**Exit path if Tailscale's terms change:** tsnet accepts a `ControlURL`, so `ACCESS_CONTROL_URL`
-can point the same binary at a self-run Headscale. That path has no `*.ts.net` certificates, so it
-pairs with the manual domain + DNS-01 path. The manual paths (PLAN 12.1, and host Tailscale + Serve)
-stay supported and documented.
+**Status for the in-app wizard.** The app needs the login URL, `Self.DNSName`, `CurrentTailnet`,
+MagicDNS and certificate state, key expiry and the user count. It gets them by sharing the sidecar's
+LocalAPI socket into `api`, which runs as a non-root UID. LocalAPI grants only **read** access to a
+non-root, non-operator peer (VERIFY, PA0 item 4).
+- Required on read access: status works, and `up`, `login`, `logout`, `cert`, `serve`, `funnel` and
+  `set` are all denied.
+- **If PA0 shows that write access is reachable, the socket is never shared.** The fallback is the
+  host CLI: `holdfast phone` runs `docker compose exec tailscale tailscale status --json`, opens the
+  login URL, and hands the FQDN and tailnet identity to `app.cli`. That costs one terminal step and
+  makes the wizard partly out-of-app.
+- Either way, the app never holds a Tailscale write capability or an API key.
 
-### 2. Rule 12, restated so it stays true and testable
+**tsnet** (revision 1's choice) is the last fallback. It's used only if PA0 shows that Serve can't
+emit PROXY v2 from the stock container *and* the XFF fallback (§4) fails. If that happens, Gadfly's
+conditions apply first: Harbor named as CVE owner, a release within 72 hours of a Tailscale security
+bulletin, and a Go-capable review gate.
 
-Under this design Caddy no longer binds a Tailscale IP. In the default stack Caddy binds an internal
-Docker network, and the tailnet listener lives in `access`. The rule's intent (nothing reachable
-from the public internet) holds. Its letter has to change. Proposed wording for CLAUDE.md, for
-Keel to apply when this ADR is accepted (flagged in the weekly digest so the owner can veto it):
+### 2. Rule 12, restated (merges through the owner digest, not on acceptance)
 
-> 12. **Networking:** Holdfast is reachable only over the owner's private network, never from the
-> public internet. The default stack publishes one host port, the setup console on `127.0.0.1`,
-> and takes tailnet traffic only through the `access` service, which never opens Funnel or any
-> public listener. The manual path binds Caddy to the Tailscale IP only. Never add a public port,
-> port-forward, Funnel or public tunnel. `make ports` checks the compose side. The service worker
-> caches the app shell only, never API responses.
+Proposed CLAUDE.md wording. Keel puts it in a PR that the weekly digest lists for veto. It isn't
+applied automatically when this ADR is accepted.
 
-The mechanical checks, all in `make ports` / CI:
-- `scripts/check-compose-ports.py --access`: only `caddy` publishes. The host IP is `127.0.0.1`
-  and the port is the console port. `access` publishes nothing. `access` is on exactly
-  `{access_egress, edge, accessctl}` and `caddy` on `{frontend, edge}`. `edge` and `accessctl` are
-  `internal: true`, and `api` is not on `edge`.
-- `--prod` (manual path) gains a range check: `TAILSCALE_BIND_IP` must be in `100.64.0.0/10` or
-  `fd7a:115c:a1e0::/48`, not just "not a wildcard".
-- `go test ./...` in `infra/access` includes the forbidden-identifier source test from §1.
-- Runtime acceptance (Sounding, once per release on a real tailnet): from a device that isn't on
-  the tailnet, the FQDN doesn't resolve, and a connection to the host's LAN and public addresses on
-  443 and 47800 is refused.
+> 12. **Networking:** Holdfast is never reachable from the public internet. The default stack
+> publishes only Caddy, on `127.0.0.1`, for the PC's own browser. Phone access, when the owner turns
+> it on, comes only through the bundled Tailscale container, whose committed serve config allows
+> tailnet `:443` and nothing else (no Funnel). The manual path binds Caddy to the Tailscale IP only.
+> Never add a public port, port-forward, Funnel or public tunnel. `make ports` and the serve-config
+> test check this. The service worker caches the app shell only, never API responses.
 
-### 3. Hostname lifecycle
+The checks:
+- `make ports` covers default, access and prod. In default and access, only `caddy` publishes, on
+  `127.0.0.1:47800`. In prod, `TAILSCALE_BIND_IP` must be in `100.64.0.0/10` or
+  `fd7a:115c:a1e0::/48`.
+- `check-serve-config.py`, as listed in §1.
+- **The Docker floor.** Older Docker Engine releases let hosts on the same LAN reach
+  `127.0.0.1`-published ports. The installer refuses an Engine older than the fixed release
+  (believed to be 28.0, VERIFY: https://docs.docker.com/engine/release-notes/28/) and names the fix.
+  On a stock distro package that's one extra Linux step (Gadfly S8). With the bug, the plain-HTTP
+  localhost site would be reachable from the LAN, so the floor is what makes "loopback only" true.
+- Sounding's release probe: from a device that isn't on the tailnet, the FQDN doesn't resolve, and
+  the host's LAN and public addresses refuse `47800` and `443`.
 
-- **The bound host.** A new single-row, instance-level table `instance_access` stores `bound_host`,
-  `bound_at`, `mode` (`access` | `manual`) and `previous_host`. It holds no household data, so it
-  has no `household_id`. It joins the identity-table exemption list in the RLS lint (ADR 0008/0010
-  precedent), with that reason recorded. `webauthn_credential` gains `rp_id` (NOT NULL, backfilled
-  from `APP_HOST`).
-- **Precedence.** If `APP_HOST` is set in `.env`, the instance is in manual mode, and that value is
-  the RP id, as today. If it's unset, the instance is in access mode, and the RP id is `bound_host`.
-  The API resolves it per request (`app/services/access.py`) instead of once at startup.
-- **First run, before a name exists.** There's no RP id, so passkey and TOTP registration and
-  `POST /setup` answer `409 access_not_ready`. Only the loopback console works. When `access`
-  reports a name and a working certificate, the console shows the phone QR. The first successful
-  owner passkey registration at that origin writes `bound_host` in the same transaction.
-  `bound_host` is never written from a request's `Host` header. It's written only from the `access`
-  status the API fetched itself, and only when the two match.
-- **The name changes** (machine renamed, tailnet renamed, or a collision suffix such as
-  `holdfast-1`; VERIFY: https://tailscale.com/kb/1098/machine-names,
-  https://tailscale.com/kb/1217/tailnet-name). The API never re-binds by itself, because silently
-  following the name would hand the RP id to whatever the sidecar reports. When the current FQDN
-  differs from `bound_host`, the console and the API's health show `host_mismatch`, and the app at
-  the new name shows "Holdfast moved" with the recovery options. The old name no longer resolves.
-  Recovery, cheapest first:
-  1. Rename the machine back in the Tailscale admin console. Nothing else changes.
-  2. If the owner has TOTP, sign in at the new name with password + TOTP (TOTP isn't bound to an RP
-     id) and run **Rebind**, which requires step-up.
-  3. Otherwise use **host recovery** (below).
-  A rebind sets `previous_host`, makes the new name `bound_host`, marks credentials with the old
-  `rp_id` stale (shown, not deleted, so the owner can rename back), revokes every session, writes
-  an audit entry and sends an alert on every configured channel.
-- **Locked-out owner.** The existing setup token isn't enough. It's minted only while setup is
-  pending (`app/services/setup.py`), and a locked-out owner's instance is already complete. The fix
-  is a new **recovery token**:
-  - Only `holdfast recover` on the host can mint it. That command runs
-    `docker compose exec api python -m app.cli recover`.
-  - It prints to the CLI's own stdout, never to the API log.
-  - It's 32 random bytes. Redis stores only its sha256, with a 15-minute TTL and GETDEL single use.
-  - It authorizes one thing: registering one passkey for the named owner at the current bound host,
-    or rebinding first when there's a mismatch.
-  - Using it revokes every session and sends an alert.
+### 3. Localhost first: what Caddy and TLS do, and why it's safe
 
-  This doesn't weaken auth. It has the same trust anchor as the setup token: control of the host's
-  Docker daemon, which can already read the database. It's never reachable over the network
-  without a token minted on the host.
+**There's no TLS on the local ingress.** `http://localhost` counts as a secure context ("potentially
+trustworthy origin"), so WebAuthn and `Secure` cookies work there in the major browsers (VERIFY per
+browser, PA0 item 10). Safari's `Secure`-cookie handling on `http://localhost` is the known doubt.
 
-### 4. Real client identity behind the proxy
+The alternatives are both worse:
+- `tls internal` on `https://localhost` shows a certificate warning, and Chrome disables WebAuthn on
+  a certificate error.
+- Trusting Caddy's local CA in the OS store means keeping a CA key on disk that can mint a
+  certificate for any domain.
 
-The source of truth is the **TCP peer address that `access` sees on its tailnet listener**. That
-address arrives through a WireGuard session authenticated by the sending node's key, and the data
-plane drops packets whose source isn't in that peer's allowed IPs. A tailnet device can't claim
-another device's address. A subnet router can only present addresses it's authorized to route.
+If PA0 shows Safari rejects `Secure` cookies on `http://localhost`, there are two options. Either
+the session cookie for the **local origin only** drops `Secure` (the traffic never leaves loopback,
+and the cookie is host-only with no `Domain`), or the docs tell macOS users to use Chrome or Firefox
+for the PC app. Bulwark picks.
 
-- `access` writes the address into a PROXY v2 header. The header is the first bytes it sends on its
-  own connection to Caddy, before any client byte. Anything a client sends arrives later, inside the
-  TLS stream, and Caddy reads it as HTTP, never as PROXY.
-- Caddy's `proxy_protocol` listener wrapper accepts the header only from `edge` (a `/29` whose only
-  members are `access` and `caddy`, with pinned addresses) and rejects connections without it
-  (`fallback_policy reject`; VERIFY the option names:
-  https://caddyserver.com/docs/caddyfile/options#listener-wrappers). Every container drops all
-  capabilities, so none has `NET_RAW` or `NET_ADMIN` to forge a source address on a bridge.
-- Caddy then overwrites `X-Forwarded-For` with `{remote_host}`, as today. The API keeps
-  `TRUSTED_PROXIES` unchanged (loopback plus the frontend subnet) and the same right-most resolver.
-- The loopback console site gets no PROXY header and is a separate bind. Its peer is the Docker
-  gateway, which is fine for a token-gated, host-only console.
+**The first run happens entirely on the PC:**
+1. The installer opens `http://localhost:47800/setup#t=<setup token>`.
+2. The page exchanges the token on load for an in-memory value and calls `history.replaceState` to
+   remove the fragment.
+3. The token is single-use with a 10-minute TTL. That fixes Gadfly S5 for setup, recovery and
+   pairing alike.
+4. The owner creates the household and a passkey with RP id `localhost`. Password + TOTP is the
+   offered alternative: Chrome on Linux has no platform authenticator, and a hybrid (phone)
+   passkey works there.
 
-This closes the collapsed-IP problem. `docs/ops/client-ip-check.md` gets an access-mode row: the
-expected value is the phone's `100.x.y.z`. A later enhancement (not in scope) is to add the peer's
-WhoIs device name as a PROXY v2 TLV for nicer audit lines.
+The app is fully usable at that point, and Tailscale hasn't been mentioned.
 
-For the manual host-Serve path, the docs replace Serve's HTTPS-terminating proxy with
-`tailscale serve --tls-terminated-tcp 443 --proxy-protocol 2 tcp://127.0.0.1:<loopback port>`,
-which points at a loopback-published Caddy PROXY listener. Both flags exist in client 1.104, but
-check their semantics and the minimum version (VERIFY: https://tailscale.com/kb/1242/tailscale-serve).
-That fixes the owner's current setup without moving to the sidecar.
+**Why rule 12 still holds:**
+- The only host port is loopback, and the Docker floor (§2) closes LAN reachability.
+- Anything that can reach the port is already running code on the PC.
+- The localhost site never serves the tailnet's pairing endpoint. Setup and recovery are served
+  **only** on the local ingress: the API refuses `/setup` and `/recover` unless
+  `X-Holdfast-Ingress: local`. So recovery requires presence at the PC.
 
-### 5. Secrets and state
+### 4. Real client identity
 
-- **Node state:** node key, machine key and the certificate cache live in the `access_state` named
-  volume, mounted at `/var/lib/holdfast-access`.
-  - The container runs as a fixed non-root UID on a distroless static image.
-  - The directory is mode `0700` and its files `0600`.
-  - The container has a read-only root filesystem, `/tmp` on tmpfs, `cap_drop: ALL` and
-    `no-new-privileges`.
-- **Control channel:** `access` listens on its pinned `accessctl` address only. `accessctl` is an
-  internal network whose only members are `api` and `access`. Every request needs the bearer token
-  `ACCESS_CONTROL_TOKEN`:
-  - `make keys` or the installer generates it. Under ADR 0015 it's a secret, passed only to `api`
-    and `access`.
-  - The endpoints are `GET /v1/status`, `POST /v1/login` and `POST /v1/logout`. Nothing else
-    exists.
-  - `access` never calls the API.
-- **Egress:** `access` reaches the internet only through its own non-internal network,
-  `access_egress`, and no other service joins it.
-- **Never logged anywhere** (`access`, API or Caddy), each with a redaction test:
-  - node and machine keys
-  - the certificate private key
-  - the interactive login URL, because whoever opens it first can claim the node for their own
-    tailnet
-  - auth keys, if a user supplies one
-  - `ACCESS_CONTROL_TOKEN`
-  - console, setup and recovery tokens (the existing deliberate setup-token WARNING line stays for
-    manual installs)
+- **Tailnet ingress.** The source of truth is the TCP peer that Serve accepted on the tailnet. The
+  tunnel is WireGuard, authenticated by the sending node's key, so a peer can't present another
+  peer's address.
+  - Serve writes that address into a PROXY v2 header, ahead of any client byte. Client bytes arrive
+    inside the TLS stream, after the header, and Caddy parses them as HTTP, never as PROXY.
+  - Caddy's `proxy_protocol` wrapper on the tailnet listener rejects connections without the header
+    (VERIFY option names, PA1: https://caddyserver.com/docs/caddyfile/options#listener-wrappers).
+  - Only the unix socket (filesystem trust) or the two-member `edge` network can reach that
+    listener. Every container drops all capabilities, so none can spoof a source address.
+  - Caddy then overwrites `X-Forwarded-For`, and the API's resolver is unchanged.
+- **Fallback if Serve's PROXY v2 can't be relied on** (this VERIFY now leads PA0):
+  1. Serve in HTTPS-proxy mode, with the forwarded header Serve sets, *only if* PA0 shows Serve
+     **overwrites** a client-supplied `X-Forwarded-For` instead of appending to it. The header is
+     then trusted only from the sidecar.
+  2. If Serve appends, use TLS-terminated TCP without PROXY. Tailnet clients then share one
+     rate-limit bucket (today's problem, recorded as accepted risk), and audit rows carry no device
+     IP. A per-account rate-limit scope already exists for password and TOTP.
+  3. tsnet, under the conditions in §1.
+- **Local ingress.** The peer is the Docker gateway or the userland proxy for every client. That's
+  correct: there's one client, the PC.
 
-  tsnet's `Logf`/`UserLogf` go through a filter that drops URL-bearing lines.
-- **Backups exclude `access_state`.** Node keys in a backup are a liability. Restoring a node
-  identity while the old machine still runs produces two nodes with one key. Restore on a new host
-  goes like this: remove the old machine in the admin console, run `holdfast open`, reconnect, and
-  name the new node the same (`holdfast`). The FQDN, and with it the RP id, comes back unchanged, so
-  the passkeys keep working. If the name comes back with a suffix, the §3 recovery order applies.
-- **Revocation:**
-  - **The server:** Settings → Access → Disconnect (owner, step-up), which logs out and wipes
-    `access_state`. Or remove the machine in the Tailscale admin console. Either takes the node off
-    the tailnet.
+### 5. More than one accepted RP id
+
+**Model:**
+- `instance_access` is a new instance-level table. It has no household data, so no `household_id`,
+  and it joins the identity-table exemption in the RLS lint with that reason.
+- It holds the accepted origins: always `http://localhost:47800` with RP id `localhost`, plus zero
+  or more `https://<fqdn>` with RP id `<fqdn>`, each with `added_at` and `added_by`.
+- It binds the tailnet identity (`CurrentTailnet` name and MagicDNS suffix) at first connect.
+- `webauthn_credential` gains `rp_id`, which is NOT NULL and backfilled from `APP_HOST`.
+- Manual mode (`APP_HOST` set in `.env`) keeps today's single-origin behaviour.
+
+**Ceremony rules:**
+- **Picking the RP id.** For options requests, the API picks the RP id from the ingress. Local
+  ingress gives `localhost`. Tailnet ingress gives the accepted FQDN equal to `Host`. Any other
+  `Host` gets `421 misdirected_request` (Gadfly minor), so invite and alert links are always built
+  from an accepted origin.
+- **Verifying.** `clientDataJSON.origin` must exactly equal (scheme, host and port) an accepted
+  origin. `rpIdHash` must equal the hash of the RP id mapped to that origin. Assertions are checked
+  only against credentials whose stored `rp_id` matches.
+- **Who adds an origin.**
+  - `localhost` is written at install.
+  - A tailnet FQDN is added only when an **owner session with step-up** asks, and only with the
+    value **read from the sidecar's own status** (`Self.DNSName`), never with a request header.
+  - In the CLI fallback, `app.cli` writes it on the host.
+- **Who removes an origin.** The owner, with step-up. Removing an origin disables its credentials
+  but doesn't delete them, so renaming back revives them.
+
+**Why this is safe:**
+1. An authenticator binds each credential to exactly one RP id. Accepting several RP ids never
+   makes a credential valid somewhere else. The phone passkey (FQDN) and the PC passkey
+   (`localhost`) are separate credentials on one account.
+2. The accepted set is server-side, written only by step-up or by the host. A forged `Host` or an
+   attacker-run origin can't add itself.
+3. The exact origin check (including the port) defeats a local phishing page on another
+   `localhost` port. Its assertions carry its own origin and get rejected, even though the RP id
+   `localhost` is shared by every localhost app.
+4. Phishing resistance per credential is unchanged. Sessions are per origin (host-only cookies).
+
+**What "survives a rename" honestly means.** When the tailnet or machine name changes, the phone's
+old-FQDN credential *can't* move. That's WebAuthn's origin binding working as designed. Related
+Origin Requests don't help, because the old name stops resolving. What survives is the **account**:
+1. The owner signs in on the PC at `localhost`, which never changes.
+2. The owner adds the new FQDN (step-up).
+3. The owner re-pairs the phone: two phone steps, scan the QR and create a passkey.
+
+The stale credential stays listed so a rename back revives it.
+
+**Pairing the phone.** It starts from a signed-in PC session with step-up:
+1. The PC mints a single-use, 10-minute pairing token and shows it as QR 2:
+   `https://<fqdn>/pair#<token>`. The phone page does the exchange-and-`replaceState` dance.
+2. The phone shows a 4-digit code, and the **PC must approve it** ("Approve this phone? Code
+   4821").
+3. Only after approval can the phone register a passkey on the owner's account.
+
+That approval step means a screenshot of QR 2, or another member of a shared tailnet, can't attach a
+credential on its own.
+
+**Tailnet binding (Gadfly S4).** The sidecar may come back (after a key expiry, say) in a tailnet
+other than the bound one, usually because the browser was signed in to a different identity
+provider account. When that happens:
+- The API answers every tailnet-ingress request with "Holdfast is on a different Tailscale network".
+- The PC shows the old and new tailnet names and asks for a **typed confirmation** before it adopts
+  the new one.
+- The recovery path can't rebind across tailnets.
+
+**Recovery for a fully locked-out owner.** That means the PC passkey and TOTP are both lost, for
+example after an OS reinstall that kept the Docker volumes, or a restore to a new PC. `holdfast
+recover` on the host runs `docker compose exec api python -m app.cli recover`:
+- It mints a single-use, 10-minute token, printed to the CLI's own stdout and never to the API log.
+- It opens `http://localhost:47800/recover#…` (exchange and `replaceState`).
+- It allows one new `localhost` passkey for the owner.
+- It revokes every session and records audit and alert entries.
+- It's served on the local ingress only.
+
+The trust anchor is the same as the setup token's: control of the host's Docker daemon, which can
+already read the database.
+
+### 6. Secrets and state
+
+- **The sidecar.** Node state lives in the `tailscale_state` named volume (`TS_STATE_DIR`).
+  - Mode `0700`, read-only root filesystem, `/tmp` on tmpfs, `no-new-privileges`, and every
+    capability dropped that userspace mode allows. It runs as non-root if the image supports that
+    in userspace (VERIFY, PA0 item 5). If not, it runs as root inside the container with no
+    capabilities, which is recorded as accepted.
+  - Other volumes: `phone-access` (api writes, sidecar reads) and the LocalAPI socket volume, shared
+    read-only into `api` only if PA0 item 4 passes.
+- **Never logged by Holdfast:** node and machine keys, the certificate key, the login URL, auth keys,
+  and setup, pairing and recovery tokens.
+  - Upstream `containerboot` prints the login URL to the container's stdout. That stays in
+    `docker logs` on the host, where it's readable only with the trust anchor above. Holdfast never
+    ships logs anywhere.
+  - Tailscale log upload is off (`--no-logs-no-support`, VERIFY).
+- **Backups exclude `tailscale_state`.** A node key in a backup is a liability, and restoring it next
+  to a live node duplicates the identity. After a restore, the owner signs in at `localhost` (the
+  app works at once), turns phone access back on and re-pairs. The new node may come up as
+  `holdfast-1` or in a new tailnet, which is handled by the rules in §5.
+- **Revocation.**
+  - **Phone access:** Settings → Phone access → Turn off (step-up). That removes the flag, so the
+    wrapper logs the node out and idles. The page also deep-links the admin console's machine page
+    so the owner can remove the machine.
   - **A lost phone:** remove it in the admin console, then remove its passkey in Holdfast. Removing
-    a credential already revokes the other sessions (ADR 0010). The passkey stays the second
-    factor, so a phone that's still on the tailnet isn't enough to get in.
+    a credential already revokes the user's other sessions (ADR 0010).
 
-### 6. First run, end to end
+### 7. Honest minimum step counts
 
-**Installer** (ADR 0018 packaging; Harbor). One command:
-`curl -fsSL <GitHub Release asset URL>/install.sh | sh` on Linux and macOS, or the pwsh 7
-`install.ps1` on Windows. The scripts are release assets, so no new hosting service is involved.
-The installer:
-1. checks for Docker and Compose and names the fix if either is missing (it doesn't install Docker
-   silently);
-2. creates the install directory;
-3. writes `.env` with fresh secrets (the `make keys` logic) and leaves `APP_HOST` blank (access mode);
-4. writes a digest-pinned `compose.yaml`;
-5. pulls multi-arch images (`holdfast-api`, `-web`, `-caddy`, **`-access`**);
-6. runs `up` and then `migrate`;
-7. installs a `holdfast` wrapper (`open`, `status`, `recover`, `update`, `stop`, `uninstall`);
-8. runs `holdfast open`.
+**(a) Using it on the PC.** It's the same Holdfast on every OS. Only the Docker prerequisite
+differs.
 
-`holdfast open` mints a console token through `app.cli`: one hour, host-only, held in the URL
-fragment and never in a cookie. It mints a setup token too if setup is pending. Then it opens the
-browser at `http://127.0.0.1:47800/console#…`.
-
-**In-app console wizard** (Prism + Tide). It's served only on the loopback site and authorizes every
-call with the console token in an `Authorization` header (no CSRF surface). Caddy answers only
-`Host: 127.0.0.1:47800` and `localhost:47800` there (DNS-rebinding guard). The wizard steps:
-1. Connect Tailscale.
-2. Confirm the signed-in account, which catches a login URL that someone else used.
-3. Fix tailnet settings, with deep links when they're needed.
-4. Phone QR 1: get Tailscale. It's `https://tailscale.com/download`, so no Holdfast-hosted page.
-5. Auto-advance when `access` reports a new online iOS or Android peer, or the user clicks "My
-   phone is connected".
-6. Phone QR 2: `https://<fqdn>/setup#<setup token>`.
-7. Done: install the app, turn on always-on VPN, optionally add this PC.
-
-A single QR can't do Keel's whole "install Tailscale → open Holdfast" flow. The ts.net URL doesn't
-resolve on the phone until it's on the tailnet, so the wizard uses two QRs.
-
-**User steps.** "Required" means the user has to do it. Conditional steps depend on the tailnet's
-state.
-
-| # | Linux | macOS | Windows |
+| | Linux | macOS | Windows |
 |---|---|---|---|
-| P | (if missing) install Docker Engine + Compose plugin | P1 install Docker Desktop; P2 open it, accept its terms, wait for "running" | P1 install Docker Desktop (it may enable WSL2 and need a **reboot**); P2 open it, accept its terms; P3 install PowerShell 7 (`winget install Microsoft.PowerShell`) |
-| 1 | Paste the one-line installer into a terminal | same (Terminal) | same (pwsh 7) |
-| 2 | Browser opens the console: click **Connect Tailscale** | same | same |
-| 3 | Sign in to or create a Tailscale account and approve the device | same | same |
-| 4 | Click **Turn on HTTPS** (and MagicDNS if it's off) and confirm in the Tailscale admin page: *likely required on a new tailnet* (VERIFY) | same | same |
-| 5 | Phone: scan QR 1, install Tailscale | same | same |
-| 6 | Phone: open Tailscale, sign in with the same account, allow the VPN configuration | same | same |
-| 7 | Phone: scan QR 2, Holdfast setup opens | same | same |
-| 8 | Phone: household name + email, then **Create passkey** (Face ID / fingerprint) | same | same |
-| 9 | Phone: Add to Home Screen (iOS: Share menu) or Install (Android) | same | same |
-| rec. | Console: **Turn off key expiry** for `holdfast` (one click in the admin page) | same | same |
+| Docker | 0 if Engine is at the floor already. Otherwise 1 (Docker CE from Docker's repo) | 2: install Docker Desktop, open it and accept its terms | 2: install Docker Desktop (it may enable WSL2 and need a **reboot**), open it and accept its terms |
+| Shell | 0 | 0 | 1: install PowerShell 7 (`winget install Microsoft.PowerShell`). This step goes away if rule 10 is amended to allow a 5.1 bootstrap (§10, Gadfly S1) |
+| Holdfast | 2: run the one-line installer (the browser opens on setup), then create the household + passkey | 2 | 2 |
+| **Total** | **2 to 3** | **4** | **5** (4 with the bootstrap) |
 
-**Counts.** These assume step 4 is required, and P counts only when it applies.
+**(b) Adding a phone.** This runs in the app from a signed-in PC and is the same on every OS:
+1. Settings → **Connect your phone** → step-up → **Turn on** (consent to contact Tailscale).
+2. Sign in to or create a Tailscale account in the browser that opens, and approve `holdfast`.
+3. **Turn on HTTPS** (and MagicDNS if it's off) on the admin page the wizard links. This is likely
+   required on a new tailnet (VERIFY, PA0 item 7). The wizard shows the certificate-transparency
+   disclosure first: the FQDN gets published.
+4. Phone: scan QR 1, install Tailscale. Skip if it's already installed.
+5. Phone: sign in with the same account and allow the VPN configuration.
+6. Phone: scan QR 2 to open the pairing page.
+7. PC: **Approve** the phone (compare the code).
+8. Phone: create the passkey.
+9. Turn off key expiry for `holdfast` (one click on the linked admin page). This counts as
+   required: without it, phone access goes dark at day 180 (VERIFY).
 
-| OS | Prerequisites | Required steps | Total | With the recommended key-expiry step |
-|---|---|---|---|---|
-| Linux, Docker already installed | 0 | 9 | 9 | 10 |
-| Linux, Docker missing | 1 | 9 | 10 | 11 |
-| macOS | 2 | 9 | 11 | 12 |
-| Windows | 3, plus a possible reboot | 9 | 12 | 13 |
+That's **9 steps**, or 8 with Tailscale already on the phone. Add to Home Screen and always-on VPN
+are optional extras. A typical first-time total is **Linux 11–12, macOS 13, Windows 14** (13 with
+the bootstrap).
 
-Using Holdfast on the PC itself takes two more steps: install Tailscale on the PC and sign in. The
-PC then uses the same name and passkey (or a second passkey after step-up). That step is optional
-because the phone is the goal.
+**(c) Each extra household member.**
+- **PC only** (a shared computer): **2 steps.** The owner creates an invite, and the member opens
+  it at `localhost` and creates a passkey.
+- **Their own phone: 6 steps.**
+  - The owner: **shares the `holdfast` machine** with the member's Tailscale account (1), and later
+    sends the Holdfast invite (5).
+  - The member: accepts the share with their own identity provider account (2), installs Tailscale
+    on the phone (3), signs in and allows the VPN (4), and opens the invite on the phone and creates
+    a passkey (6).
 
-**Where users get stuck:**
-- Docker Desktop: virtualization is off in the BIOS, WSL2 fails to install, or the licence prompt
-  confuses them.
-- pwsh 7 on Windows. Rule 10 adds this step (open question for Keel below).
-- Creating a Tailscale account, which needs an identity provider account (VERIFY:
-  https://tailscale.com/kb/1013/sso-providers).
-- The HTTPS toggle in the admin page, and its certificate-transparency warning.
-- The phone's VPN permission prompt.
-- Scanning QR 2 before the phone is on the tailnet. The browser shows a DNS error, not a Holdfast
-  page, which is why the wizard waits on auto-advance.
-- iOS Add to Home Screen is hidden in the Share menu.
-- Existing tailnets: device approval or Tailnet Lock leaves the node waiting. The console shows the
-  state and a deep link (VERIFY: https://tailscale.com/kb/1099/device-approval,
-  https://tailscale.com/kb/1226/tailnet-lock). Custom ACLs that block phone → `holdfast:443` can't
-  be detected from the server. The docs show the one ACL line to add.
+  Node sharing is the recommended route, not inviting the member into the tailnet. A shared-in user
+  reaches only the Holdfast machine, not the owner's other devices. Whether shared-in users count
+  toward the free plan's user cap needs checking (VERIFY, PA0 item 8:
+  https://tailscale.com/kb/1084/sharing, https://tailscale.com/pricing).
 
-### 7. Failure and offline behaviour
+### 8. Employer and shared tailnets
 
-| Situation | What happens | What Holdfast does |
-|---|---|---|
-| Tailscale control plane down | Existing peers usually keep talking with their cached network map. New logins, new devices and certificate renewal fail (VERIFY). | `access` keeps serving with its cached cert. Status shows `control_unreachable`. The console and Settings warn when the cert has fewer than 14 days left. |
-| `access` container down | The phone can't connect. The data is untouched. | `restart: unless-stopped`, plus a healthcheck. `holdfast status` shows it. The PWA's cached shell detects the failed `/api` calls and shows "Can't reach your Holdfast. Is Tailscale on, on both devices?" |
-| Node key expiry (default 180 days; VERIFY: https://tailscale.com/kb/1028/key-expiry) | The node drops off the tailnet until it re-authenticates. Whether the same IP and name survive needs checking (VERIFY, same page). | Banners at 30, 7 and 1 days, using the key expiry from status. The console deep-links "Turn off key expiry". After expiry, `holdfast open` → **Reconnect** (about 3 steps). This can't be automated without a Tailscale API token, which Holdfast deliberately doesn't ask for. Tagged nodes have no expiry, but tags need policy edits (VERIFY). |
-| Phone not signed in, or VPN off | The FQDN doesn't resolve on the phone. | The shell hint above. The docs recommend iOS VPN On Demand and Android Always-on VPN. |
-| MagicDNS off | The name doesn't resolve for any peer. | Detected from status. Console deep link to the admin DNS page. **Manual: one click by the user.** |
-| HTTPS certificates off | `ListenTLS` handshakes fail, so there's no cert. | Detected from status (no cert domains). Console shows **Turn on HTTPS** with the CT disclosure. **Manual: one click.** If the LocalAPI feature-consent URL (`QueryFeature`) is available to tsnet, the console uses that one-click link instead of the generic admin page (VERIFY: https://github.com/tailscale/tailscale/blob/main/client/local/local.go). Either way the user has to click. Holdfast can't flip tailnet settings without an admin API key, and it won't hold one. |
-| Tailnet or machine renamed | The FQDN changes. | §3 `host_mismatch`, with the recovery order. |
-| No internet at home | Peers on the same LAN may still connect with cached state (VERIFY). | No claim in user docs until Sounding has tested it. |
+**Who can reach the app.** Every device the tailnet policy allows. On the default policy that's
+every member's device (VERIFY: https://tailscale.com/kb/1192/acl-samples), plus shared-in users for
+this machine. Passkeys are still required. Reaching the login page isn't access.
 
-### 8. Threat model delta (for Bulwark)
+**What tailnet admins can do.** They can see the machine and its metadata, rename it (which forces a
+re-pair), remove or expire it, and see flow logs on plans that have them (VERIFY). They **can't**
+read app traffic: TLS terminates inside our container with a key that never leaves it. They **can't**
+publish it by granting Funnel in policy, because our serve config has no `AllowFunnel` and the
+container accepts no other serve config.
 
-- **New container:** `access` (Go, distroless, non-root, no capabilities, read-only). New networks:
-  `edge` and `accessctl` (internal) and `access_egress`.
-- **New egress** from `access` only: the Tailscale control plane, DERP relays (TCP 443), STUN
-  (UDP 3478), direct peer UDP, and Tailscale's certificate flow. The firewall list to confirm is at
-  https://tailscale.com/kb/1082/firewall-ports (VERIFY). Log upload is off.
-- **New host port:** `127.0.0.1:47800` (console). It's token-gated, has a Host allowlist, uses no
-  cookies, and serves only setup, connect, status and recovery verbs. Older Docker releases let
-  hosts on the same LAN reach `127.0.0.1`-published ports by routing to them. The installer requires
-  a Docker version with that fixed (VERIFY: https://docs.docker.com/engine/release-notes/28/).
-- **A compromised `access` can:**
-  - read all app traffic in plaintext and relay it, because it holds the TLS key and terminates
-    TLS. That means session theft and live use of the app.
-  - join the node to another tailnet;
-  - enable Funnel through its in-process client, if the tailnet policy grants the Funnel attribute.
-    New tailnets' default policy may grant it to members (VERIFY: https://tailscale.com/kb/1223/funnel).
-    The docs show how to remove that attribute.
-  - reach Caddy's PROXY listener and forge client IPs for rate limits and audit;
-  - reach the API's port on `accessctl`, without trusted-proxy status, so it would only be an
-    unauthenticated client.
+**The posture we recommend and enforce:**
+- **A personal tailnet only.** Before step 2, the wizard says plainly: "Don't connect Holdfast to a
+  work or school Tailscale network. Its admins can see and reach this machine."
+- **A hard stop when the tailnet looks shared.** After sign-in, the API reads the tailnet name and
+  the number of distinct users visible in status. If there's more than one user, or the tailnet name
+  is an organization domain rather than a personal login, it requires a **typed confirmation** of
+  the tailnet name. A non-technical user can't just click OK past it (Gadfly S6). In the CLI
+  fallback, `holdfast phone` asks the same question.
+- **The docs ship a policy snippet** that grants `holdfast:443` only to named users (VERIFY syntax:
+  https://tailscale.com/kb/1337/policy-syntax), and they show how to remove the default `funnel`
+  attribute (VERIFY: https://tailscale.com/kb/1223/funnel).
+- **No peer enumeration in the UI.** The "count phones by OS" idea is dropped (Gadfly minor). The API
+  reads `Self`, `CurrentTailnet` and the user count only.
 
-  It **cannot** reach `db` or `redis` (the internal `backend` network), the document volume, `.env`
-  or the Docker socket.
-- **Mitigations:**
-  - minimal verbs and the forbidden-identifier test
-  - pinned Go module versions with Dependabot `gomod`, plus `govulncheck` in CI
-  - the image built in CI only, by digest (ADR 0018), and cosign-signed before beta
-  - the passkey stays the second factor
-  - the console's signed-in-account confirmation, which catches a hijacked login URL
-  - audit entries for connect, disconnect, rebind and recovery
-- **Metadata Tailscale sees:** node names, tailnet IPs, public endpoints, OS and client versions,
-  and online times. It can't decrypt WireGuard traffic. DERP relays see only ciphertext.
-  **Certificate transparency publishes the FQDN** (`holdfast.tailXXXX.ts.net`) to public logs. Mark
-  this VERIFY (https://tailscale.com/kb/1153/enabling-https). The wizard discloses it before the
-  HTTPS step, and the installer offers a neutral machine name.
+### 9. Failure behaviour, vendor dependence, threat model
+
+**Failure behaviour.**
+- **The app on the PC never depends on Tailscale.** Phone access does. If Tailscale's control plane
+  is down, existing phone sessions probably keep working from cached state. A restarted node may not
+  come back until control returns (VERIFY, PA0 item 12). The docs say so plainly.
+- **Key expiry:** banners at 30, 7 and 1 days, plus one-click re-auth from the PC.
+- **MagicDNS or HTTPS off:** detected from status and deep-linked. **Manual: one click each.** The
+  app can't flip tailnet settings without an admin API key, and it won't hold one.
+- **Phone VPN off:** the PWA's cached shell shows "Can't reach Holdfast. Is Tailscale on?"
+
+**Vendor trigger.** Lattice reopens this ADR if any of these happens:
+- the free Personal plan drops below 3 users,
+- it starts requiring payment,
+- the terms forbid this use,
+- the image or Serve's PROXY support goes away.
+
+The localhost floor means a vendor change removes phone access, never the app. Headscale isn't
+offered as a zero-config exit path: it needs a public coordination server and a domain. It stays a
+manual option.
+
+**Threat-model delta for Bulwark.**
+- **New pieces:**
+  - an upstream container (pinned digest, userspace, no published port)
+  - egress from that container only, while phone access is on: control plane, DERP, STUN and peer
+    UDP (VERIFY list: https://tailscale.com/kb/1082/firewall-ports)
+  - a one-bit flag volume
+  - possibly a read-only LocalAPI socket in `api`
+  - the plain-HTTP loopback site
+  - multiple RP ids
+- **A compromised sidecar** can: read app traffic in plaintext and relay it, because TLS terminates
+  there; enable Funnel from inside; forge PROXY headers to Caddy; join another tailnet. It **can't**
+  reach `db` or `redis`, `.env`, the document volume or the Docker socket.
+- **A compromised `api` with the read-only socket** additionally learns the tailnet's device
+  inventory. It's already the most privileged component, so this is a privacy delta, not a control
+  delta, provided the read-only check holds. That's why it's a PA0 gate.
 
 ## Alternatives considered
 
-The criteria are: user steps after Docker (a non-technical user), public exposure, who sees traffic
-or metadata, cost to the project, licence, Docker Desktop on Windows/macOS/Linux, a certificate valid
-for passkeys and PWA install on iOS and Android, and what breaks when the vendor changes terms.
-
-| Option | Steps | Public exposure | Sees traffic / metadata | Project cost | Licence | Docker Desktop W/M/L | Passkey + PWA cert | Vendor risk | Verdict |
-|---|---|---|---|---|---|---|---|---|---|
-| **tsnet `access` service (chosen)** | 9 | None. Tailnet only, Funnel impossible in code | Tailscale: metadata. CT: FQDN. Content: nobody | $0 (users' free plan; VERIFY https://tailscale.com/pricing) | BSD-3-Clause (VERIFY https://github.com/tailscale/tailscale/blob/main/LICENSE), AGPL-compatible | Same everywhere (userspace) | Let's Encrypt `*.ts.net`, valid on iOS and Android. `ts.net` on the PSL keeps tailnets apart (VERIFY https://publicsuffix.org/list/public_suffix_list.dat) | Free tier or terms change: `ACCESS_CONTROL_URL` → Headscale plus the manual domain path | **Default** |
-| Stock `tailscale/tailscale` sidecar, kernel mode, Caddy sharing its netns | 9 | None, if config is right | Same | $0 | BSD-3 | Needs `/dev/net/tun` + `NET_ADMIN`. Breaks rootless. Docker Desktop untested | Valid | Same | Rejected. More privilege, and a full LocalAPI plus CLI in the container can enable Funnel. If the netns owner restarts, Caddy loses networking until it's recreated |
-| Stock sidecar, userspace, `tailscale serve` HTTPS → Caddy | 9 | None, if serve config is right | Same | $0 | BSD-3 | Works | Valid | Same | Rejected. Real IP depends on how Serve handles `X-Forwarded-For` (append or overwrite; VERIFY https://tailscale.com/kb/1312/serve). Funnel is one config line away. The login URL has to be scraped from logs or reached through a broker that holds the socket |
-| Stock sidecar + Caddy's built-in ts.net cert getter (socket shared into Caddy) | 9 | None | Same | $0 | BSD-3 / Apache-2.0 | Works | Valid | Same | Rejected. Caddy, the component that parses HTTP, would hold the full LocalAPI |
-| `tailscale/caddy-tailscale` plugin (Caddy embeds tsnet) | 9 | None | Same | $0 | VERIFY https://github.com/tailscale/caddy-tailscale | Works | Valid | Plugin maturity | Rejected for now. It puts the node key in the HTTP parser and has no status or login-URL surface for the wizard. Revisit if it matures |
-| Host Tailscale + `tailscale serve` (today's manual setup), automated by the installer | ~9, plus host CLI and `sudo`/operator setup on Linux | None | Same | $0 | BSD-3 | Depends on the host app variant (the macOS App Store build differs) | Valid | Same | **Kept as a documented manual path** with the PROXY fix (§4). Not the default: it depends on the host's version, rights and existing serve config, and the RP id follows the PC's hostname |
-| Headscale or other self-run coordination | Many (a public coordination endpoint, custom server URL in the phone apps) | Coordination server must be public | The user | $0 or the user's VPS | BSD-3 | Works | No ts.net certs, so an owned domain + DNS-01 | Self-run | Advanced exit path only (`ACCESS_CONTROL_URL`) |
-| Cloudflare Tunnel + Access | ~8, plus buy a domain and move DNS to Cloudflare | **Public hostname** | **Cloudflare sees plaintext** at its edge (PLAN 12.1) | $0 for the free plan, but a domain costs money | cloudflared Apache-2.0 | Works | Valid | Free plan terms | Rejected. Breaks rule 12's intent and the privacy claim. A webhook-only tunnel (PLAN 7.4) would need its own ADR |
-| Relay run by Holdfast | ~5 | Public relay | **Holdfast** sees metadata and maybe traffic | Paid infrastructure (ADR 0013 no) plus legal exposure (PLAN 17.3) | Ours | Works | Valid | Ours | Rejected for self-host. Belongs to Holdfast Cloud (ADR 0009) |
-| WireGuard direct | Router port-forward, keys, QR | **Public UDP port**. Breaks behind CGNAT | Nobody | $0 | GPL-2.0 kernel / MIT tools | Port forwards from Docker Desktop are fiddly | Needs a domain or local CA | None | Rejected. A port-forward violates rule 12 |
-| LAN only, mDNS + local CA | Install and *fully trust* a root CA profile on iOS (about 5 Settings screens), on Android, and on the PC | None | Nobody | $0 | n/a | mDNS from containers is unreliable on Docker Desktop | Works only with a trusted local CA. Android apps ignore user CAs | None | Rejected as default. Doesn't work on LTE, and trusting a CA is too many steps. Possible later "home-only" mode |
-| Tailscale Funnel | Few | **Public** | Tailscale relay | $0 | BSD-3 | Works | Valid | Same | Rejected by rule 12. Forbidden in code |
-
-Why a separate `edge` network and not Caddy sharing `access`'s network namespace: the shared
-namespace would allow a `127.0.0.1` PROXY allowlist. But when the namespace owner restarts, Docker
-leaves dependent containers without networking. The dedicated `/29` gives the same trust by
-membership without that fragility.
-
-Why Go: tsnet exists only as a Go library, and a broker that talked to `tailscaled`'s LocalAPI from
-Python would depend on an HTTP surface Tailscale doesn't promise to keep stable. The binary stays
-small (target under 600 lines) and lives in `infra/access/`. This amends ADR 0004's stack by one
-narrowly scoped language. Keel confirms (open question 1).
+| Option | Verdict |
+|---|---|
+| **Stock sidecar, userspace, TLS-terminated TCP + PROXY v2 (chosen)** | Gives the real client IP, native certificate renewal and no TUN device, with upstream's security releases arriving as a digest bump. PA0 gates it |
+| Custom Go/tsnet `access` service (revision 1) | Its Funnel argument protected only against our own misconfiguration (the CI test covers that). It moves every Tailscale security fix onto our release train, and the roster has no Go reviewer. Kept as fallback 3 (§4) |
+| Stock sidecar, kernel mode, Caddy sharing its netns | Needs `NET_ADMIN` and `/dev/net/tun`, breaks rootless Docker, and a restart of the namespace owner strands Caddy. Rejected |
+| Serve HTTPS proxy + `X-Forwarded-For` | Fallback 1, and only if Serve overwrites the header (PA0 item 3) |
+| Caddy's built-in ts.net cert getter (socket into Caddy), or the `caddy-tailscale` plugin | Puts node control in the HTTP parser. Rejected |
+| Host Tailscale + Serve, automated by the installer | Depends on the host's version and rights and on any serve config the user already has. **Kept as the documented manual path**, using the same Caddy PROXY listener published on loopback (deferred PA-D9) |
+| Single pinned RP id + recovery token (revision 1) | Ordinary events become lockouts that only a terminal can fix (Gadfly S3). Rejected for multiple RP ids |
+| https://localhost with a local CA | A browser warning, or a CA key on disk that can mint any certificate. Rejected for plain HTTP on loopback |
+| Headscale / self-run coordination | Needs a public endpoint and a domain. Manual option only |
+| Cloudflare Tunnel + Access | Public hostname, and Cloudflare sees plaintext. Rejected (rule 12) |
+| Relay run by Holdfast | Costs money, gives us metadata and creates legal exposure. Holdfast Cloud only (ADR 0009) |
+| WireGuard direct | Needs a router port-forward. Rejected (rule 12) |
+| LAN-only mDNS + local CA | No access on LTE, and a CA-trust ordeal on the phone. Rejected |
+| Funnel | Public. Forbidden by the serve-config test |
 
 ## Consequences
 
-- **Easier:** a stranger gets a real certificate, passkeys and an installable PWA on their phone
-  without a domain, a DNS token or knowing what a reverse proxy is. Per-IP limits and audit IPs
-  become correct in the default stack. Rule 12 gets a mechanical check for the default install
-  instead of a doc convention.
+- **Easier:**
+  - the app works on the PC two steps after Docker
+  - the phone is an optional nine-step flow inside the app
+  - a vendor change can't take the app down
+  - client IPs are correct on the tailnet path
+  - rule 12 gets mechanical checks for the default install
 - **Harder:**
-  - another language and toolchain in CI (a path-gated Go job; ADR 0013 minutes)
-  - another image to build, sign and mirror (ADR 0018 adds `holdfast-access`, multi-arch
-    amd64/arm64)
-  - an instance-level table, and `rp_id` on credentials (migration token)
-  - the RP id resolved per request
-  - a loopback console surface for Bulwark to review
-  - the manual-path docs have to stay maintained
-  - Tailscale is a dependency for the default experience. If its free plan or terms change badly,
-    the default degrades to the manual paths until a replacement ADR lands
-- **Docs and rules:** Keel applies CLAUDE.md rule 12 (§2) when this ADR is accepted. Beacon updates
-  PLAN 12.1 / Phase 8.5 through the next amendment (Section 20.x), plus `client-ip-check.md` and the
-  install guide. `docs/STATUS.md` owner-queue items about the domain and DNS token become optional
-  (manual path only).
-- **Product voice:** self-host copy stays Direction 01. The wizard never says "VPN-free" or "no
-  third party". It names Tailscale plainly and says what Tailscale can and can't see.
-
-## Open questions (Keel / Bulwark / Gadfly, not owner)
-
-1. Go in the stack (ADR 0004 amendment). Recommended yes, scoped to `infra/access/`.
-2. Windows bootstrap versus rule 10. Either require pwsh 7 (one extra step, recommended for alpha),
-   or allow a 5.1-compatible stub that installs pwsh 7 and re-launches. The stub is a rule-10
-   deviation and would need a CLAUDE.md edit.
-3. Default machine name: `holdfast` (recognizable in the admin console and the URL bar) or a neutral
-   name, given that CT logs publish it. Recommended: `holdfast`, disclosed and changeable at install.
-4. Whether `access` should send the peer's WhoIs device name as a PROXY v2 TLV for audit (later).
-5. Console port `47800`: confirm it doesn't clash with common self-host apps.
+  - two ingresses and a per-request RP id in auth code
+  - an instance-level table and `rp_id` (migration token)
+  - Safari's `Secure` cookie handling on localhost may force a per-origin cookie rule
+  - the Docker floor adds a step on stock Linux distros
+  - macOS and Windows rows have no CI. GitHub's macOS runners have no Docker, and its Windows
+    runners run only Windows containers. Those rows rest on owner hardware (Gadfly F5, owner queue)
+  - the frontend subnet that's already pinned in `docker-compose.yml` is an existing collision risk,
+    unpinned in deferred PA-D10
+- **Docs:** PLAN 12.1 and Phase 8.5 change in the next Section 20 amendment (Beacon).
+  `client-ip-check.md` gains a tailnet row.
 
 ## Owner queue (money, accounts, legal)
 
-1. **Tailscale as the recommended default** for users. Each household creates its own Tailscale
-   account and accepts Tailscale's terms, and Holdfast holds no account for them. The docs state
-   this. Owner confirms they're comfortable steering users to a third-party vendor's free plan.
-2. **A test tailnet for acceptance.** Sounding needs a free Tailscale account that isn't the owner's
-   personal tailnet, plus one iOS and one Android device on it, for PA10 (account).
-3. **Docker Desktop licence** for the macOS and Windows recommendation. The free tier's terms for
-   personal and small-business use apply to users (VERIFY:
-   https://www.docker.com/legal/docker-subscription-service-agreement/ and
-   https://www.docker.com/pricing/faq/). Owner decides whether the docs also name Podman Desktop or
-   Rancher Desktop (both Apache-2.0) (legal).
-4. **Code signing / notarization** (money). It's needed only if a native launcher replaces the
-   scripts later: Apple Developer Program for notarization and an Authenticode certificate for
-   SmartScreen. Not needed for this ADR's script installer. Deferred.
-5. **Install script URL.** Recommended: GitHub Release assets, with no new service or domain. Serving
-   it from `holdfastfinance.app` would involve the owner's domain account (account).
+1. **A test Tailscale account and tailnet for PA0**, separate from the personal tailnet. The owner
+   either signs the test nodes in interactively or puts a one-off auth key in a file outside the
+   repo. This is a **prerequisite for PA0**, not just for final acceptance.
+2. **Owner devices for PA0 items 7 and 10 and for deferred acceptance:** a macOS host (Safari and
+   Chrome), a Windows host, one iPhone and one Android phone.
+3. **Steering users to Tailscale's free plan** for the optional phone path. Each household's own
+   account and terms. Holdfast holds no account and no API key.
+4. **Docker Desktop licence** wording in the macOS and Windows docs (VERIFY:
+   https://www.docker.com/legal/docker-subscription-service-agreement/), and whether to also name
+   Podman Desktop or Rancher Desktop.
+5. **Install script URL:** recommended as a GitHub Release asset (no new service). Using
+   `holdfastfinance.app` would involve the domain account.
+6. Code signing for a future native launcher (money). Deferred, not needed for scripts.
 
-## VERIFY list (check before the story that depends on it starts)
+## Open questions (Keel / Bulwark)
 
-| Claim | Check | Blocks |
+1. Rule 10 versus a Windows PowerShell 5.1 bootstrap. This is a CLAUDE.md change, so it goes
+   through the digest. It saves one Windows step.
+2. Safari fallback (§3): a non-`Secure` host-only cookie on the local origin, or a browser
+   recommendation.
+3. Local port `47800`: check for clashes with common self-host apps.
+4. Default machine name `holdfast` (disclosed in CT logs, changeable at install) versus a neutral
+   name.
+
+## 10. Response to Gadfly (`docs/adr/reviews/0021-gadfly.md`)
+
+| Item | Response |
+|---|---|
+| F1 the manual path removes the reason for tsnet | **Accepted.** The stock sidecar with the serve config is the decision, and the decisive VERIFY leads PA0 |
+| F2 the Funnel argument | **Accepted.** A CI serve-config test replaces "impossible in code". Also, a Funnel grant in tailnet policy can't publish anything without `AllowFunnel` in our config |
+| F3 Go cost has no owner | **Accepted.** If tsnet ever returns as fallback 3, its conditions are Gadfly's |
+| F4 the size displaces Phase 5 | **Accepted.** Phase 8.5. Only PA0 (S) and PA1 (M) are specified. The rest is deferred |
+| F5 owner-dependent acceptance, no CI for Docker Desktop | **Accepted.** In Consequences and the owner queue |
+| S1 step counts / households | **Mostly accepted:** key expiry is counted, Add to Home Screen is optional, per-member costs are counted. **Two partial rejections.** (1) The **Turn on** click in the phone flow stays. It's the consent to start talking to a third party, not decoration. (2) The pwsh 7 step stays counted until rule 10 is amended through the digest. A 5.1 bootstrap is a fair product call, but it changes a hard rule, and agents don't change hard rules by ADR |
+| S2 localhost first | **Accepted** (§3). `http://localhost`, not a local CA |
+| S3 pinned RP id lockouts | **Accepted** (§5). Multiple RP ids, with localhost as the floor that never changes |
+| S4 reconnect into another tailnet | **Accepted.** Tailnet identity is bound, adopting another one needs a typed confirmation, and recovery never crosses tailnets |
+| S5 token in the fragment / history | **Accepted** for every token: exchange on load, `replaceState`, single use, 10 minutes. QR 2 also needs PC approval |
+| S6 employer / shared tailnets | **Accepted** (§8), with a typed confirmation and no peer enumeration |
+| S7 pinned subnets | **Accepted.** A unix socket if Serve supports it, otherwise an unpinned `edge` network with the accepted risk recorded. The existing frontend pin is deferred |
+| S8 Docker floor | **Accepted.** Counted in the Linux row |
+| S9 outage / "exit path" | **Accepted.** Stated honestly. Headscale isn't called a zero-config exit. The vendor trigger is named |
+| S1 (story) PROXY fix on the owner's host | **Partly rejected.** It isn't scheduled ahead of Phase 8.5, because Keel's schedule ruling wins and the problem affects one install's audit rows, not security. PA1 builds the same Caddy PROXY listener, so the host-Serve variant (deferred PA-D9) is small once PA1 lands |
+| Minors (Host 421, no-CORS test, drop peer-by-OS, rule 12 via the digest) | **All accepted** |
+| Rank 1–4 VERIFYs before acceptance | **Accepted.** PA0 is a precondition for status Accepted |
+
+## 11. Stories
+
+Schedule: Phase 8.5 (Q2, `ROADMAP.md`). Nothing here displaces Phase 5. PA0 has no product code,
+so it may run as a preemptible stretch-lane item once owner-queue items 1 and 2 are available. Keel
+decides. The IDs use `PA` because `A1` and `S1` already exist in the roadmap.
+
+### PA0: verification spike (S, Harbor + Sounding, about 1 run, no product code)
+
+The spike runs on a throwaway tailnet, using stock containers on a dev machine. A second userspace
+Tailscale container can act as a tailnet client, so most items need no phone. The results go into
+this ADR as pass/fail with the docs and version checked. They never include tailnet names or IPs
+(ADR 0019 style reporting).
+
+| # | Check | Pass means | Needs owner's tailnet / devices |
+|---|---|---|---|
+| 1 | `TS_SERVE_CONFIG` TCP `443` with `TerminateTLS` + `TCPForward` + `ProxyProtocol: 2` in the stock image. Exact field names and the minimum version. A Caddy test listener logs the PROXY source | Header present, source = the client node's tailnet IP | **Test tailnet** (owner queue 1) |
+| 2 | Same as item 1 with `TCPForward` to a `unix:` socket | Works, or documented as unsupported (then the `edge` network) | Test tailnet |
+| 3 | HTTPS-proxy mode: the client sends a forged `X-Forwarded-For` | Know whether Serve overwrites or appends (fallback 1 valid only if it overwrites) | Test tailnet |
+| 4 | LocalAPI socket shared into a UID-1000 container: `status --json` works (AuthURL, Self.DNSName, CurrentTailnet, CertDomains, KeyExpiry, users); `up`, `login`, `logout`, `cert`, `serve`, `funnel` and `set` all denied. Repeat under rootless Docker | All writes denied in both modes. Otherwise the socket is never shared and the CLI fallback is used | Local only (status needs control contact, no account) |
+| 5 | Wrapper entrypoint on the stock image: flag gating, `logout` on removal, `--no-logs-no-support` honoured (watch egress hosts), cap-drop set and non-root feasibility in userspace | No control contact before the flag, no log upload | Local + test tailnet |
+| 6 | Name stability: forced key expiry, then re-auth keeps the name and IP. Lost state with the old node still present gives a suffix. Old node removed, then reconnect reclaims the name | Behaviour recorded (multiple RP ids make the outcomes recoverable, not fatal) | **Test tailnet admin console** |
+| 7 | HTTPS certificates and MagicDNS defaults on a **fresh** tailnet. Whether a consent link (Serve's enable URL / `QueryFeature`) exists and works from the container | Step 3 of (b) confirmed as one click, or the count corrected | **Fresh test account** |
+| 8 | Free Personal plan: user and device caps, whether shared-in users count, terms on this use. Read only: https://tailscale.com/pricing, https://tailscale.com/kb/1084/sharing | Caps recorded, vendor trigger not already met | None |
+| 9 | tsnet not needed: follows from items 1, 3 and 4 | Items 1 and 4 pass, so tsnet is off the table | None |
+| 10 | `http://localhost:<port>`: WebAuthn create and get plus a `Secure` session cookie in Chrome and Firefox (Linux; virtual authenticator acceptable), Safari and Chrome (macOS), Edge (Windows) | Works, or the Safari fallback is chosen (open question 2) | **Owner macOS + Windows hosts** |
+| 11 | Docker floor: the release that fixes 127.0.0.1-publish LAN reachability, and the versions in Debian 12/13, Ubuntu 24.04, Fedora 43 and current Docker Desktop | Floor and Linux step count confirmed | None (docs + local) |
+| 12 | Restart with control-plane hosts blocked: does the node serve peers from cached state | Outage wording confirmed | Test tailnet |
+
+ADR 0021 moves to Accepted only after items 1, 4, 6, 7, 8 and 10 are resolved. Item 2 changes the
+transport, items 3 and 12 change fallbacks and wording, and item 11 changes a count.
+
+### PA1: smallest Linux slice (M, Harbor; Bulwark reviews)
+
+- Scope:
+  - `infra/docker-compose.access.yml` with the stock sidecar (pinned digest, userspace, read-only
+    serve config, flag-gated wrapper)
+  - Caddy's tailnet site (PROXY v2 listener on the transport PA0 picked, ingress header, XFF
+    overwrite)
+  - `scripts/check-serve-config.py`
+  - the `check-compose-ports.py` extensions, plus `make up-access`
+  - `APP_HOST` still set by hand from `tailscale status`, so there's a single RP id until PA-D1
+    ships
+- Acceptance evidence:
+  - CI: the serve-config test rejects fixtures containing `AllowFunnel`, `Web` or a second port
+  - `make ports` is green
+  - on a Linux host, a phone on the test tailnet registers a passkey at the FQDN, and `audit_log.ip`
+    is the phone's tailnet address (Sounding reports counts only)
+  - a device off the tailnet can't resolve the name or connect
+
+### Deferred to Phase 8.5 (rough sizes, not yet specified)
+
+| ID | Story | Size |
 |---|---|---|
-| Personal free plan limits (users, devices) and terms | https://tailscale.com/pricing | Decision as a whole |
-| tsnet licence BSD-3-Clause | https://github.com/tailscale/tailscale/blob/main/LICENSE | PA1 |
-| tsnet `ListenTLS`, `ControlURL`, `Store`/`Dir`, `UserLogf`, in-process LocalClient (status, login URL, logout) | https://pkg.go.dev/tailscale.com/tsnet | PA1 |
-| Disabling log upload in tsnet | https://tailscale.com/kb/1011/log-mesh-traffic | PA1 |
-| HTTPS certs off by default, enabled in the admin console, CT publication, renewal window | https://tailscale.com/kb/1153/enabling-https | PA1, PA5 |
-| MagicDNS on by default for new tailnets | https://tailscale.com/kb/1081/magicdns | PA5 |
-| Feature-consent URL (`QueryFeature`) reachable from tsnet | https://github.com/tailscale/tailscale/blob/main/client/local/local.go | PA5 |
-| Key expiry 180 days; per-machine disable; tagged nodes exempt; re-auth keeps IP and name | https://tailscale.com/kb/1028/key-expiry | PA7 |
-| Machine-name collision suffix and rename behaviour; tailnet rename | https://tailscale.com/kb/1098/machine-names, https://tailscale.com/kb/1217/tailnet-name | PA3, PA6 |
-| Default policy grants the Funnel attribute | https://tailscale.com/kb/1223/funnel | PA8 docs |
-| Device approval / Tailnet Lock node states | https://tailscale.com/kb/1099/device-approval, https://tailscale.com/kb/1226/tailnet-lock | PA5 |
-| Firewall and egress list | https://tailscale.com/kb/1082/firewall-ports | PA1 |
-| Sign-up identity providers | https://tailscale.com/kb/1013/sso-providers | PA8 docs |
-| `ts.net` on the Public Suffix List | https://publicsuffix.org/list/public_suffix_list.dat | PA3 |
-| Serve `--tls-terminated-tcp` + `--proxy-protocol` semantics and minimum version (manual path); Serve `X-Forwarded-For` handling | https://tailscale.com/kb/1242/tailscale-serve, https://tailscale.com/kb/1312/serve | PA8 |
-| Caddy `proxy_protocol` wrapper `allow` / `fallback_policy` | https://caddyserver.com/docs/caddyfile/options#listener-wrappers | PA2 |
-| Docker 127.0.0.1-publish LAN reachability fix version | https://docs.docker.com/engine/release-notes/28/ | PA9 |
-| Docker Desktop licence terms | https://www.docker.com/legal/docker-subscription-service-agreement/ | Owner queue 3 |
-| `caddy-tailscale` licence and maturity (rejected alternative) | https://github.com/tailscale/caddy-tailscale | none |
+| PA-D1 | Multiple RP ids: `instance_access`, `webauthn_credential.rp_id`, per-ingress RP selection, exact origin checks, Host 421, no-CORS test (Tide, migration token, Bulwark) | M |
+| PA-D2 | Localhost-first default stack: Caddy local site on `127.0.0.1:47800`, setup on local ingress only, token exchange + `replaceState`, Safari cookie rule (Harbor + Tide) | S |
+| PA-D3 | In-app "Connect your phone": flag write, read-only status client (or CLI fallback), tailnet binding + typed confirmations, shared-tailnet warning, pairing QR + PC approval (Tide + Prism) | M |
+| PA-D4 | `holdfast recover` (local ingress only) (Tide, Bulwark) | S |
+| PA-D5 | Settings → Phone access, expiry banners, PWA offline hint (Prism) | S |
+| PA-D6 | Installer `install.sh` / `install.ps1`, `holdfast` wrapper, Docker floor, digest-pinned compose (Harbor) | M |
+| PA-D7 | Docs: per-OS guide with the §7 counts, node sharing for members, ACL snippet, Funnel attribute removal, backup/restore, revocation, manual paths (Beacon) | S |
+| PA-D8 | Real-device acceptance on Linux, macOS and Windows hosts, iOS and Android (Sounding; owner devices) | M |
+| PA-D9 | Host-Serve manual path: loopback-published PROXY listener + documented `tailscale serve` command (fixes the owner's host) (Harbor) | S |
+| PA-D10 | Unpin the `frontend` subnet and rework the `TRUSTED_PROXIES` default (Harbor, Bulwark) | S |
 
-## Story breakdown (epic PA, "private access")
+Deferred total: about 4 M + 6 S, plus PA0 (S) and PA1 (M).
 
-The IDs use `PA`, not `A`. `A1` is already the redaction story in `docs/planning/ROADMAP.md`. Every
-story is S or M (SDLC §1). Gadfly challenges the epic and Bulwark threat-models it before PA1
-starts. PA1 and PA2 deliver the first working Linux path (with `APP_HOST` set by hand), and the
-owner's own host can switch over at that point. PA3 to PA5 make it zero-config.
+## VERIFY index (beyond PA0)
 
-| ID | Story | Owner | Size | Depends on | Acceptance evidence |
-|---|---|---|---|---|---|
-| PA1 | `infra/access/` Go module: tsnet node (userspace, state volume, log upload off, filtered logs), `ListenTLS :443` → PROXY v2 → upstream, CLI `holdfast-access login` / `status` printing the login URL and a terminal QR to the operator's terminal only. Forbidden-identifier test. Distroless image. CI Go job (vet, test, `govulncheck`), path-gated, plus Dependabot `gomod` | Harbor (Bulwark reviews) | M | ADR accepted, Gadfly + Bulwark pass | `go test` green, including PROXY header bytes and forbidden-identifier tests. Image runs as non-root on a read-only root filesystem. Redaction test shows no login URL in log output |
-| PA2 | `infra/docker-compose.access.yml` (networks `edge`/`accessctl`/`access_egress`, pinned IPs), `Caddyfile.access` (edge bind, `proxy_protocol` allow `/29`, XFF overwrite, prod headers), `check-compose-ports.py --access` plus the `--prod` CGNAT-range check, `make up-access`, rule-12 wording applied to CLAUDE.md by Keel | Harbor (Bulwark reviews) | M | PA1 | **First working Linux path** with `APP_HOST` set by hand from `holdfast-access status`: phone on the tailnet registers a passkey, and `audit_log.ip` is the phone's `100.x`. `make ports` green. A device off the tailnet can't resolve or connect (Sounding, counts only) |
-| PA3 | Host binding: migration for `instance_access` and `webauthn_credential.rp_id` (backfill), RLS-lint exemption with reason, `app/services/access.py` resolver (env > bound > none), per-request RP id in passkeys, `409 access_not_ready`, bind at first owner passkey | Tide (Ledger + Bulwark review). Holds the migration token | M | PA2 | Tests: unbound instance refuses registration; bind happens only from fetched status that matches the `Host` header; manual mode unchanged; up/down/up migration; credentials filtered by `rp_id` at login |
-| PA4 | `access` control API (`/v1/status`, `/v1/login`, `/v1/logout`) on `accessctl` with a bearer token, `ACCESS_CONTROL_TOKEN` in `.env.example` and `gen-keys`, API client plus `/api/access/status` (owner) and `/api/access/disconnect` (owner + step-up) | Harbor (Go side), Tide (API side), Bulwark reviews | M | PA1, PA3 | Contract tests with a fake `access`; wrong or missing token → 401; disconnect requires step-up and writes an audit entry; peer summary carries no names |
-| PA5 | Loopback console: Caddy console site (Host allowlist, `/console` + `/api/console/*` only), `app.cli open` (console + setup tokens, fragment URL), web console pages (connect, confirm account, settings deep links for HTTPS/MagicDNS/approval, QR 1, auto-advance, QR 2) | Tide (API), Prism (web) | M | PA4 | e2e against a fake `access` covering the whole wizard; a rebinding test (wrong `Host` → 421); no cookies set; 375px layout; brand review |
-| PA6 | Recovery and rebind: `app.cli recover` token (15-minute TTL, single use, stdout only), rebind with step-up, `host_mismatch` state and the "Holdfast moved" page, stale-credential display, session revocation, alerts | Tide (Bulwark reviews) | M | PA3, PA5 | Tests: token single use and expiry, nothing written to the API log, all sessions revoked, audit plus alert. A name change is never followed automatically |
-| PA7 | Settings → Access (status, cert and key-expiry banners at 30/7/1 days, Disconnect, "use on this PC" guidance) and the PWA shell's offline hint "Is Tailscale on?" | Prism | S | PA4 | Vitest plus e2e with a fake `access`; the SW test still asserts no `/api` caching |
-| PA8 | Docs: install guide per OS with the step table and stuck-point fixes; manual paths (domain DNS-01, host Serve with PROXY); backup/restore without `access_state`; revocation; Funnel-attribute removal; `client-ip-check.md` access-mode row; PLAN Section 20.x amendment draft | Beacon (Keel reviews) | S | PA5, PA6 | Link check green; every Tailscale claim either cites the checked page or stays marked VERIFY |
-| PA9 | Installer: `install.sh` / `install.ps1` (pwsh 7), digest-pinned `compose.yaml`, `holdfast` wrapper verbs, Docker version floor, multi-arch `holdfast-access` in the release workflow (ADR 0018 addition), CI installer smoke on Linux | Harbor (Bulwark reviews) | M | PA5, PA6 | CI: a fresh Linux VM install reaches the console with a fake `access`. Release dry run lists four image digests. Installer refuses to overwrite an existing `.env` |
-| PA10 | Acceptance on real devices: Linux, macOS and Windows hosts; iOS and Android phones; counts of steps taken against the table above; stuck-point log; key-expiry simulation; off-tailnet probe | Sounding | M | PA7, PA8, PA9, owner queue 2 | `docs/phases/` acceptance note with counts and pass rates only (no tailnet names, no IPs) |
+| Claim | Where to check |
+|---|---|
+| Tailscale client licence BSD-3-Clause (upstream image, AGPL-compatible) | https://github.com/tailscale/tailscale/blob/main/LICENSE |
+| Default policy is allow-all among members; flow logs by plan | https://tailscale.com/kb/1192/acl-samples, https://tailscale.com/pricing |
+| Default `funnel` node attribute in new tailnets | https://tailscale.com/kb/1223/funnel |
+| Key expiry 180 days by default | https://tailscale.com/kb/1028/key-expiry |
+| CT publication of the FQDN when HTTPS is on | https://tailscale.com/kb/1153/enabling-https |
+| Policy grant syntax for the docs snippet | https://tailscale.com/kb/1337/policy-syntax |
+| Firewall and egress list | https://tailscale.com/kb/1082/firewall-ports |
+| Caddy `proxy_protocol` wrapper options | https://caddyserver.com/docs/caddyfile/options#listener-wrappers |
+| Docker Desktop terms | https://www.docker.com/legal/docker-subscription-service-agreement/ |
