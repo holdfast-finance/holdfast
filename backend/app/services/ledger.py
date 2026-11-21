@@ -82,8 +82,10 @@ def decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         posted, tx_id = json.loads(raw)
+        if not isinstance(posted, str) or not isinstance(tx_id, str):
+            raise TypeError("cursor parts must be strings")
         return date.fromisoformat(posted), uuid.UUID(tx_id)
-    except (binascii.Error, ValueError, TypeError, UnicodeDecodeError):
+    except (binascii.Error, ValueError, TypeError, UnicodeDecodeError, OverflowError):
         raise ApiError("validation_error", "That page cursor isn't valid.") from None
 
 
