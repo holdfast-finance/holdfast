@@ -62,6 +62,17 @@ class ImportBlockOut(ReconcileNumbers):
     rows_duplicate: int
     # False: this file was already imported and nothing was written for this block.
     created: bool
+    # Why a block that isn't reconciled needs a look (a fixed code such as ``balance_mismatch`` or
+    # ``missing_balance``). Not stored: only the upload response carries it (no column yet).
+    reason: str | None
+
+
+class ImportBalanceOut(Model):
+    """Balances read from a statement that had no transactions. Not stored anywhere yet."""
+
+    account_last4: str | None
+    opening_balance: MoneyStr | None
+    closing_balance: MoneyStr | None
 
 
 class ImportResultOut(Model):
@@ -71,3 +82,5 @@ class ImportResultOut(Model):
     created: bool
     balances_only: bool
     blocks: list[ImportBlockOut]
+    # Only for ``balances_only`` uploads (no transactions, so no run): what the file said.
+    balances: list[ImportBalanceOut]

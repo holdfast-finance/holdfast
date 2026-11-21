@@ -20,10 +20,47 @@ quadratic on long lines, so a bigger body could never be imported anyway.
   middleware, and `request_body { max_size 21MiB }` in a dedicated `handle @statement_upload`
   block in both `infra/caddy/Caddyfile` (dev) and `Caddyfile.prod`. All other routes stay at 1 MiB.
 - The middleware keeps counting real bytes as they stream, so a lying or absent `Content-Length`
-  is still cut off at the limit. The route never buffers the upload in memory: Starlette spools
-  multipart parts to a temp file, and the route then streams that file to the document store while
-  hashing it with a hard byte counter.
-- Uploads are rate limited per user (10 per minute) because each one costs PDF parsing CPU.
+  is still cut off at the limit.
+- **Memory and disk, as built.** Starlette's multipart parser spools each part to a temp file once it
+  passes 1 MiB, in `/tmp`. The api container's `/tmp` is a tmpfs, so a spooled upload does sit in RAM
+  (counted against the container's memory). It is bounded, not absent: at most **2** uploads are read
+  at once per process (`PARSE_SLOTS`), each at most 21 MiB, so `/tmp` is sized `64m` and the api
+  service gets `mem_limit: 1536m` (about 150 MB idle, two PDF parses at an estimated 500 MB each,
+  the tmpfs, and headroom; an estimate to revisit with a measured peak). The route then copies the
+  spooled file to a private temp file in the document store (disk) while hashing it with a hard byte
+  counter, so a 20 MiB + 1 byte file is refused with 413 even under the body cap.
+- **Order of checks** on `POST /api/imports/statements`: session, per-user rate limit (10 a minute,
+  Redis), content type, then a parse slot, and only then the body is read. A rate-limited or
+  anonymous request never has its body read. Refusals are audited (`import.upload_refused`, a fixed
+  reason code, at most one row per user and reason a minute).
+- **Stored originals** live at `statements/<household id>/<sha256>.pdf`: one directory per household,
+  named by hash, never shared across households, never derived from client text. The request path
+  never deletes a hash-named file (another request may be using it); a failed import leaves an
+  orphan and `app.importers.store_sweep.sweep_store` removes orphans and stale `.upload-*` temp files
+  older than an hour. Files stored earlier under the flat layout (`statements/<sha256>.pdf`) or by
+  other scripts are outside the sweep, and every reader must use `document.storage_path`, which is
+  authoritative.
+- **Duplicates.** Two uploads of the same bytes at the same moment: one wins, the other gets 409
+  (a Redis lock per household and hash, backed by the unique constraint, SQLSTATE 23505 on
+  `document`). Any other database error is a fixed 500 `server_error`; only the exception class
+  name is logged.
+
+## Accepted risks
+- **Parser resource use.** PDF parsing runs in a worker thread with a 30 s wall-clock answer and at
+  most 2 at a time per process. A thread cannot be killed, so a timed-out parse keeps running (and
+  keeps its slot) until it ends, and a decompression bomb inside one page is bounded only by the
+  container `mem_limit`. Follow-up story: parse in a killable subprocess with its own memory and CPU
+  limits. Until then this is an accepted risk, limited to authenticated household members.
+- **Two 409 oracles.** "Already imported" (a copy the caller cannot see, because another person
+  uploaded it) and "that account belongs to another person in this household" tell a household member
+  that something exists. Both stay inside one household, which already shares its documents list;
+  nothing crosses households (that case is a fresh import, not an error).
+- The body-limit middleware's 413 is answered before the route runs, so an oversize upload is not
+  in the audit log.
+- A `needs_review` reason code and the balances of a `balances_only` upload are returned in the
+  upload response only; `import_run` has no reason column and a run needs an account, so neither
+  appears in `GET /api/imports/runs`. Follow-up (needs a migration): a reason column, and storing
+  balances-only statements as balance snapshots with a run.
 
 ## Alternatives considered
 - 10 MiB: covers nearly every statement, but a limit below what the importer accepts creates a

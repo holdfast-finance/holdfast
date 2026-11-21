@@ -6,6 +6,7 @@ name, number and amount is invented.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from app.db_context import scoped_session
 from app.importers.pdf_text import MAX_PDF_BYTES
 from app.models import AuditLog, Document, ImportRun, Transaction
 from app.security.body_limit import MAX_BODY_BYTES, UPLOAD_MAX_BODY_BYTES
+from app.services.errors import ApiError
 from app.services.imports import sanitise_filename
 from tests.api.conftest import Owner, age_sessions, make_client, seed_household
 from tests.importers.test_statement_profiles import DEBIT, NFCU_CARD
@@ -58,8 +60,9 @@ async def upload(
 
 
 def stored_files(store: Path) -> list[Path]:
+    """Every file under statements/, temp files included."""
     root = store / "statements"
-    return sorted(root.iterdir()) if root.exists() else []
+    return sorted(p for p in root.rglob("*") if p.is_file()) if root.exists() else []
 
 
 async def count(app: FastAPI, hid: uuid.UUID, model: type) -> int:
@@ -102,7 +105,8 @@ async def test_upload_returns_blocks_with_string_money(
     hid = uuid.UUID(owner.household["id"])
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
         doc = (await s.execute(select(Document))).scalar_one()
-        assert doc.storage_path == f"statements/{path.name}"
+        assert path.parent.name == str(hid)
+        assert doc.storage_path == f"statements/{hid}/{path.name}"
         audit = (
             (await s.execute(select(AuditLog).where(AuditLog.action == "import.upload")))
             .scalars()
@@ -236,7 +240,7 @@ async def test_filename_is_sanitised_and_never_picks_the_path(owner: Owner, stor
     r = await upload(owner.client, pdf_bytes(NFCU_CARD), "../../../etc/cron.d/evil.pdf")
     assert r.status_code == 200
     assert r.json()["filename"] == "evil.pdf"
-    assert all(p.parent == store / "statements" for p in stored_files(store))
+    assert all(p.parent.parent == store / "statements" for p in stored_files(store))
 
 
 async def test_names_stay_out_of_logs(
@@ -357,3 +361,293 @@ async def test_another_household_cannot_list_accept_or_learn_of_runs(
     # A's run is untouched.
     a = (await owner.client.get("/api/imports/runs")).json()["items"]
     assert [i["reconcile_status"] for i in a] == ["needs_review"]
+
+
+# --------------------------------------------------------------------------- review follow-ups
+
+SUMMARY = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "statements" / "current"
+    / "account_summary.sanitized.txt"
+)  # fmt: skip
+
+
+async def audit_rows(app: FastAPI, hid: uuid.UUID, action: str) -> list[AuditLog]:
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        return list((await s.execute(select(AuditLog).where(AuditLog.action == action))).scalars())
+
+
+async def test_eleventh_request_is_429_and_its_body_is_never_read(owner: Owner) -> None:
+    for _ in range(10):
+        assert (await upload(owner.client, b"nope")).status_code == 422
+    read = False
+
+    async def body() -> AsyncIterator[bytes]:
+        nonlocal read
+        read = True
+        yield b"--b\r\n"
+
+    r = await owner.client.post(
+        "/api/imports/statements",
+        content=body(),
+        headers={"content-type": "multipart/form-data; boundary=b"},
+    )
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    assert "Retry-After" in r.headers
+    assert read is False
+
+
+async def test_parse_slots_are_bounded_and_a_busy_server_says_so(
+    owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import imports
+
+    monkeypatch.setattr(imports, "SLOT_WAIT_SECONDS", 0.05)
+    async with imports.parse_slot(), imports.parse_slot():
+        r = await upload(owner.client, pdf_bytes(NFCU_CARD))
+        assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+
+
+async def test_parse_timeout_answers_now_but_holds_the_slot_until_the_thread_ends(
+    owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from app.services import imports
+
+    monkeypatch.setattr(imports, "PARSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(imports, "SLOT_WAIT_SECONDS", 0.05)
+    real = imports._parse_pdf
+
+    def slow(path: Path) -> object:
+        time.sleep(0.6)
+        return real(path)
+
+    monkeypatch.setattr(imports, "_parse_pdf", slow)
+    r = await upload(owner.client, pdf_bytes(NFCU_CARD))
+    assert r.status_code == 422 and "too long" in r.json()["error"]["message"]
+    # One of the two slots is still held by the running thread, so a second holder times out.
+    async with imports.parse_slot():
+        with pytest.raises(ApiError):
+            async with imports.parse_slot():
+                pass
+    await asyncio.sleep(0.9)  # the thread ends and returns its slot
+    async with imports.parse_slot(), imports.parse_slot():
+        pass
+
+
+async def test_concurrent_identical_uploads_one_wins_one_conflicts_file_stays(
+    app: FastAPI, owner: Owner, store: Path
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    data = pdf_bytes(NFCU_CARD)
+    a, b = await asyncio.gather(upload(owner.client, data), upload(owner.client, data))
+    assert sorted([a.status_code, b.status_code]) == [200, 409], (a.text, b.text)
+    assert await count(app, hid, Document) == 1
+    (path,) = stored_files(store)
+    assert path.read_bytes() == data
+    # A later, sequential re-upload is the ordinary idempotent 200.
+    again = await upload(owner.client, data)
+    assert again.status_code == 200 and again.json()["created"] is False
+
+
+async def test_a_failed_import_leaves_the_stored_file_and_the_sweep_removes_orphans(
+    app: FastAPI, owner: Owner, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time
+
+    from app.importers.store_sweep import sweep_store
+    from app.services import imports
+
+    hid = uuid.UUID(owner.household["id"])
+    # One real document (kept) and, beside it, a failed import (orphan).
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+
+    async def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("never shown")
+
+    real_import = imports.import_statement
+    monkeypatch.setattr(imports, "import_statement", boom)
+    with pytest.raises(RuntimeError):
+        await upload(owner.client, pdf_bytes(OTHER_CARD))
+    files = stored_files(store)
+    assert len(files) == 2  # the orphan was not unlinked in the request path
+    monkeypatch.setattr(imports, "import_statement", real_import)
+
+    root = store / "statements"
+    flat = root / ("a" * 64 + ".pdf")  # earlier flat layout: never touched
+    flat.write_bytes(b"%PDF-")
+    stale = root / ".upload-old.pdf"
+    stale.write_bytes(b"x")
+    fresh = root / ".upload-new.pdf"
+    fresh.write_bytes(b"x")
+    long_ago = time.time() - 7200
+    for p in (*files, flat, stale):
+        os.utime(p, (long_ago, long_ago))
+
+    swept = await sweep_store(app.state.session_factory, store)
+    assert (swept.orphans_removed, swept.temps_removed) == (1, 1)
+    assert len(stored_files(store)) == 3  # kept document, flat-layout file, fresh temp
+    assert flat.exists() and fresh.exists() and not stale.exists()
+    assert await count(app, hid, Document) == 1
+    # Too young to sweep: nothing more goes.
+    assert (await sweep_store(app.state.session_factory, store)).orphans_removed == 0
+
+
+async def test_overflow_amount_is_refused_and_nothing_reaches_the_logs(
+    app: FastAPI,
+    owner: Owner,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level("DEBUG")
+    huge = NFCU_CARD.replace("$100.00", "$1,000,000,000,000.00").replace("$245.00", "$9.00")
+    r = await upload(owner.client, pdf_bytes(huge), "SECRETNAME-9.pdf")
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["message"] == "An amount in that statement is out of range."
+    out = capfd.readouterr()
+    logged = caplog.text + out.out + out.err
+    for needle in ("1,000,000,000,000", "1000000000000", "SECRETNAME", "Example Shop"):
+        assert needle not in logged, needle
+    assert await count(app, uuid.UUID(owner.household["id"]), ImportRun) == 0
+
+
+async def test_only_a_duplicate_document_is_a_409_other_db_errors_are_content_free(
+    owner: Owner,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    from psycopg.errors import NumericValueOutOfRange
+    from sqlalchemy.exc import DataError
+
+    from app.services import imports
+
+    async def leaky(*a: object, **k: object) -> None:
+        raise DataError(
+            "INSERT ... SECRETAMOUNT",
+            {"amount": "SECRETAMOUNT"},
+            NumericValueOutOfRange("SECRETAMOUNT"),
+        )
+
+    monkeypatch.setattr(imports, "import_statement", leaky)
+    caplog.set_level("DEBUG")
+    r = await upload(owner.client, pdf_bytes(NFCU_CARD), "SECRETNAME-9.pdf")
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": {"code": "server_error", "message": "The statement couldn't be saved."}
+    }
+    out = capfd.readouterr()
+    logged = caplog.text + out.out + out.err
+    assert "SECRETAMOUNT" not in logged and "SECRETNAME" not in logged
+    assert "NumericValueOutOfRange" in logged  # the class name is the one thing logged
+
+
+async def test_refused_uploads_are_audited_with_a_reason_code_only(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    await upload(owner.client, b"MZ not a pdf", "SECRETNAME.pdf")
+    await upload(owner.client, b"MZ again", "SECRETNAME.pdf")  # same reason: one row a minute
+    await upload(owner.client, pdf_bytes(NFCU_CARD), "s.pdf", "text/plain")
+    await owner.client.post("/api/imports/statements", json={})
+    rows = await audit_rows(app, hid, "import.upload_refused")
+    assert sorted(r.detail["reason"] for r in rows) == [
+        "bad_content_type",
+        "not_multipart",
+        "not_pdf",
+    ]
+    assert all(
+        r.detail["outcome"] == "failure" and set(r.detail) == {"reason", "outcome"} for r in rows
+    )
+    assert "SECRETNAME" not in str([r.detail for r in rows])
+
+
+async def test_extreme_cursor_timestamp_is_422_not_500(owner: Owner) -> None:
+    import base64
+    import json
+
+    for stamp in ("0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00"):
+        raw = json.dumps([stamp, str(uuid.uuid4())]).encode()
+        cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        r = await owner.client.get("/api/imports/runs", params={"cursor": cursor})
+        assert r.status_code in (200, 422), r.text
+    raw = json.dumps(["0001-01-01T00:00:00+14:00", str(uuid.uuid4())]).encode()
+    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    assert (
+        await owner.client.get("/api/imports/runs", params={"cursor": cursor})
+    ).status_code == 422
+
+
+async def test_missing_balances_are_null_not_zero(owner: Owner) -> None:
+    text = "\n".join(line for line in NFCU_CARD.splitlines() if "Previous Balance" not in line)
+    r = await upload(owner.client, pdf_bytes(text))
+    assert r.status_code == 200, r.text
+    (block,) = r.json()["blocks"]
+    assert block["reconcile_status"] == "needs_review"
+    assert block["reason"] == "missing_balance"
+    assert block["opening_balance"] is None and block["closing_balance"] is None
+    assert block["balance_diff"] is None
+    run = (await owner.client.get("/api/imports/runs")).json()["items"][0]
+    assert run["opening_balance"] is None and run["balance_diff"] is None
+    assert block["txn_sum"] == "-45.00"  # the rows are real; only the balances are unknown
+
+
+async def test_multi_account_upload_has_distinct_per_block_figures(owner: Owner) -> None:
+    r = await upload(owner.client, pdf_bytes(DEBIT))
+    assert r.status_code == 200, r.text
+    first, second = r.json()["blocks"]
+    assert first["run_id"] != second["run_id"] and first["account_id"] != second["account_id"]
+    assert (first["opening_balance"], first["closing_balance"]) == ("0.00", "40.00")
+    assert (second["opening_balance"], second["closing_balance"]) == ("1.00", "1.00")
+    assert first["txn_sum"] == "40.00" and second["txn_sum"] == "0.00"
+    assert first["reason"] is None
+
+
+async def test_balances_only_upload_returns_what_it_read_and_writes_no_run(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    r = await upload(owner.client, pdf_bytes(SUMMARY.read_text()))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Current behaviour, pinned: a summary-only statement has a document but no run, so it is
+    # absent from GET /runs. Showing it there needs a migration (a run without an account, or
+    # balance snapshots written for it): a follow-up, not part of this story.
+    assert body["balances_only"] is True and body["blocks"] == []
+    assert body["balances"] and all(
+        set(b) == {"account_last4", "opening_balance", "closing_balance"} for b in body["balances"]
+    )
+    assert any(b["closing_balance"] is not None for b in body["balances"])
+    assert await count(app, hid, Document) == 1
+    assert await count(app, hid, ImportRun) == 0
+    assert (await owner.client.get("/api/imports/runs")).json()["items"] == []
+
+
+async def test_a_private_account_of_another_person_gets_an_honest_409(
+    app: FastAPI, owner: Owner
+) -> None:
+    from app.db_context import apply_context, unscoped_session
+    from app.models import AppUser, Person
+    from app.services import sessions
+
+    hid = uuid.UUID(owner.household["id"])
+    assert (await upload(owner.client, pdf_bytes(NFCU_CARD))).status_code == 200
+    async with unscoped_session(app.state.session_factory) as s:
+        await apply_context(s, hid, None)
+        person = Person(household_id=hid, display_name="Sam Example", filing_role="spouse")
+        s.add(person)
+        await s.flush()
+        user = AppUser(
+            household_id=hid, person_id=person.id, email="sam@example.com", role="member"
+        )
+        s.add(user)
+        await s.flush()
+        token = await sessions.create(s, user.id, ip=None, user_agent=None, strong=True)
+    async with make_client(app) as sam:
+        sam.cookies.set("hf_session", token)
+        r = await upload(sam, pdf_bytes(OTHER_CARD))
+    assert r.status_code == 409
+    assert "belongs to another person" in r.json()["error"]["message"]
+    assert "already imported" not in r.json()["error"]["message"]

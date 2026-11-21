@@ -21,15 +21,18 @@ import json
 import os
 import re
 import uuid
+import weakref
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, NoReturn, Protocol
 
+import structlog
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db_context import scoped_session
+from app.domain.ledger_rules import InvalidAmountError
 from app.domain.statement_parse import (
     ParsedStatement,
     StatementParseError,
@@ -40,6 +43,7 @@ from app.importers.pdf_text import MAX_PDF_BYTES, pdf_to_text
 from app.importers.profile_loader import load_profiles
 from app.models import Account, Document, ImportRun
 from app.schemas.imports import (
+    ImportBalanceOut,
     ImportBlockOut,
     ImportResultOut,
     ImportRunOut,
@@ -65,6 +69,12 @@ DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 STORE_SUBDIR = "statements"
 FILENAME_MAX = 100
+TEMP_PREFIX = ".upload-"
+PARSE_SLOTS = 2  # concurrent form + PDF parses per process
+SLOT_WAIT_SECONDS = 10
+PARSE_TIMEOUT_SECONDS = 30
+LOCK_SECONDS = 120
+log = structlog.get_logger(__name__)
 _FILENAME_OK = re.compile(r"[^A-Za-z0-9 ._()\-]")
 
 
@@ -101,7 +111,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
         parsed = datetime.fromisoformat(at)
         if parsed.tzinfo is None:
             raise ValueError("naive cursor time")
-        return parsed, uuid.UUID(run_id)
+        return parsed.astimezone(UTC), uuid.UUID(run_id)
     except (binascii.Error, ValueError, TypeError, UnicodeDecodeError, OverflowError):
         raise ApiError("validation_error", "That page cursor isn't valid.") from None
 
@@ -127,7 +137,7 @@ def _parse_pdf(path: Path) -> ParsedStatement:
 async def _stream_to_temp(upload: _Upload, directory: Path) -> tuple[Path, str, int]:
     """Copy the upload to a private temp file: (path, sha256 hex, size). Hard-capped."""
     await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True, mode=0o700)
-    tmp = directory / f".upload-{uuid.uuid4().hex}.pdf"
+    tmp = directory / f"{TEMP_PREFIX}{uuid.uuid4().hex}.pdf"
     digest = hashlib.sha256()
     size = 0
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -138,19 +148,80 @@ async def _stream_to_temp(upload: _Upload, directory: Path) -> tuple[Path, str, 
                 if first:
                     first = False
                     if not chunk.startswith(PDF_MAGIC):
-                        raise ApiError("validation_error", "That file isn't a PDF.")
+                        raise UploadRefused("not_pdf", "validation_error", "That file isn't a PDF.")
                 size += len(chunk)
                 if size > MAX_PDF_BYTES:
-                    raise ApiError("payload_too_large", "That PDF is over the 20 MiB limit.")
+                    raise UploadRefused(
+                        "too_large", "payload_too_large", "That PDF is over the 20 MiB limit."
+                    )
                 digest.update(chunk)
                 out.write(chunk)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)  # a temp name, never a hash-named stored file
         raise
     if size == 0:
         tmp.unlink(missing_ok=True)
-        raise ApiError("validation_error", "That file is empty.")
+        raise UploadRefused("empty", "validation_error", "That file is empty.")
     return tmp, digest.hexdigest(), size
+
+
+class UploadRefused(ApiError):
+    """An upload turned away; ``reason`` is a fixed code for the audit log (never content)."""
+
+    def __init__(self, reason: str, code: str, message: str, **kw: Any) -> None:
+        super().__init__(code, message, **kw)
+        self.reason = reason
+
+
+class ParseSlot:
+    """One of ``PARSE_SLOTS`` per process: bounds concurrent form parsing and PDF parsing.
+
+    A parse that times out can't be cancelled (it runs in a thread), so its slot is released when
+    the thread really ends (``release_when``), not when the request gives up.
+    """
+
+    def __init__(self, sem: asyncio.Semaphore) -> None:
+        self._sem = sem
+        self._deferred = False
+
+    async def __aenter__(self) -> ParseSlot:
+        try:
+            async with asyncio.timeout(SLOT_WAIT_SECONDS):
+                await self._sem.acquire()
+        except TimeoutError:
+            raise ApiError(
+                "rate_limited",
+                "Holdfast is busy reading other statements. Try again shortly.",
+                headers={"Retry-After": str(SLOT_WAIT_SECONDS)},
+            ) from None
+        return self
+
+    def release_when(self, task: asyncio.Future[Any]) -> None:
+        self._deferred = True
+        task.add_done_callback(lambda _t: self._sem.release())
+
+    async def __aexit__(self, *exc: object) -> None:
+        if not self._deferred:
+            self._sem.release()
+
+
+_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def parse_slot() -> ParseSlot:
+    loop = asyncio.get_running_loop()
+    return ParseSlot(_slots.setdefault(loop, asyncio.Semaphore(PARSE_SLOTS)))
+
+
+def _is_duplicate_document(exc: IntegrityError) -> bool:
+    """SQLSTATE 23505 (unique violation) on the document table, and nothing else."""
+    diag = getattr(exc.orig, "diag", None)
+    return (
+        getattr(exc.orig, "sqlstate", None) == "23505"
+        and getattr(diag, "table_name", None) == "document"
+    )
 
 
 class ImportService:
@@ -163,36 +234,78 @@ class ImportService:
             self.ctx.factory, self.principal.household_id, self.principal.person_id
         )
 
-    # ------------------------------------------------------------------ upload
+    # ------------------------------------------------------------------ guards
 
-    async def upload(self, upload: _Upload, raw_filename: str | None) -> ImportResultOut:
-        if (upload.content_type or "").split(";")[0].strip().lower() not in ALLOWED_TYPES:
-            raise ApiError("validation_error", "That file isn't a PDF.")
+    async def throttle(self) -> None:
+        """Per-user upload limit. Called before the request body is read."""
         limited = await RateLimiter(self.ctx.redis).throttle(
             f"import:{self.principal.user_id}", limit=UPLOADS_PER_MINUTE, window=60
         )
         if limited is not None:
-            raise ApiError(
-                "rate_limited", limited.message, headers={"Retry-After": str(limited.retry_after)}
+            await self.refuse(
+                "rate_limited",
+                "rate_limited",
+                limited.message,
+                headers={"Retry-After": str(limited.retry_after)},
             )
+
+    async def refuse(
+        self, reason: str, code: str, message: str, headers: dict[str, str] | None = None
+    ) -> NoReturn:
+        """Audit (reason code only, at most one row per user and reason a minute), then raise."""
+        key = f"hf:import:refused:{self.principal.user_id}:{reason}"
+        if await self.ctx.redis.set(key, "1", nx=True, ex=60):
+            await audit.record(
+                self.ctx.factory,
+                "import.upload_refused",
+                household_id=self.principal.household_id,
+                user_id=self.principal.user_id,
+                ip=self.ctx.ip,
+                outcome="failure",
+                detail={"reason": reason},
+            )
+        raise UploadRefused(reason, code, message, headers=headers)
+
+    # ------------------------------------------------------------------ upload
+
+    async def upload(
+        self, upload: _Upload, raw_filename: str | None, slot: ParseSlot
+    ) -> ImportResultOut:
+        try:
+            return await self._upload(upload, raw_filename, slot)
+        except UploadRefused as exc:
+            await self.refuse(exc.reason, exc.code, exc.message, exc.headers)
+
+    async def _upload(
+        self, upload: _Upload, raw_filename: str | None, slot: ParseSlot
+    ) -> ImportResultOut:
+        if (upload.content_type or "").split(";")[0].strip().lower() not in ALLOWED_TYPES:
+            raise UploadRefused("bad_content_type", "validation_error", "That file isn't a PDF.")
+        # Temp files and stored originals share one filesystem so the final rename is atomic.
         store = self.ctx.settings.document_store / STORE_SUBDIR
         tmp, sha, size = await _stream_to_temp(upload, store)
+        lock_key = f"hf:import:lock:{self.principal.household_id}:{sha}"
+        if not await self.ctx.redis.set(lock_key, "1", nx=True, ex=LOCK_SECONDS):
+            tmp.unlink(missing_ok=True)
+            raise UploadRefused(
+                "in_progress", "conflict", "That statement is already being imported."
+            )
         try:
-            statement = await asyncio.to_thread(_parse_pdf, tmp)
-            relative = f"{STORE_SUBDIR}/{sha}.pdf"  # derived from the hash only
-            final = store / f"{sha}.pdf"
-            placed = not final.exists()
-            if placed:
+            statement = await self._parse(tmp, slot)
+            household_dir = store / str(self.principal.household_id)
+            final = household_dir / f"{sha}.pdf"
+            # Under the household's own directory, named by hash: nothing is shared across
+            # households and no client text reaches the path.
+            relative = f"{STORE_SUBDIR}/{self.principal.household_id}/{sha}.pdf"
+            await asyncio.to_thread(household_dir.mkdir, exist_ok=True, mode=0o700)
+            if not final.exists():
                 os.replace(tmp, final)
-            result = None
-            try:
-                result = await self._import(statement, sha, relative, size, raw_filename)
-            finally:
-                if result is None and placed:
-                    # Nothing references the file (the import rolled back): don't keep it.
-                    final.unlink(missing_ok=True)
+            # A failed import leaves the stored file: it is named by hash, and another request
+            # may be using it. ``sweep_store`` removes orphans later.
+            result = await self._import(statement, sha, relative, size, raw_filename)
         finally:
             tmp.unlink(missing_ok=True)
+            await self.ctx.redis.delete(lock_key)
         document_created, document_id, filename, blocks, balances_only = result
         await audit.record(
             self.ctx.factory,
@@ -215,7 +328,34 @@ class ImportService:
             created=document_created,
             balances_only=balances_only,
             blocks=blocks,
+            balances=[
+                ImportBalanceOut(
+                    account_last4=b.account_last4,
+                    opening_balance=b.opening_balance,
+                    closing_balance=b.closing_balance,
+                )
+                for b in statement.blocks
+            ]
+            if balances_only
+            else [],
         )
+
+    async def _parse(self, path: Path, slot: ParseSlot) -> ParsedStatement:
+        task = asyncio.ensure_future(asyncio.to_thread(_parse_pdf, path))
+        done, _ = await asyncio.wait({task}, timeout=PARSE_TIMEOUT_SECONDS)
+        if not done:
+            # The thread can't be interrupted: keep its slot until it ends, answer now.
+            slot.release_when(task)
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise UploadRefused(
+                "parse_timeout", "validation_error", "That statement took too long to read."
+            )
+        try:
+            return task.result()
+        except UploadRefused:
+            raise
+        except ApiError as exc:
+            raise UploadRefused("unreadable", exc.code, exc.message) from None
 
     async def _import(
         self,
@@ -243,20 +383,43 @@ class ImportService:
                 meta,
                 person_id=self.principal.person_id,
             )
-        except IntegrityError:
-            # The same file was imported by another person in the household and is hidden
-            # from this session: say nothing about it beyond "already there".
-            raise ApiError("conflict", "That statement is already in this household.") from None
+        except IntegrityError as exc:
+            if _is_duplicate_document(exc):
+                # Imported at the same moment, or by someone whose copy this session can't see.
+                raise UploadRefused(
+                    "duplicate", "conflict", "That statement was already imported."
+                ) from None
+            log.error("import.db_error", error_class=type(exc.orig or exc).__name__)
+            raise UploadRefused(
+                "db_error", "server_error", "The statement couldn't be saved."
+            ) from None
+        except InvalidAmountError:
+            raise UploadRefused(
+                "amount_out_of_range",
+                "validation_error",
+                "An amount in that statement is out of range.",
+            ) from None
         except AccountNotVisibleError:
-            raise ApiError("conflict", "That statement is already in this household.") from None
+            raise UploadRefused(
+                "account_not_visible",
+                "conflict",
+                "That statement's account belongs to another person in this household.",
+            ) from None
+        except DBAPIError as exc:
+            log.error("import.db_error", error_class=type(exc.orig or exc).__name__)
+            raise UploadRefused(
+                "db_error", "server_error", "The statement couldn't be saved."
+            ) from None
         async with self._session() as s:
             doc = (
                 await s.execute(select(Document.filename).where(Document.id == result.document_id))
             ).scalar_one()
-        blocks = await self._blocks(result.blocks)
+        blocks = await self._blocks(result.blocks, statement)
         return existing is None, result.document_id, doc, blocks, result.balances_only
 
-    async def _blocks(self, results: tuple[BlockResult, ...]) -> list[ImportBlockOut]:
+    async def _blocks(
+        self, results: tuple[BlockResult, ...], statement: ParsedStatement
+    ) -> list[ImportBlockOut]:
         if not results:
             return []
         created = {r.run_id: r.created for r in results}
@@ -268,7 +431,7 @@ class ImportService:
         async with self._session() as s:
             rows = {run.id: (run, name, cur) for run, name, cur in (await s.execute(stmt)).all()}
         out: list[ImportBlockOut] = []
-        for r in results:
+        for r, parsed in zip(results, statement.blocks, strict=True):
             run, name, cur = rows[r.run_id]
             out.append(
                 ImportBlockOut.model_validate(
@@ -288,6 +451,9 @@ class ImportService:
                         "rows_inserted": r.rows_inserted,
                         "rows_duplicate": r.rows_duplicate,
                         "created": r.created,
+                        "reason": parsed.reconciliation.reason
+                        if run.reconcile_status == "needs_review"
+                        else None,
                     }
                 )
             )
