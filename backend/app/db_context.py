@@ -102,6 +102,18 @@ async def apply_context(
     await session.execute(SET_CONTEXT_SQL, _context_params(household_id, person_id, household_wide))
 
 
+async def is_household_wide(session: AsyncSession) -> bool:
+    """Whether the database setting for this transaction is household-wide (a system job).
+
+    Reads ``app.household_wide`` itself, not ``session.info``, so it cannot be spoofed from Python
+    and follows ``apply_context`` too.
+    """
+    value = (
+        await session.execute(text("SELECT current_setting('app.household_wide', true)"))
+    ).scalar_one()
+    return bool(value == "on")
+
+
 async def _commit_or_rollback(session: AsyncSession) -> AsyncIterator[AsyncSession]:
     try:
         yield session
