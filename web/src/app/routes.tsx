@@ -10,6 +10,7 @@ import {
   SecuritySettings,
   SettingsLayout,
   SetupPage,
+  TransactionsPage,
 } from '@/app/lazyRoutes'
 import { AppShell } from '@/components/layout/AppShell'
 import {
@@ -23,7 +24,7 @@ import { OverviewPage } from '@/pages/OverviewPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
 
 const placeholderIds = (Object.keys(PAGES) as PageId[]).filter(
-  (id) => id !== 'overview' && id !== 'settings',
+  (id) => id !== 'overview' && id !== 'settings' && id !== 'transactions',
 )
 
 function withSuspense(node: ReactNode, fallback: ReactNode) {
@@ -60,6 +61,10 @@ export const routes: RouteObject[] = [
                 element: withSuspense(<SecuritySettings />, <SectionSkeleton />),
               },
             ],
+          },
+          {
+            path: 'transactions',
+            element: withSuspense(<TransactionsPage />, <ShellPageSkeleton />),
           },
           ...placeholderIds.map((id) => ({
             path: PAGES[id].path.slice(1),

@@ -2,6 +2,7 @@ import { setupWorker } from 'msw/browser'
 
 import { MOCK_SETUP_TOKEN, MOCK_TOTP_CODE, db, type MockState } from '@/mocks/db'
 import { handlers } from '@/mocks/handlers'
+import { seedLedger } from '@/mocks/ledger'
 
 /*
  * Dev-only mock API (`VITE_MOCK_API=1 pnpm dev`). main.tsx imports this module behind
@@ -35,6 +36,8 @@ function save(): void {
       users: db.users,
       invites: db.invites,
       audit: db.audit,
+      accounts: db.accounts,
+      transactions: db.transactions,
       session: db.session,
       failedLogins: db.failedLogins,
       seq: db.seq,
@@ -47,6 +50,7 @@ function save(): void {
 
 export async function startMockApi(): Promise<void> {
   load()
+  if (db.accounts.length === 0) seedLedger()
   const worker = setupWorker(...handlers)
   worker.events.on('response:mocked', save)
   await worker.start({ onUnhandledRequest: 'bypass', quiet: true })

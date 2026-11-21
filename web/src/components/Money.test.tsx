@@ -7,16 +7,16 @@ import { formatMoney, parseMoney } from '@/lib/money'
 
 describe('formatMoney', () => {
   it('formats a positive amount as USD', () => {
-    expect(formatMoney('1234.5')).toEqual({ text: '$1,234.50', negative: false })
+    expect(formatMoney('1234.5')).toEqual({ text: '$1,234.50', negative: false, positive: true })
   })
 
   it('treats "-0.10" as negative', () => {
-    expect(formatMoney('-0.10')).toEqual({ text: '-$0.10', negative: true })
+    expect(formatMoney('-0.10')).toEqual({ text: '-$0.10', negative: true, positive: false })
   })
 
   it('treats negative zero as zero, not negative', () => {
-    expect(formatMoney('-0.00')).toEqual({ text: '$0.00', negative: false })
-    expect(formatMoney('-0.001')).toEqual({ text: '$0.00', negative: false })
+    expect(formatMoney('-0.00')).toEqual({ text: '$0.00', negative: false, positive: false })
+    expect(formatMoney('-0.001')).toEqual({ text: '$0.00', negative: false, positive: false })
   })
 
   it('keeps precision a float would lose', () => {

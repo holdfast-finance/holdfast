@@ -1,3 +1,4 @@
+import type { Account, Transaction } from '@/api/ledger'
 import type { AuditEntry, FilingRole, UserRole } from '@/api/contracts'
 
 /*
@@ -60,6 +61,9 @@ export interface MockState {
   users: MockUser[]
   invites: MockInvite[]
   audit: AuditEntry[]
+  /** Imported accounts and transactions (see `./ledger.ts`). */
+  accounts: Account[]
+  transactions: Transaction[]
   session: MockSession | null
   challenges: Set<string>
   failedLogins: number
@@ -73,6 +77,8 @@ function emptyState(): MockState {
     users: [],
     invites: [],
     audit: [],
+    accounts: [],
+    transactions: [],
     session: null,
     challenges: new Set(),
     failedLogins: 0,

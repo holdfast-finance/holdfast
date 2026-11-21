@@ -25,6 +25,14 @@ import {
   type MockCredential,
   type MockUser,
 } from '@/mocks/db'
+import {
+  decodeCursor,
+  encodeCursor,
+  filterFromParams,
+  matching,
+  newestFirst,
+  totalsByCurrency,
+} from '@/mocks/ledger'
 
 /*
  * MSW handlers mirroring docs/phases/PHASE-1-contract.md "API contract", backed by `./db.ts`.
@@ -709,5 +717,31 @@ export const handlers = [
       },
       { owner: true },
     ),
+  ),
+
+  // Accounts and transactions (read-only; docs: U1a). Any signed-in member may read.
+  http.get(
+    path('/accounts'),
+    authed(() => HttpResponse.json({ items: db.accounts })),
+  ),
+  http.get(
+    path('/transactions/summary'),
+    authed(({ request }) => {
+      const filters = filterFromParams(new URL(request.url).searchParams)
+      return HttpResponse.json({ totals: totalsByCurrency(matching(filters)) })
+    }),
+  ),
+  http.get(
+    path('/transactions'),
+    authed(({ request }) => {
+      const url = new URL(request.url)
+      const filters = filterFromParams(url.searchParams)
+      const limit = Math.min(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 200)
+      const start = decodeCursor(url.searchParams.get('cursor'))
+      const rows = newestFirst(matching(filters))
+      const items = rows.slice(start, start + limit)
+      const next = start + limit < rows.length ? encodeCursor(start + limit) : null
+      return HttpResponse.json({ items, next_cursor: next })
+    }),
   ),
 ]
