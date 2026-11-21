@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.db_context import is_household_wide
 from app.domain.category_precedence import can_replace_category
 from app.domain.ledger_rules import (
     LedgerRuleError,
@@ -313,6 +314,38 @@ class LedgerWriter:
     async def mark_transfer_pair(self, a_id: uuid.UUID, b_id: uuid.UUID) -> uuid.UUID:
         """Link two transactions as the two legs of one transfer. Returns the group id."""
         user = self._require_user()
+        return await self._pair(a_id, b_id, "ledger.transfer_paired", user, {})
+
+    async def apply_transfer_pair(
+        self, a_id: uuid.UUID, b_id: uuid.UUID, *, job_run_id: uuid.UUID | None = None
+    ) -> uuid.UUID:
+        """Automated pairing (the transfer matcher). Same checks as ``mark_transfer_pair`` plus a
+        re-check after the lock: neither leg may be pending, and neither may be a one-legged
+        transfer a person marked since the matcher loaded it.
+
+        Needs an acting ``user_id`` or a household-wide (system job) session, so a request handler
+        cannot call it as "the system". Audited as ``ledger.transfer_auto_paired``.
+        """
+        if self._user_id is None and not await is_household_wide(self._s):
+            raise LedgerRuleError("automatic pairing needs an acting user or a system job session")
+        detail: dict[str, object] = {
+            "actor": "transfer_matcher",
+            "job_run_id": None if job_run_id is None else str(job_run_id),
+        }
+        return await self._pair(
+            a_id, b_id, "ledger.transfer_auto_paired", self._user_id, detail, auto=True
+        )
+
+    async def _pair(
+        self,
+        a_id: uuid.UUID,
+        b_id: uuid.UUID,
+        action: str,
+        user: uuid.UUID | None,
+        extra: dict[str, object],
+        *,
+        auto: bool = False,
+    ) -> uuid.UUID:
         if a_id == b_id:
             raise TransferPairError("a transfer pairs two different transactions")
         rows = await self._lock_group([a_id, b_id])
@@ -321,15 +354,16 @@ class LedgerWriter:
             self._require_live(leg)
             if leg.transfer_group_id is not None:
                 raise TransferPairError("transaction is already in a transfer pair")
+            if auto and (leg.is_pending or leg.is_transfer):
+                raise TransferPairError("transaction changed since it was matched")
         await self._check_pair(a, b)
         group = uuid.uuid4()
         for leg in (a, b):
             leg.is_transfer = True
             leg.transfer_group_id = group
         await self._flush()
-        self._audit(
-            "ledger.transfer_paired", a_id, {"group_id": str(group), "other": str(b_id)}, user
-        )
+        detail: dict[str, object] = {"group_id": str(group), "other": str(b_id), **extra}
+        self._audit(action, a_id, detail, user)
         return group
 
     async def mark_transfer_single(self, transaction_id: uuid.UUID) -> None:
@@ -533,7 +567,11 @@ class LedgerWriter:
         )
 
     def _audit(
-        self, action: str, transaction_id: uuid.UUID, detail: dict[str, object], user: uuid.UUID
+        self,
+        action: str,
+        transaction_id: uuid.UUID,
+        detail: dict[str, object],
+        user: uuid.UUID | None,
     ) -> None:
         audit.add(
             self._s,

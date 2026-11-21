@@ -16,7 +16,10 @@ SCANNED = ("api", "services", "domain", "security")
 # Paths relative to app/. Add a worker/job module here only with a comment saying why it needs
 # the household-wide view. app/db_context.py (where the flag is defined) sits outside SCANNED.
 ALLOWED: frozenset[str] = frozenset()
-WIDE = re.compile(r"household_wide\s*=\s*True|set_config\(\s*'app\.household_wide'")
+WIDE = re.compile(
+    r"household_wide\s*=\s*True|set_config\(\s*'app\.household_wide'"
+    r"|info\[\s*[\"']household_wide[\"']\s*\]\s*=\s*True"
+)
 
 
 def test_request_paths_never_set_household_wide() -> None:
