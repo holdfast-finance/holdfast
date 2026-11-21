@@ -1,15 +1,23 @@
 """Only ``LedgerService`` writes ledger money fields (ADR 0011, money review).
 
+**This is a lint over ``app/``, not a guarantee.** It cannot see dynamic code, ``getattr`` tricks
+or a database client outside ``app/``. The real enforcement is RLS and the database CHECKs and
+triggers; this keeps honest code on the one reviewed write path.
+
 AST scan of every module under ``app/`` except the writer. It flags:
 
-- constructing ``Transaction`` / ``TransactionSplit``, or passing them to insert/update/delete;
-- assigning (also ``+=``, ``setattr``) ``is_transfer``, ``transfer_group_id``, ``category_source``
-  anywhere, and ``amount`` / ``category_id`` in modules that reference those models;
+- constructing ``Transaction`` / ``TransactionSplit``, ``Model.__table__``, or passing a model to
+  insert/update/delete/merge;
+- in modules that touch the models: ``merge``, ``add_all``, ``delete``, ``bulk_*_mappings``,
+  ``bulk_save_objects`` and relationship ``append``/``remove``/``clear``/``extend``;
+- assigning (also ``+=``, ``setattr``) ``is_transfer``, ``transfer_group_id``, ``category_source``,
+  ``superseded_by_id`` anywhere, and ``amount`` / ``category_id`` in modules that touch the models;
 - the same names as ``.values(...)`` / ``set_=`` keywords or dict keys;
-- raw SQL writing to the ``transaction`` or ``transaction_split`` tables.
+- raw SQL (also concatenated or f-string, schema-qualified, quoted) that INSERTs, UPDATEs
+  (``ONLY``), DELETEs, MERGEs, COPYs or TRUNCATEs a ledger table.
 
 Reads (``select(Transaction)``, ``Transaction.amount > 0``) are fine. Tests of the scanner itself
-show a router-style write is caught.
+show each bypass form is caught.
 """
 
 from __future__ import annotations
@@ -23,12 +31,21 @@ WRITER = "services/ledger_service.py"
 ALLOWED: frozenset[str] = frozenset({WRITER})
 
 MODELS = frozenset({"Transaction", "TransactionSplit"})
-ALWAYS = frozenset({"is_transfer", "transfer_group_id", "category_source"})
+ALWAYS = frozenset({"is_transfer", "transfer_group_id", "category_source", "superseded_by_id"})
 IF_MODELS_TOUCHED = frozenset({"amount", "category_id"})
 WRITE_FNS = frozenset({"insert", "pg_insert", "update", "delete", "merge"})
 VALUE_CALLS = frozenset({"values", "update", "on_conflict_do_update"})
+SESSION_NAMES = frozenset({"s", "session", "sess", "db", "_s", "_session"})
+SESSION_WRITES = frozenset(
+    {"merge", "add_all", "delete", "bulk_insert_mappings", "bulk_update_mappings"}
+    | {"bulk_save_objects"}
+)
+# Relationship collections (txn.splits.append(...)); a bare local list is fine.
+COLLECTION_OPS = frozenset({"append", "remove", "clear", "extend"})
 RAW_SQL = re.compile(
-    r"\b(insert\s+into|update|delete\s+from)\s+\"?(transaction|transaction_split)\b", re.I
+    r"\b(insert\s+into|update|delete\s+from|merge\s+into|copy|truncate(\s+table)?)"
+    r"\s+(only\s+)?(\"?\w*\"?\s*\.\s*)?\"?(transaction|transaction_split)\"?(?![\w])",
+    re.I,
 )
 
 
@@ -37,6 +54,22 @@ def _callee(node: ast.expr) -> str | None:
         return node.id
     if isinstance(node, ast.Attribute):
         return node.attr
+    return None
+
+
+def _flatten(node: ast.AST) -> str | None:
+    """The literal text of a string expression (concatenation, f-string); None if not a string."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else " "
+            for v in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _flatten(node.left), _flatten(node.right)
+        if left is not None and right is not None:
+            return left + right
     return None
 
 
@@ -69,6 +102,11 @@ def violations(source: str) -> list[str]:
         )
 
     found: list[str] = []
+    docstrings = {
+        id(n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+    }
 
     def hit(node: ast.AST, why: str) -> None:
         found.append(f"line {getattr(node, 'lineno', '?')}: {why}")
@@ -83,8 +121,17 @@ def violations(source: str) -> list[str]:
                     stack.extend(t.elts)
                 elif isinstance(t, ast.Attribute) and t.attr in protected:
                     hit(node, f"assigns .{t.attr}")
-        elif isinstance(node, ast.Call):
+        if isinstance(node, ast.Attribute) and node.attr == "__table__" and mentions_model(node):
+            hit(node, "uses a ledger model's __table__")
+        if isinstance(node, ast.Call):
             name = _callee(node.func)
+            if touches and isinstance(node.func, ast.Attribute):
+                recv = node.func.value
+                recv_name = recv.id if isinstance(recv, ast.Name) else _callee(recv)
+                on_session = recv_name in SESSION_NAMES
+                on_collection = name in COLLECTION_OPS and not isinstance(recv, ast.Name)
+                if (name in SESSION_WRITES and on_session) or on_collection:
+                    hit(node, f".{name}() in a module that touches the ledger models")
             if name in model_names:
                 hit(node, f"constructs {name}")
             if name in write_fns and any(mentions_model(a) for a in node.args):
@@ -109,12 +156,13 @@ def violations(source: str) -> list[str]:
                         for k in arg.keys:
                             if isinstance(k, ast.Constant) and k.value in protected:
                                 hit(node, f"{name}({{{k.value!r}: ...}})")
-        elif (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and RAW_SQL.search(node.value)
+        if (
+            isinstance(node, ast.Constant | ast.JoinedStr | ast.BinOp)
+            and id(node) not in docstrings
         ):
-            hit(node, "raw SQL write to a ledger table")
+            text = _flatten(node)
+            if text is not None and RAW_SQL.search(text):
+                hit(node, "raw SQL write to a ledger table")
     return found
 
 
@@ -176,6 +224,36 @@ def test_scanner_detects_each_bypass_form() -> None:
         "q.values({'transfer_group_id': g})": "values({'transfer_group_id': ...})",
         "db.execute(text('UPDATE transaction SET amount = 0'))": "raw SQL",
         "db.execute(text('insert into transaction_split (id) values (1)'))": "raw SQL",
+        "x.superseded_by_id = other": "assigns .superseded_by_id",
+        "q.values(superseded_by_id=x)": "values(superseded_by_id=...)",
+        "from app.models import Transaction\nTransaction.__table__.insert()": "__table__",
+        "from app.models import TransactionSplit\nTransactionSplit.__table__.c": "__table__",
+        "from app.models import Transaction\nsession.bulk_insert_mappings(Transaction, rows)": (
+            ".bulk_insert_mappings()"
+        ),
+        "from app.models import Transaction\nsession.bulk_update_mappings(Transaction, r)": (
+            ".bulk_update_mappings()"
+        ),
+        "from app.models import Transaction\nsession.bulk_save_objects(rows)": (
+            ".bulk_save_objects()"
+        ),
+        "from app.models import Transaction\ns.merge(t)": ".merge()",
+        "from app.models import Transaction\ns.add_all(rows)": ".add_all()",
+        "from app.models import Transaction\nsession.delete(t)": ".delete()",
+        "from app.models import Transaction\nt.splits.append(x)": ".append()",
+        "from app.models import Transaction\nt.splits.remove(x)": ".remove()",
+        "from app.models import Transaction\nt.splits.clear()": ".clear()",
+        "db.execute(text('UPDATE ONLY transaction SET amount = 0'))": "raw SQL",
+        "db.execute(text('MERGE INTO transaction t USING x ON true'))": "raw SQL",
+        "db.execute(text('COPY transaction FROM stdin'))": "raw SQL",
+        "db.execute(text('TRUNCATE transaction'))": "raw SQL",
+        "db.execute(text('TRUNCATE TABLE transaction_split'))": "raw SQL",
+        "db.execute(text('UPDATE public.transaction SET x=1'))": "raw SQL",
+        'db.execute(text(\'UPDATE "public"."transaction" SET x=1\'))': "raw SQL",
+        "db.execute(text('DELETE FROM \"transaction\"'))": "raw SQL",
+        "db.execute(text('UPDATE ' + 'transaction SET x=1'))": "raw SQL",
+        "db.execute(text(f'UPDATE transaction SET x={v}'))": "raw SQL",
+        "db.execute(text(f'insert into {schema}.transaction_split values (1)'))": "raw SQL",
     }
     for src, expect in cases.items():
         found = violations(src)
@@ -189,6 +267,11 @@ def test_scanner_allows_reads_and_unrelated_amounts() -> None:
         "run.opening_balance = 1\nbudget_line.amount = 2",  # no ledger model in sight
         "class Out:\n    is_transfer: bool\n    amount: str",
         "db.execute(text('select * from transaction'))",
+        "from app.models import Transaction\nrows = []\nrows.append(1)\nrows.clear()",
+        "from app.models import Transaction\nsa.delete(Account)",
+        "db.execute(text('UPDATE account SET x=1'))",
+        "db.execute(text('update transaction_import SET x=1'))",
+        '"""Doc: we update transaction rows via the service."""',
     ]
     for src in clean:
         assert violations(src) == [], src

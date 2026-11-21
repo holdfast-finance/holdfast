@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
+from app.domain.ledger_rules import InvalidAmountError
 from app.domain.statement_parse import ParsedStatement, detect_profile, parse_statement
 from app.importers.profile_loader import load_profiles
 from app.models import Account, Document, ImportRun, Transaction
@@ -212,3 +214,18 @@ async def test_person_import_owns_a_private_account_and_a_stranger_makes_no_twin
     with pytest.raises(AccountNotVisibleError):
         await import_statement(factory, household, st, _meta(31), person_id=sam)
     assert await _count(factory, household, Account) == 1
+
+
+async def test_amount_with_more_than_two_decimals_fails_the_import_and_stores_nothing(
+    factory: async_sessionmaker[AsyncSession], household: uuid.UUID
+) -> None:
+    st = _parse(DEBIT)
+    block = st.blocks[0]
+    bad_txn = dataclasses.replace(block.txns[0], amount=Decimal("-1.005"))
+    bad = dataclasses.replace(
+        st, blocks=(dataclasses.replace(block, txns=(bad_txn, *block.txns[1:])), *st.blocks[1:])
+    )
+    with pytest.raises(InvalidAmountError):
+        await import_statement(factory, household, bad, _meta(9), household_wide=True)
+    for model in (Transaction, ImportRun, Account, Document):
+        assert await _count(factory, household, model) == 0

@@ -7,8 +7,9 @@ instead of an ``IntegrityError`` at commit.
 - Amounts are ``Decimal``, finite, exactly two decimal places or fewer, and fit ``NUMERIC(14,2)``.
   Outflow is negative, inflow positive; a float (or a bool) is rejected, never coerced.
 - Splits sum to the parent amount **exactly**, and each part has the parent's sign (no zero parts).
-- A transfer pair is two legs: different transactions on different accounts, opposite signs, one
-  currency, one household. Amounts are never summed across currencies.
+- A transfer pair is two legs: different transactions on different accounts, opposite signs, equal
+  magnitude, one currency, one household (fees and conversions need an ADR first). Amounts
+  are never summed across currencies.
 """
 
 from __future__ import annotations
@@ -96,3 +97,5 @@ def validate_transfer_pair(a: TransferLeg, b: TransferLeg) -> None:
         raise TransferPairError("transfer legs must share a currency")
     if not ((a.amount < ZERO < b.amount) or (b.amount < ZERO < a.amount)):
         raise TransferPairError("transfer legs must have opposite signs")
+    if abs(a.amount) != abs(b.amount):
+        raise TransferPairError("transfer legs must have equal amounts")

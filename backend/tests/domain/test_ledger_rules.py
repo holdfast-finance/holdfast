@@ -90,8 +90,15 @@ HH = uuid.uuid4()
 A1, A2 = uuid.uuid4(), uuid.uuid4()
 
 
-def test_valid_pair_passes_even_when_magnitudes_differ() -> None:
-    validate_transfer_pair(_leg("-100.00", A1), _leg("99.50", A2))
+def test_valid_pair_passes() -> None:
+    validate_transfer_pair(_leg("-100.00", A1), _leg("100.00", A2))
+
+
+def test_unequal_magnitudes_are_rejected() -> None:
+    with pytest.raises(TransferPairError):
+        validate_transfer_pair(_leg("-500.00", A1), _leg("2000.00", A2))
+    with pytest.raises(TransferPairError):
+        validate_transfer_pair(_leg("-100.00", A1), _leg("99.99", A2))
 
 
 @pytest.mark.parametrize(

@@ -59,6 +59,8 @@ def create_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(
         settings.sqlalchemy_url,
         pool_pre_ping=True,
+        # Keep statement parameters (amounts, descriptions) out of every error message and log.
+        hide_parameters=True,
         connect_args={"connect_timeout": CONNECT_TIMEOUT_SECONDS},
     )
 

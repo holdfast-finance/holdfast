@@ -64,3 +64,12 @@ The e2e hooks gate (`APP_ENV=test` AND `E2E_HOOKS=true`) is enforced twice, fail
 - Follow-ups: Harbor wires `make lint-imports` into CI (`.github/` is Harbor's lane). Later epics may
   add contracts for `app.agent` (read-only `v_*` views, hard rule 5) and `app.tax` isolation
   (hard rule 14). `app/services/` gained an `__init__.py` so the linter can treat it as a package.
+
+## Addendum: one writer of ledger money fields (C1)
+`app.services.ledger_service.LedgerService` is the only code that creates a `Transaction` or
+`TransactionSplit` or sets `amount`, `category_id`/`category_source`, `is_transfer`,
+`transfer_group_id` or `superseded_by_id`. `backend/tests/test_ledger_single_writer.py` enforces
+that with an AST scan of `app/`. It is a **lint, not a guarantee**: it can't see dynamic code or a
+client outside `app/`. The enforcement that holds is RLS plus the database CHECKs and triggers
+(transfer group shape, split balance, supersession, import-run guard). Transfer pairs require equal
+magnitude and one currency; fee-bearing or cross-currency transfers need their own ADR first.
