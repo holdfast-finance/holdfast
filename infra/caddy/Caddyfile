@@ -7,6 +7,9 @@
 	admin localhost:2019
 	auto_https disable_redirects
 	skip_install_trust
+	# A TLS-terminating proxy on the same host (for example Tailscale Serve) connects by IP and
+	# sends no server name. Answer those connections with this site's certificate.
+	default_sni {$APP_HOST:localhost}
 }
 
 {$APP_HOST:localhost} {
