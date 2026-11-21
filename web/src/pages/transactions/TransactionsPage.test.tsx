@@ -74,9 +74,9 @@ describe('Transactions page, desktop', () => {
 
   it('groups rows by day under date headers and badges pending, transfer and review rows', async () => {
     open('/transactions?from=2026-11-18&to=2026-11-20')
-    const heading = await screen.findByRole('heading', { level: 3, name: 'Fri, Nov 20, 2026' })
+    const heading = await screen.findByRole('heading', { level: 2, name: 'Fri, Nov 20, 2026' })
     expect(heading).toBeInTheDocument()
-    expect(screen.getByRole('heading', { level: 3, name: 'Thu, Nov 19, 2026' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: 'Thu, Nov 19, 2026' })).toBeInTheDocument()
     const rows = within(
       await screen.findByRole('region', { name: 'Fri, Nov 20, 2026' }),
     ).getAllByRole('listitem')
@@ -286,5 +286,35 @@ describe('Transactions page, 375px', () => {
     await userEvent.click(screen.getByRole('button', { name: /Accounts/ }))
     const sheet = await screen.findByRole('dialog', { name: 'Accounts' })
     expect(within(sheet).getByRole('checkbox', { name: /Everyday checking/ })).toBeInTheDocument()
+  })
+})
+
+describe('Transactions page, tablet and small laptop widths', () => {
+  it.each([768, 1000, 1150])('keeps accounts and filters in sheets at %ipx', async (width) => {
+    mockViewport(width)
+    open()
+    await firstRows()
+    expect(
+      screen.queryByRole('complementary', { name: 'Accounts and filters' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Filters/ })).toBeInTheDocument()
+  })
+
+  it('warns that totals include transfers, and drops the note once they are hidden', async () => {
+    mockViewport(375)
+    open()
+    expect(
+      await screen.findByText(/Totals include transfers and pending items/),
+    ).toBeInTheDocument()
+  })
+
+  it('refuses an amount with more than 12 integer digits', async () => {
+    mockViewport(1280)
+    const { router } = open()
+    await firstRows()
+    await userEvent.type(screen.getByLabelText('Min amount'), '1234567890123')
+    expect(await screen.findByText(/Use a plain amount/)).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 450))
+    expect(router.state.location.search).not.toContain('min=')
   })
 })

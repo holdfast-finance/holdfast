@@ -8,7 +8,7 @@ import { ResponsiveSheet } from '@/components/ResponsiveSheet'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { useIsDesktop } from '@/hooks/useBreakpoint'
+import { useIsWide } from '@/hooks/useBreakpoint'
 import { AccountsPanel, AccountsSkeleton } from './AccountsPanel'
 import { FiltersForm } from './FiltersForm'
 import {
@@ -36,7 +36,7 @@ function SearchBox({ value, onCommit }: { value: string; onCommit: (q: string) =
     }
   }, [text, value, onCommit])
   return (
-    <div className="relative min-w-full flex-1 md:min-w-0">
+    <div className="relative min-w-full flex-1 min-[1200px]:min-w-0">
       <Search
         aria-hidden="true"
         className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
@@ -56,7 +56,7 @@ function SearchBox({ value, onCommit }: { value: string; onCommit: (q: string) =
 }
 
 export function TransactionsPage() {
-  const isDesktop = useIsDesktop()
+  const isWide = useIsWide()
   const [params, setParams] = useSearchParams()
   const filters = useMemo(() => readFilters(params), [params])
   // Bumped by "Clear all" so the uncontrolled search box and filter form restart from the URL.
@@ -162,8 +162,8 @@ export function TransactionsPage() {
         <p className="text-sm text-muted-foreground">Everything you have imported, newest first.</p>
       </header>
 
-      <div className="grid gap-6 md:grid-cols-[17rem_minmax(0,1fr)] md:items-start">
-        {isDesktop && (
+      <div className="grid gap-6 min-[1200px]:grid-cols-[17rem_minmax(0,1fr)] min-[1200px]:items-start">
+        {isWide && (
           <aside
             aria-label="Accounts and filters"
             className="flex flex-col gap-6 rounded-card border border-border bg-card p-3"
@@ -188,7 +188,7 @@ export function TransactionsPage() {
                 update({ q })
               }}
             />
-            {!isDesktop && (
+            {!isWide && (
               <>
                 <Button
                   variant="outline"
@@ -227,6 +227,7 @@ export function TransactionsPage() {
               totals={summary.data}
               loading={summary.isPending}
               failed={summary.isError}
+              hideTransfers={filters.hideTransfers}
             />
           )}
 
@@ -234,7 +235,7 @@ export function TransactionsPage() {
         </div>
       </div>
 
-      {!isDesktop && (
+      {!isWide && (
         <>
           <ResponsiveSheet
             open={sheet === 'accounts'}

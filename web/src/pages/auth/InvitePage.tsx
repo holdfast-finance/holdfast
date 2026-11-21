@@ -86,7 +86,7 @@ export function InvitePage() {
           The link works once and expires after 24 hours. Already in?{' '}
           <Link
             to="/login"
-            className="inline-flex min-h-11 items-center text-primary-text underline-offset-4 hover:underline"
+            className="inline-flex min-h-11 min-w-11 items-center text-primary-text underline-offset-4 hover:underline"
           >
             Sign in
           </Link>

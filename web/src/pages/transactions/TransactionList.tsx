@@ -23,16 +23,16 @@ function Row({ t, account }: { t: Transaction; account: Account | undefined }) {
   const inflow = parseMoney(t.amount).isPositive() && !parseMoney(t.amount).isZero()
   const outflow = parseMoney(t.amount).isNegative()
   return (
-    <li className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-border px-3 py-3 md:min-h-11 md:grid-cols-[minmax(0,1fr)_13rem_auto_10rem] md:items-center md:gap-y-0 md:py-2">
+    <li className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-border px-3 py-3 min-[1200px]:min-h-11 min-[1200px]:grid-cols-[minmax(8rem,1fr)_11rem_auto_9rem] min-[1200px]:items-center min-[1200px]:gap-y-0 min-[1200px]:py-2">
       <span className="min-w-0 truncate text-sm font-medium">{t.description}</span>
-      <span className="col-start-2 row-span-2 row-start-1 flex items-center justify-end gap-1 self-center text-right text-sm md:col-start-4 md:row-span-1 md:row-start-auto">
+      <span className="col-start-2 row-span-2 row-start-1 flex items-center justify-end gap-1 self-center text-right text-sm min-[1200px]:col-start-4 min-[1200px]:row-span-1 min-[1200px]:row-start-auto">
         {inflow && <ArrowDownLeft aria-hidden="true" className="size-3.5 text-success-text" />}
         {outflow && <ArrowUpRight aria-hidden="true" className="size-3.5 text-muted-foreground" />}
         <span className="sr-only">{inflow ? 'Inflow ' : outflow ? 'Outflow ' : ''}</span>
         <Money amount={t.amount} currency={t.currency} showPlus />
       </span>
-      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 md:contents">
-        <span className="min-w-0 truncate text-xs text-muted-foreground md:text-sm">
+      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 min-[1200px]:contents">
+        <span className="min-w-0 truncate text-xs text-muted-foreground min-[1200px]:text-sm">
           {account
             ? `${account.name}${account.mask ? ` ··${account.mask}` : ''}`
             : 'Unknown account'}
@@ -69,12 +69,12 @@ export function TransactionList({
         const headingId = `day-${group.date}`
         return (
           <section key={group.date} aria-labelledby={headingId}>
-            <h3
+            <h2
               id={headingId}
-              className="sticky top-14 z-10 border-b border-border bg-background px-3 py-2 text-xs font-medium tracking-wide text-muted-foreground uppercase md:top-0"
+              className="sticky top-[calc(3rem+env(safe-area-inset-top))] z-10 border-b border-border bg-background px-3 py-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase lg:top-0"
             >
               {formatDay(group.date)}
-            </h3>
+            </h2>
             <ul>
               {group.rows.map((t) => (
                 <Row key={t.id} t={t} account={byId.get(t.account_id)} />

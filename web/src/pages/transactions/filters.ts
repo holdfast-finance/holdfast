@@ -12,7 +12,7 @@ import { parseMoney } from '@/lib/money'
  */
 
 export const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
-export const AMOUNT_PATTERN = /^-?\d+(\.\d{1,2})?$/
+export const AMOUNT_PATTERN = /^-?\d{1,12}(\.\d{1,2})?$/
 
 export interface ViewFilters {
   accounts: string[]

@@ -6,7 +6,7 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
   return (
     <div className="flex flex-col gap-0.5">
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm font-medium md:text-base">{children}</dd>
+      <dd className="min-w-0 text-sm font-medium break-words">{children}</dd>
     </div>
   )
 }
@@ -16,10 +16,12 @@ export function SummaryStrip({
   totals,
   loading,
   failed,
+  hideTransfers,
 }: {
   totals: CurrencyTotals[] | undefined
   loading: boolean
   failed: boolean
+  hideTransfers: boolean
 }) {
   return (
     <section
@@ -45,7 +47,7 @@ export function SummaryStrip({
           <div className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             {t.currency}
           </div>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 min-[1200px]:grid-cols-4">
             <Stat label="Inflow">
               <Money amount={t.inflow} currency={t.currency} showPlus />
             </Stat>
@@ -61,6 +63,12 @@ export function SummaryStrip({
           </dl>
         </div>
       ))}
+      {totals && totals.length > 0 && !hideTransfers && (
+        <p className="text-xs text-muted-foreground">
+          Totals include transfers and pending items. A card payment shows as outflow on one account
+          and inflow on the other. Hide transfers to net those out.
+        </p>
+      )}
     </section>
   )
 }

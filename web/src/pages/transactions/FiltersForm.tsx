@@ -58,7 +58,7 @@ export function FiltersForm({
   const { errors } = form.formState
   return (
     <form
-      className="grid grid-cols-2 gap-x-3 gap-y-4 md:grid-cols-1"
+      className="grid grid-cols-2 gap-x-3 gap-y-4 min-[1200px]:grid-cols-1"
       aria-label="Transaction filters"
       onSubmit={(e) => {
         e.preventDefault()
@@ -71,7 +71,7 @@ export function FiltersForm({
       <Field label="To" error={errors.to?.message}>
         {(p) => <Input type="date" {...p} {...form.register('to')} />}
       </Field>
-      <Field label="Direction" className="col-span-2 md:col-span-1">
+      <Field label="Direction" className="col-span-2 min-[1200px]:col-span-1">
         {(p) => (
           <NativeSelect {...p} {...form.register('direction')}>
             <option value="">All</option>
@@ -86,10 +86,10 @@ export function FiltersForm({
       <Field label="Max amount" error={errors.max?.message}>
         {(p) => <Input inputMode="decimal" placeholder="-50" {...p} {...form.register('max')} />}
       </Field>
-      <p className="col-span-2 -mt-2 text-xs text-muted-foreground md:col-span-1">
+      <p className="col-span-2 -mt-2 text-xs text-muted-foreground min-[1200px]:col-span-1">
         Amounts are signed: outflow is negative, so -200 to -50 means spending between $50 and $200.
       </p>
-      <label className="col-span-2 flex min-h-11 cursor-pointer items-center gap-3 md:col-span-1">
+      <label className="col-span-2 flex min-h-11 cursor-pointer items-center gap-3 min-[1200px]:col-span-1">
         <input
           type="checkbox"
           className="size-5 shrink-0 accent-primary"
