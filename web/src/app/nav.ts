@@ -2,6 +2,7 @@ import {
   ArrowLeftRight,
   Coins,
   FileText,
+  FileUp,
   Gauge,
   Landmark,
   LayoutDashboard,
@@ -20,6 +21,7 @@ export type PageId =
   | 'accounts'
   | 'sync-health'
   | 'transactions'
+  | 'import'
   | 'budgets'
   | 'forecast'
   | 'investments'
@@ -77,6 +79,14 @@ export const PAGES: Record<PageId, PageDef> = {
     icon: ArrowLeftRight,
     phase: '4',
     summary: 'Search, filters, bulk recategorize, splits, rules and receipts.',
+  },
+  import: {
+    id: 'import',
+    path: '/import',
+    label: 'Import',
+    icon: FileUp,
+    phase: '3',
+    summary: 'Upload a statement PDF, see it reconcile, and review what did not.',
   },
   budgets: {
     id: 'budgets',
@@ -156,6 +166,7 @@ export const PAGES: Record<PageId, PageDef> = {
 export const SIDEBAR_PRIMARY: PageId[] = [
   'overview',
   'transactions',
+  'import',
   'budgets',
   'forecast',
   'investments',
@@ -177,6 +188,7 @@ export const SIDEBAR_SECONDARY: PageId[] = [
 export const MOBILE_TABS: PageId[] = ['overview', 'transactions', 'budgets', 'advisor']
 
 export const MOBILE_MORE: PageId[] = [
+  'import',
   'forecast',
   'investments',
   'crypto',

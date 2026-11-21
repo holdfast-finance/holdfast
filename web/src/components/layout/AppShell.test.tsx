@@ -48,6 +48,7 @@ describe('AppShell layout', () => {
     ).toEqual([
       'Overview',
       'Transactions',
+      'Import',
       'Budgets',
       'Forecast',
       'Investments',
@@ -60,7 +61,8 @@ describe('AppShell layout', () => {
 
   it.each(
     Object.values(PAGES).filter(
-      (p) => p.id !== 'overview' && p.id !== 'settings' && p.id !== 'transactions',
+      (p) =>
+        p.id !== 'overview' && p.id !== 'settings' && p.id !== 'transactions' && p.id !== 'import',
     ),
   )('routes $path to a placeholder for Phase $phase', async (page) => {
     mockViewport(1440)
