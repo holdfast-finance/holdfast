@@ -1,6 +1,6 @@
 # ADR 0021 PA0 spike results (Harbor)
 
-Status: in progress (written incrementally; the final table at the top is updated last).
+Status: complete except where marked NOT RUN. Two runs: the first was interrupted by a host restart.
 Date: 2026-11-21. Names are placeholders: `<node>.<tailnet>.ts.net`, `100.x.x.x`. No real tailnet name,
 address, login name or avatar URL appears here (ADR 0019 style).
 
@@ -18,6 +18,23 @@ address, login name or avatar URL appears here (ADR 0019 style).
   `curl https://<node>.<tailnet>.ts.net/` (real Let's Encrypt cert, no `-k`).
 - Serve configs are files mounted read-only at `/config` and selected with `TS_SERVE_CONFIG`
   (containerboot substitutes `${TS_CERT_DOMAIN}`).
+
+## Summary
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Serve TCP + PROXY v2, TCP upstream, real peer address | PASS |
+| 2 | Same to a unix socket | FAIL with PROXY v2 (unix forwarding without PROXY works) |
+| 3 | Serve HTTPS proxy and forged `X-Forwarded-For` | PASS: overwritten, not appended |
+| 4 | LocalAPI shared read-only into non-root container | PASS, with UID and inventory caveats |
+| 5 | Wrapper gating, no log upload, cap-drop, non-root | PASS, plus the 60 s sign-in exit finding |
+| 6 | Name and IP stability | PARTIAL: restart keeps name and IP; re-auth, lost state, removal NOT RUN (owner) |
+| 7 | HTTPS certificate and MagicDNS | PARTIAL: cert obtained and serving; default-off NOT OBSERVABLE here |
+| 8 | Free-plan limits | PASS (figures recorded; shared-in counting not stated by the docs) |
+| 9 | tsnet needed? | NO, from 1, 3 and 4 |
+| 10 | WebAuthn and `Secure` cookie on `http://localhost` | Chromium PASS; Firefox cookie/secure-context PASS, WebAuthn NOT RUN; WebKit NOT RUN; Safari, Edge NOT RUN (owner) |
+| 11 | Docker floor | PASS: 28.0.0 (28.3.3 recommended) |
+| 12 | Restart with control plane unreachable | Serving continues without restart; FAILS after restart |
 
 ## Results
 
@@ -127,8 +144,9 @@ namespace so a `tcpdump` container (`NET_RAW`, own container) sees all of its pa
   `TS_AUTHKEY` and nobody signing in, dies with `failed to auth tailscale: tailscale up failed:
   context deadline exceeded` (exit 1) at +60 s. With a restart policy this loops and mints a new login
   URL each time. The wrapper must therefore (a) not run `containerboot` until consent, and (b) after
-  consent, either keep restarting it (accept new URLs) or, better, run `tailscaled` directly and call
-  `tailscale up --timeout=0`/`login` itself so one URL stays valid until the user signs in. The
+  consent, either keep restarting it (accept new URLs) or run `tailscaled` directly and call
+  `tailscale up`/`login` itself so one URL stays valid until the user signs in (untested here beyond
+  the earlier direct-`tailscaled` run). The
   earlier hfspike run used direct `tailscaled` for this reason. The wrapper must also forward SIGTERM.
 - **Flag gating: PASS.** Wrapper (`sh`, ~15 lines, `--entrypoint /bin/sh`, flag on a read-only
   volume, `containerboot` started only after `/run/flag/enabled` exists): with no flag, 30 s of
@@ -162,3 +180,137 @@ namespace so a `tcpdump` container (`NET_RAW`, own container) sees all of its pa
 Meaning: the wrapper design in §1 is feasible with stock parts, but it must not wrap `containerboot`
 naively for the sign-in phase (60 s exit). Hardening: all of cap-drop, read-only root, no-new-privileges
 and no log upload are supported; non-root is feasible but forces a UID plan.
+
+### 6. Name and address stability: PARTIAL
+
+- **Restart with state kept: PASS.** `docker restart` of the node (and the first host-restart
+  recovery of the earlier run) kept the same FQDN and the same tailnet IPv4. State volume reuse also meant
+  the owner approved the node only once.
+- **Re-auth after key expiry, lost state, old node removed: NOT RUN.** They need the owner's admin
+  console. Docs read (https://tailscale.com/kb/1098/machine-names, retrieved 2026-11-21): when a device
+  with the same name already exists, a new machine gets `<hostname>-1`, and keeps that name even after
+  the conflict is resolved. Key expiry (https://tailscale.com/kb/1028/key-expiry): default 180 days;
+  after expiry connections stop until re-authentication.
+  Exact owner steps: (a) admin console, Machines, `holdfast-spike`, Disable key expiry off then
+  "Expire key now", then on the container run `tailscale up` and sign in: record name and IP;
+  (b) stop the node, `docker volume rm hfspike_ts_state`, start a new node with the same hostname while
+  the old machine is still listed: expect `holdfast-spike-1`; (c) delete the old machine in the console,
+  recreate with the same hostname: record whether it reclaims `holdfast-spike`.
+Meaning: unchanged; multiple RP ids already make these outcomes recoverable.
+
+### 7. HTTPS certificates and MagicDNS: PARTIAL
+
+- The node obtained a real certificate: `TerminateTLS` in the serve config made tailscaled fetch a
+  Let's Encrypt certificate itself (files `<fqdn>.crt` and `.key` appeared in the state volume
+  `certs/`, plus `acme-account.key.pem`), and the host's curl validated it without `-k`. `tailscale cert
+  <fqdn>` does the same on demand. Status reports `CertDomains` (one entry) and
+  `CurrentTailnet.MagicDNSEnabled: true`.
+- **Default-off cannot be observed.** This tailnet already had MagicDNS and HTTPS on, so the "step 3
+  is one click" count is unverified. Docs (https://tailscale.com/kb/1153/enabling-https): admin console
+  DNS page, enable MagicDNS, "Enable HTTPS", acknowledge that machine names are published to the
+  Certificate Transparency ledger, then run `tailscale cert` on each machine.
+- **How the product detects it without a failing call:** read-only status has `CertDomains`. Empty
+  means HTTPS is off. The upstream CLI itself prints "HTTPS cert support is not enabled/configured for your
+  tailnet." in that case (`cmd/tailscale/cli/cert.go`, v1.104.7). The only server error text captured
+  here is for a wrong domain: `500 Internal Server Error: invalid domain "<x>"; must be one of ["<node>.<tailnet>.ts.net"]`.
+  The control-plane message for HTTPS-disabled was not captured (needs a fresh tailnet): NOT RUN, owner
+  action: a new test account, run `tailscale cert <fqdn>` before and after enabling HTTPS.
+- Serve's own enable-URL / `QueryFeature` flow was not exercised for the same reason.
+Meaning: the wizard should key off `CertDomains` and `MagicDNSEnabled`, deep-link the DNS admin page,
+and not call `cert` to probe.
+
+### 8. Free-plan limits: PASS (retrieved 2026-11-21)
+
+- https://tailscale.com/kb/1154/free-plan: "The Personal plan permits 6 free users in a single
+  Tailscale network ... You can also share devices with other users with node sharing."
+- https://tailscale.com/pricing, Personal: "$0 Free forever", "Unlimited user devices", "Up to 6 users",
+  "Up to 3 ACL groups", "Up to 50 tagged resources to start". Tagged resources are devices owned by a tag
+  (servers, routers); a node signed in by a user, as ours is, is a user device and unlimited.
+- Same page: the Personal plan "is only suitable for non-commercial use"; a tailnet on a public identity
+  domain (Gmail, Apple, personal GitHub) is treated as personal use, a custom domain as business with a trial.
+- Shared-in users: neither https://tailscale.com/kb/1084/sharing nor the pricing page states whether they
+  count toward the 6 users. The free-plan page lists node sharing as separate from the 6 users, and a
+  sharee belongs to their own tailnet, so it is likely they do not count. Not stated explicitly.
+Meaning: the vendor trigger "drops below 3 users" is not met (6 today). Update the ADR's wording from
+"3" to the measured 6. The non-commercial clause matters for Holdfast Cloud and for any business use,
+and should be in the docs. Do not give the sidecar a tag (it would become a counted tagged resource).
+
+### 9. Is tsnet needed? NO
+
+Items 1 (PROXY v2 to a TCP upstream works), 3 (fallback 1 valid) and 4 (read-only LocalAPI share works)
+all pass. tsnet is off the table. The only transport change is that the unix socket is gone (item 2):
+use the unpinned two-member `edge` network.
+
+### 10. `http://localhost:<port>`: WebAuthn and Secure cookie: PARTIAL
+
+Test page served by a loopback-only Python server on a random port (bound to 127.0.0.1), sending
+`Set-Cookie: sess=...; Secure` (and a second `Secure; HttpOnly; SameSite=Strict` cookie), then calling
+`navigator.credentials.create` and `get` with `rp.id = "localhost"`. Playwright-core 1.58.2.
+
+| Browser | Secure context | `Secure` cookie stored and sent back | WebAuthn create + get |
+|---|---|---|---|
+| Chromium 145.0.7632.6 (Linux) | true | PASS (both cookies stored, `Cookie` header seen by server) | PASS with a CDP virtual authenticator (ctap2, internal, resident key) |
+| Firefox 146.0.1 (Linux) | true | PASS (same) | NOT RUN: no virtual authenticator available through Playwright; `PublicKeyCredential` exists and the call was refused by the platform, which says nothing about the origin |
+| WebKit (Playwright build, Safari approximation) | NOT RUN | NOT RUN | NOT RUN: host libraries missing (libicu74, libjpeg-turbo8) and no sudo |
+| Safari (macOS), Edge (Windows) | NOT RUN | NOT RUN | NOT RUN: owner's macOS and Windows hosts |
+
+Note: Chromium needed focus emulation (`Emulation.setFocusEmulationEnabled`) for WebAuthn in headless
+mode. Meaning: the localhost-first design (§3) holds for Chromium and Firefox's cookie behaviour. The
+Safari question (open question 2) stays open until a macOS run.
+
+### 11. Docker floor: PASS (retrieved 2026-11-21)
+
+- https://docs.docker.com/engine/release-notes/28/: **28.0.0 (2025-02-19)**: "Fix a security issue that
+  was allowing remote hosts to connect directly to a container on its published ports" and "Fix a security
+  issue that was allowing neighbor hosts to connect to ports mapped on a loopback address"
+  (moby/moby#49325). Not present in the 27 release notes.
+- **28.3.3 (2025-07-29)** fixes a regression: after a firewalld reload, published ports meant for loopback
+  only could be reached from the local network (CVE-2025-54388, moby/moby#50506). So the real floor is
+  **28.3.3**, not 28.0.
+- Shipped versions (package pages, retrieved 2026-11-21): Debian 12 `docker.io` 20.10.24 (below floor);
+  Debian 13 `docker.io` 26.1.5 (below floor); Ubuntu 24.04 `docker.io` 29.1.3 in noble-updates (above floor;
+  the release pocket is older); Fedora 43 `moby-engine` 29.9.3 (above); Docker Desktop 4.100.0
+  (2026-11-19) bundling Engine 29.9.3 (above). This host: Docker CE 29.9.3.
+Meaning: Debian 12 and 13 need Docker's own repository (the extra Linux step stays); Ubuntu, Fedora and
+Desktop meet the floor. Set the installer floor to 28.3.3 and compare numerically.
+
+### 12. Control plane unreachable: PARTIAL, two different answers
+
+Method: the node moved to an `--internal` Docker network (no egress; the host still reaches it over the
+bridge). DNS and TCP to the control plane then fail ("network is unreachable"). The upstream stays reachable.
+
+- **Already connected, no restart: serving continues.** Probes at +25, +50, +75 s all returned 200.
+  Later probes showed one stall (a probe around +5.5 min timed out) after the network attachment changed
+  the container's address; the path recovered by itself within about 20 s through direct discovery. All
+  later probes (+6 to about +7 min) returned 200. So the claim is tested for about 7 minutes only, and
+  the stall is an artefact of re-addressing the container, which a firewall-only block would not cause.
+- **Restart during the outage: serving does NOT resume.** After `docker restart`, tailscaled logged
+  `loaded netmap from disk cache; 0 peers`; 11 probes over about 2.5 minutes all failed, in two separate
+  restarts. Status shows `Running` with the health message "You are logged out ... fetch control key ...
+  network is unreachable", which is misleading. The cached netmap holds no peers, so no client is known.
+- Recovery: once egress returned the node served again within 20 s, and a restart with egress kept the
+  same name and IP.
+Meaning: the ADR's wording ("probably keep working; a restarted node may not come back") is right and can
+be stated firmly: existing sessions survive a control-plane outage as long as the sidecar is not
+restarted; a restart during an outage means phone access is down until the control plane returns.
+Docs: "Client-side netmap caching" is a Tailscale concept page; its exact guarantees were not read.
+
+## Findings that most change the design
+
+1. **Unix socket plus PROXY v2 does not work** (item 2). Use the `edge` network with a TCP target.
+2. **The stock entrypoint exits after 60 s without sign-in** (item 5). The wrapper must own the sign-in
+   phase and must not just wrap `containerboot`.
+3. **LocalAPI write access is by container UID**, and the same UID as the daemon has write access
+   (items 4 and 5). `api` must be non-root and a different UID, and read-only access still exposes the
+   peer inventory.
+
+Runner-ups: Debian 12 and 13 are below the Docker floor and the floor is 28.3.3; the free plan allows 6
+users and is non-commercial; Serve's HTTPS mode overwrites `X-Forwarded-For`, so fallback 1 is real.
+
+## Commands and versions
+
+`tailscale/tailscale:stable` digest `sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4`
+(tailscaled 1.104.7, Go 1.27.4); `python:3.12-alpine`; a local `hfspike-tcpdump` image (alpine +
+tcpdump) for packet capture; Docker CE 29.9.3 on Fedora 43; Playwright-core 1.58.2. Containerboot env used:
+`TS_USERSPACE=true TS_STATE_DIR=/var/lib/tailscale TS_SOCKET=... TS_HOSTNAME=holdfast-spike
+TS_ACCEPT_DNS=false TS_SERVE_CONFIG=/config/<file> TS_TAILSCALED_EXTRA_ARGS=--no-logs-no-support`.
