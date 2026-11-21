@@ -42,19 +42,12 @@ const REASON_COPY: Record<string, string> = {
     'Opening balance plus the transactions does not equal the closing balance. A row may be missing or misread.',
   date_out_of_period: 'Some transactions are dated outside the statement period.',
   no_transactions_in_document: 'This statement had balances but no transactions.',
+  unexplained_duplicates:
+    'Some rows were skipped as duplicates and could not be matched to an earlier statement.',
 }
 
-/**
- * Plain copy for the server's reason codes (comma-joined when there are several). A code this
- * build does not know is shown verbatim.
- */
-export function reasonLines(reason: string | null | undefined): string[] {
-  if (!reason) return []
-  return reason
-    .split(',')
-    .map((code) => code.trim())
-    .filter((code) => code !== '')
-    .map((code) => REASON_COPY[code] ?? `Flagged: ${code}`)
+export function reasonCopy(code: string): string | undefined {
+  return Object.hasOwn(REASON_COPY, code) ? REASON_COPY[code] : undefined
 }
 
 export function resultHeadline(result: ImportResult): string {

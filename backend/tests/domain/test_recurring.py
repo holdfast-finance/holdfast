@@ -27,6 +27,7 @@ SEASONAL_AMOUNTS = (
     "-60",
     "-75",
 )
+# Preserve the original per-seed false-series cap as the holdout gains harder bills.
 HOLDOUT_FALSE_SERIES_CAP = 5
 PRECISION_FALSE_SERIES_CAP = 12
 
@@ -71,6 +72,55 @@ def _clustered_amount(rng: Random, center: int, spread: int) -> str:
     # Sum two uniform draws in cents to make amounts concentrate around the usual spend.
     delta = rng.randint(-spread, spread) + rng.randint(-spread, spread)
     return str(Decimal(-(center + delta)).scaleb(-2))
+
+
+def _shared_monthly_bills(
+    seed: int,
+) -> list[tuple[list[PostedTransaction], list[PostedTransaction]]]:
+    rng = Random(seed)  # noqa: S311 -- reproducible synthetic fixture
+    variable = _transactions(
+        "Invented variable shared bill",
+        [_month(i, 10) for i in range(12)],
+        ("-60", "-140", *(str(-rng.randint(60, 140)) for _ in range(10))),
+    )
+    variable_purchases = _transactions(
+        "Invented variable purchases",
+        [_month(i, rng.randint(17, 25)) for i in rng.sample(range(12), 7)],
+        tuple(str(-rng.randint(60, 140)) for _ in range(7)),
+    )
+    fixed = _transactions("Invented fixed shared bill", [_month(i, 10) for i in range(12)])
+    fixed_purchases = _transactions(
+        "Invented fixed purchases", [_month(i, 23) for i in (0, 2, 5, 8, 11)]
+    )
+    return [
+        (bills, [replace(row, merchant_key=bills[0].merchant_key) for row in purchases])
+        for bills, purchases in ((variable, variable_purchases), (fixed, fixed_purchases))
+    ]
+
+
+def _variable_biweekly_pay(missed_slots: tuple[int, ...] = (8, 24, 40)) -> list[PostedTransaction]:
+    return _transactions(
+        "Invented hourly payroll",
+        [START + timedelta(days=14 * slot + 4) for slot in range(49) if slot not in missed_slots],
+        ("1134.81", "835.25", "1320.10", "990.23", "1210.86"),
+    )
+
+
+def test_monthly_bills_among_same_merchant_in_band_purchases() -> None:
+    for bills, purchases in _shared_monthly_bills(75109):
+        (series,) = detect_recurring(bills + purchases, as_of=END)
+        assert series.cadence == Cadence.MONTHLY
+        assert series.transaction_ids == tuple(row.id for row in bills)
+        assert series.next_expected_date == _month(12, 10)
+
+
+@pytest.mark.parametrize("missed_slots", [(24,), (8, 24, 40)])
+def test_variable_biweekly_pay_allows_isolated_missed_slots(missed_slots: tuple[int, ...]) -> None:
+    pay = _variable_biweekly_pay(missed_slots)
+    (series,) = detect_recurring(pay, as_of=END)
+    assert series.cadence == Cadence.BIWEEKLY
+    assert series.transaction_ids == tuple(row.id for row in pay)
+    assert series.is_variable
 
 
 @pytest.mark.parametrize("seed", [75109, 49297, 84053])
@@ -144,6 +194,24 @@ def test_holdout_recovers_planted_series_among_irregular_purchases(seed: int) ->
         )
     )
 
+    for bills, purchases in _shared_monthly_bills(seed):
+        key = (bills[0].merchant_key, Cadence.MONTHLY)
+        expected[key] = {str(row.id) for row in bills}
+        shared.add(key)
+        history.extend(bills + purchases)
+
+    pay = _variable_biweekly_pay()
+    expected[pay[0].merchant_key, Cadence.BIWEEKLY] = {str(row.id) for row in pay}
+    history.extend(pay)
+    for variant, amounts in enumerate((("-29.99", "-31.99"), ("-118", "-109"))):
+        renewal = _transactions(
+            f"Invented renewal {variant}",
+            [_month(4 + variant, 12), _month(16 + variant, 12)],
+            amounts,
+        )
+        expected[renewal[0].merchant_key, Cadence.ANNUAL] = {str(row.id) for row in renewal}
+        history.extend(renewal)
+
     rng.shuffle(history)
     # Include jittered postings for every planned cycle, including the year boundary.
     as_of = END + timedelta(days=2)
@@ -166,9 +234,11 @@ def test_holdout_recovers_planted_series_among_irregular_purchases(seed: int) ->
             false_series.append(
                 (series.merchant_key, series.cadence, len(series.transaction_ids), matched)
             )
+    annual = {key for key in expected if key[1] == Cadence.ANNUAL}
     print(
         f"Holdout {seed}: {len(recovered)}/{len(expected)} overall, "
-        f"{len(recovered & shared)}/{len(shared)} shared, {len(false_series)} false"
+        f"{len(recovered & shared)}/{len(shared)} shared, "
+        f"{len(recovered & annual)}/{len(annual)} annual, {len(false_series)} false"
     )
     assert len(recovered) * 100 >= len(expected) * 95, expected.keys() - recovered
     assert len(recovered & shared) * 100 >= len(shared) * 95, shared - recovered
@@ -336,6 +406,55 @@ def test_annual_pair_among_ad_hoc_purchases_including_same_day() -> None:
     assert series.cadence == Cadence.ANNUAL
     assert series.transaction_ids == tuple(row.id for row in bills)
     assert series.confidence == Decimal("0.60")
+
+
+def test_annual_pair_allows_a_price_change() -> None:
+    rows = _transactions("Invented renewal", [_month(1, 12), _month(13, 12)], ("-29.99", "-31.99"))
+    (series,) = detect_recurring(rows, as_of=END)
+    assert series.cadence == Cadence.ANNUAL
+    assert series.transaction_ids == tuple(row.id for row in rows)
+    assert series.typical_amount == Decimal("-29.99")
+    assert series.confidence == Decimal("0.60")
+
+
+def test_dense_annual_pair_requires_an_exact_amount_used_only_twice() -> None:
+    purchases = _transactions(
+        "Invented coffee",
+        [
+            date(2023, month, day)
+            for month, day in ((1, 1), (1, 3), (1, 5), (1, 7), (1, 9), (1, 11), (1, 13))
+        ],
+        ("-9", "-12", "-15", "-9", "-12", "-15", "-5"),
+    )
+    for amounts in (("-5", "-5"), ("-20", "-21")):
+        renewal = _transactions("Invented renewal", [_month(5, 8), _month(17, 8)], amounts)
+        renewal = [replace(row, merchant_key=purchases[0].merchant_key) for row in renewal]
+        assert detect_recurring(purchases + renewal, as_of=END) == ()
+    renewal = [replace(row, amount=Decimal("-20")) for row in renewal]
+    (series,) = detect_recurring(purchases + renewal, as_of=END)
+    assert series.cadence == Cadence.ANNUAL
+    assert series.transaction_ids == tuple(row.id for row in renewal)
+
+
+@pytest.mark.parametrize(("count", "typical"), [(1, "-19.99"), (2, "-20.49")])
+def test_fixed_typical_uses_a_confirmed_charge(count: int, typical: str) -> None:
+    amounts = ("-19.99",) * 6 + ("-20.49",) * count
+    rows = _transactions(
+        "Invented flat bill", [_month(i, 10) for i in range(len(amounts))], amounts
+    )
+    (series,) = detect_recurring(rows, as_of=END)
+    assert series.typical_amount == Decimal(typical)
+    assert not series.is_variable
+
+
+def test_tight_fixed_band_uses_an_observed_amount_when_median_is_between_charges() -> None:
+    amounts = ("-20.00", "-20.10", "-20.30", "-20.20")
+    rows = _transactions(
+        "Invented fixed bill", [_month(i, 10) for i in range(len(amounts))], amounts
+    )
+    (series,) = detect_recurring(rows, as_of=END)
+    assert series.typical_amount == Decimal("-20.20")
+    assert not series.is_variable
 
 
 def test_empty_input() -> None:

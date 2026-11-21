@@ -763,6 +763,7 @@ export const handlers = [
           return apiError('conflict', 'Only a run that needs review can be accepted.')
         }
         run.reconcile_status = 'accepted'
+        run.reason = null
         run.reviewed_at = now()
         return HttpResponse.json(run)
       },
