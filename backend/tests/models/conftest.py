@@ -250,7 +250,7 @@ def seed_household(engine: Engine, label: str) -> Seed:
             as_of_date=date(2026, 1, 31),
             current=Decimal("1234.56"),
         )
-        cat = _insert(c, "category", **h, name="Groceries", kind="expense")
+        cat = _insert(c, "category", **h, slug="custom.groceries", name="Groceries", kind="expense")
         rule = _insert(
             c, "rule", **h, match={"merchant_regex": "EXAMPLE MART"}, set={"category_id": str(cat)}
         )

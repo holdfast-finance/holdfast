@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, mask_long_digit_runs
 from app.models import Account, Document, ImportRun, Transaction
-from app.services.ledger_service import LedgerService, NewTransaction
+from app.services.ledger_service import LedgerWriter, NewTransaction
 
 MASK_LEN = 4
 
@@ -306,7 +306,7 @@ async def _import_block(
     s.add(run)
     await s.flush()
 
-    ledger = LedgerService(s, household_id)
+    ledger = LedgerWriter(s, household_id)
     inserted = 0
     skipped: list[str] = []
     for t in block.txns:

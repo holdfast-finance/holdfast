@@ -1,4 +1,4 @@
-"""Only ``LedgerService`` writes ledger money fields (ADR 0011, money review).
+"""Only ``LedgerWriter`` writes ledger money fields (ADR 0011, money review).
 
 **This is a lint over ``app/``, not a guarantee.** It cannot see dynamic code, ``getattr`` tricks
 or a database client outside ``app/``. The real enforcement is RLS and the database CHECKs and
@@ -176,7 +176,7 @@ def test_only_the_ledger_service_writes_ledger_fields() -> None:
         found = violations(path.read_text())
         if found:
             bad[rel] = found
-    assert bad == {}, f"ledger fields written outside LedgerService: {bad}"
+    assert bad == {}, f"ledger fields written outside LedgerWriter: {bad}"
 
 
 def test_the_writer_itself_is_flagged_so_the_scan_is_live() -> None:
