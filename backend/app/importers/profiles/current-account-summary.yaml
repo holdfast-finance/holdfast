@@ -1,0 +1,13 @@
+# Current Account Summary: balances only, no transactions, so it can never be "reconciled".
+id: current-account-summary
+institution: Current
+kind: summary
+balance_sign: as_is
+fingerprint:
+  - 'current\.com'
+  - '^\s*Account\s+Summary\s*$'
+  - 'Spending \+ Savings Pods'
+period: 'Statement Period (?P<start>\d\d/\d\d/\d\d) - (?P<end>\d\d/\d\d/\d\d)'
+period_date_format: '%m/%d/%y'
+account: 'Account Number \*+(?P<last4>\d{4})'
+balances: 'Starting Balance \d\d/\d\d/\d\d\s+Ending Balance \d\d/\d\d/\d\d\s+(?P<open>-?\$[\d,]+\.\d\d)\s+(?P<close>-?\$[\d,]+\.\d\d)'

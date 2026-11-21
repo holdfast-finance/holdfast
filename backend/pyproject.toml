@@ -20,6 +20,7 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "pyotp>=2.12.0",
     "webauthn>=3.0.1",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ dev = [
     "import-linter>=2.17",
     "reportlab>=5.1.0",
     "pdfplumber>=0.11.10",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.uv]
