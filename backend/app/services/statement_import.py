@@ -87,12 +87,11 @@ def infer_review_reason(run: ImportRun) -> str:
 
 
 def stored_review_reason(run: ImportRun) -> str | None:
-    """The reason to show for ``run``: stored, else inferred for a flagged legacy run."""
-    if run.review_reason:
-        return run.review_reason
-    if run.reconcile_status == "needs_review":
-        return infer_review_reason(run)
-    return None
+    """The reason to show for ``run``: only while it needs review (the column keeps the history
+    after an accept). Stored, else inferred for a flagged legacy run."""
+    if run.reconcile_status != "needs_review":
+        return None
+    return run.review_reason or infer_review_reason(run)
 
 
 def external_account_key(statement: ParsedStatement, block: ParsedBlock) -> str:
@@ -202,6 +201,12 @@ async def import_statement(
     """
     async with scoped_session(factory, household_id, person_id, household_wide=household_wide) as s:
         doc = await _document(s, household_id, meta, statement.profile_id, person_id)
+        elsewhere = await _runs_under_other_profile(s, doc.id, statement.profile_id)
+        if elsewhere:
+            # The same bytes were already imported under another profile. Their accounts are keyed
+            # by profile, so importing again would copy every row into a second account and
+            # double-count it. Report the earlier runs and write nothing.
+            return ImportResult(doc.id, tuple(elsewhere))
         if statement.status == "balances_only":
             # Nothing was reconciled and no transactions exist, so it is never `parsed`. Flag it
             # for a person (hard rule 6): there is no run to carry the flag, so set the document's
@@ -210,12 +215,6 @@ async def import_statement(
             doc.import_review_latched = True
             await s.flush()
             return ImportResult(doc.id, (), balances_only=True)
-        elsewhere = await _runs_under_other_profile(s, doc.id, statement.profile_id)
-        if elsewhere:
-            # The same bytes were already imported under another profile. Their accounts are keyed
-            # by profile, so importing again would copy every row into a second account and
-            # double-count it. Report the earlier runs and write nothing.
-            return ImportResult(doc.id, tuple(elsewhere))
         results: list[BlockResult] = []
         for block in statement.blocks:
             results.append(await _import_block(s, household_id, doc, statement, block, person_id))

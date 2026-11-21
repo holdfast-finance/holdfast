@@ -53,6 +53,14 @@ def test_upgrade_downgrade_upgrade(migrations_database_url: str) -> None:
     assert _extensions(url) == {"pg_trgm", "pgcrypto"}
 
 
+@pytest.mark.services
+def test_models_match_migrations(migrations_database_url: str) -> None:
+    """The CI drift check (`alembic check`): no model change without its migration."""
+    cfg = _config(migrations_database_url)
+    command.upgrade(cfg, "head")
+    command.check(cfg)  # raises CommandError listing any new upgrade operations
+
+
 def _snapshot() -> tuple[tuple[object, ...], ...]:
     import importlib.util
 

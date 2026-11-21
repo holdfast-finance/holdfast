@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
 from app.domain.ledger_rules import InvalidAmountError
-from app.domain.statement_parse import ParsedStatement, detect_profile, parse_statement
+from app.domain.statement_parse import (
+    ParsedStatement,
+    Reconciliation,
+    detect_profile,
+    parse_statement,
+)
 from app.importers.profile_loader import load_profiles
 from app.models import Account, Document, ImportRun, Transaction
 from app.services.ledger_service import LedgerWriter, NewTransaction
@@ -393,9 +398,10 @@ async def _unexplained(
     household: uuid.UUID,
     *,
     document_id: uuid.UUID | None,
-    shift_start_days: int = 0,
+    period: tuple[date, date] | None = None,
     extra: list[str] | None = None,
     only_first: bool = False,
+    only_last: bool = False,
 ) -> int:
     async with scoped_session(factory, household, None, household_wide=True) as s:
         run = (
@@ -422,9 +428,11 @@ async def _unexplained(
         assert fps
         if only_first:
             fps = fps[:1]
+        if only_last:
+            fps = fps[-1:]
         s.expunge(run)
-        if shift_start_days and run.period_start:
-            run.period_start = run.period_start + timedelta(days=shift_start_days)
+        if period:  # the new statement's own period, as _unexplained_duplicates reads it
+            run.period_start, run.period_end = period
         return await _unexplained_duplicates(
             s,
             run.account_id,
@@ -448,24 +456,48 @@ async def test_unexplained_duplicates_overlap_in_both_windows_is_explained(
     factory: async_sessionmaker[AsyncSession], household: uuid.UUID
 ) -> None:
     await import_statement(factory, household, _parse(DEBIT), _meta(41), household_wide=True)
-    other_doc = uuid.uuid4()
-    assert await _unexplained(factory, household, document_id=other_doc) == 0
-    # A partial overlap (this statement starts a few days later) still holds the shared rows.
-    assert await _unexplained(factory, household, document_id=other_doc, only_first=True) == 0
+    assert await _unexplained(factory, household, document_id=uuid.uuid4()) == 0
 
 
-async def test_unexplained_duplicates_row_outside_the_new_window_is_unexplained(
+async def test_unexplained_duplicates_partial_overlap_explains_only_the_shared_rows(
     factory: async_sessionmaker[AsyncSession], household: uuid.UUID
 ) -> None:
     await import_statement(factory, household, _parse(DEBIT), _meta(42), household_wide=True)
     other_doc = uuid.uuid4()
-    # The new statement starts after the first row posted: that row is not in its window.
+    later = (date(2019, 3, 20), date(2019, 4, 20))  # overlaps the first statement's tail
+    # The last row (03/28) is on both statements: explained. The first (03/04) is only on the
+    # earlier one, so its being skipped by the later statement is a collision: unexplained.
     assert (
-        await _unexplained(
-            factory, household, document_id=other_doc, shift_start_days=400, only_first=True
-        )
+        await _unexplained(factory, household, document_id=other_doc, period=later, only_last=True)
+        == 0
+    )
+    assert (
+        await _unexplained(factory, household, document_id=other_doc, period=later, only_first=True)
         == 1
     )
+
+
+async def test_unexplained_duplicates_row_with_no_run_is_unexplained(
+    factory: async_sessionmaker[AsyncSession], household: uuid.UUID
+) -> None:
+    result = await import_statement(
+        factory, household, _parse(DEBIT), _meta(44), household_wide=True
+    )
+    account_id = next(b.account_id for b in result.blocks if b.rows_inserted)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household).insert_transaction(
+            NewTransaction(
+                account_id=account_id,
+                posted_date=date(2019, 3, 10),
+                amount=Decimal("-1.00"),
+                description_raw="Example Manual",
+                source="manual",
+                import_fingerprint="e" * 64,
+            )
+        )
+    # A manual row (no import run) holds a fingerprint: nothing explains skipping it. The
+    # account's other rows belong to the earlier statement and are explained.
+    assert await _unexplained(factory, household, document_id=uuid.uuid4()) == 1
 
 
 async def test_unexplained_duplicates_skipped_fingerprint_with_no_row_is_unexplained(
@@ -474,3 +506,24 @@ async def test_unexplained_duplicates_skipped_fingerprint_with_no_row_is_unexpla
     await import_statement(factory, household, _parse(DEBIT), _meta(43), household_wide=True)
     other_doc = uuid.uuid4()
     assert await _unexplained(factory, household, document_id=other_doc, extra=["f" * 64]) == 1
+
+
+async def test_new_profile_with_no_rows_does_not_latch_a_document_already_imported(
+    factory: async_sessionmaker[AsyncSession], household: uuid.UUID
+) -> None:
+    st = _parse(NFCU_CARD)
+    await import_statement(factory, household, st, _meta(50), household_wide=True)
+    assert await _doc_state(factory, household) == ("parsed", False)
+    runs = await _count(factory, household, ImportRun)
+    # The same bytes under a new profile that reads no rows (a balances-only parse).
+    only_balances = dataclasses.replace(
+        st.blocks[0],
+        txns=(),
+        reconciliation=Reconciliation("balances_only", "no_transactions_in_document"),
+    )
+    summary = dataclasses.replace(st, profile_id="renamed-profile", blocks=(only_balances,))
+    assert summary.status == "balances_only"
+    again = await import_statement(factory, household, summary, _meta(50), household_wide=True)
+    assert not again.balances_only and all(not b.created for b in again.blocks)
+    assert await _doc_state(factory, household) == ("parsed", False)
+    assert await _count(factory, household, ImportRun) == runs

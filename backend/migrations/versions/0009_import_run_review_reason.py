@@ -27,7 +27,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("import_run", sa.Column("review_reason", sa.String(), nullable=True))
+    op.add_column("import_run", sa.Column("review_reason", sa.Text(), nullable=True))
     op.create_check_constraint(
         op.f("ck_import_run_review_reason_format"),
         "import_run",
