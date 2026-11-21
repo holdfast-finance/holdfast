@@ -116,3 +116,49 @@ Caveats for the design:
 Meaning: sharing the socket read-only into a non-root `api` is acceptable and the CLI fallback is not
 needed, provided the three conditions hold (non-root, distinct UID, status filtered). CI should assert
 `user:` is set and non-zero on `api` and that the volume mount is `:ro`.
+
+### 5. Start wrapper, log upload, caps, non-root: PASS (all supported by the stock image), plus one finding
+
+Fresh, unauthenticated state volume each time, container shares a pause container's network
+namespace so a `tcpdump` container (`NET_RAW`, own container) sees all of its packets.
+
+- **Finding: the stock entrypoint exits after 60 s when sign-in is not completed.**
+  `containerboot` runs `tailscale up`, prints the login URL (`To authenticate, visit: ...`) and, with no
+  `TS_AUTHKEY` and nobody signing in, dies with `failed to auth tailscale: tailscale up failed:
+  context deadline exceeded` (exit 1) at +60 s. With a restart policy this loops and mints a new login
+  URL each time. The wrapper must therefore (a) not run `containerboot` until consent, and (b) after
+  consent, either keep restarting it (accept new URLs) or, better, run `tailscaled` directly and call
+  `tailscale up --timeout=0`/`login` itself so one URL stays valid until the user signs in. The
+  earlier hfspike run used direct `tailscaled` for this reason. The wrapper must also forward SIGTERM.
+- **Flag gating: PASS.** Wrapper (`sh`, ~15 lines, `--entrypoint /bin/sh`, flag on a read-only
+  volume, `containerboot` started only after `/run/flag/enabled` exists): with no flag, 30 s of
+  capture showed zero packets from the node (only two unrelated link-local mDNS/router-solicit packets
+  from the shared namespace); within the first second after `touch enabled`, `containerboot` started
+  and TCP 443 connections to Tailscale's control range (`192.200.0.0/24`) began. Default entrypoint
+  contacts the control plane immediately (DNS lookup of the control host, TCP 443, login URL after
+  about 1 s).
+- **Logout on flag removal: PASS.** Removing the flag made the wrapper call
+  `tailscale logout` (`POST /localapi/v0/logout` in the node log) and idle. The test node was not logged
+  in, so this exercised the path but not the control-plane deregistration of a logged-in node; the
+  wrapper must also kill `containerboot` before idling (done in the spike script).
+- **`--no-logs-no-support`: PASS (supported via `TS_TAILSCALED_EXTRA_ARGS`).** tailscaled logs
+  "You have disabled logging. Tailscale will not be able to provide support." and, in 60 s with the
+  flag, the node made 2 DNS lookups (control plane A and AAAA); the same node without the flag made 4
+  (the extra pair is the log-upload host). Observation is by DNS response counts because the container
+  resolver is on loopback; hostnames were not decoded.
+- **All capabilities dropped: PASS** (`--cap-drop ALL`; harmless warnings about UDP buffer sizes and
+  the missing TPM device).
+- **Read-only root filesystem: PASS** with `/tmp` tmpfs and a state volume; one harmless warning
+  (`failed to symlink socket: mkdir /var/run/tailscale`).
+- **Non-root: PASS in userspace mode** with `--user 1000:1000`, a state volume pre-chowned to that UID
+  (mode 0700) and `TS_SOCKET` under a writable path: `containerboot` and `tailscaled` ran as UID 1000
+  and reached the login-URL state. Caveat to design: the state volume must be pre-created with the
+  right owner (an init step or `chown` in the wrapper is impossible once non-root). Serve as non-root
+  was not tested.
+- **Same-UID caveat confirmed (feeds check 4):** on the non-root node, `tailscale set` as UID 1000
+  (the daemon's own UID) succeeded; as UID 2000 it was denied (`checkprefs access denied`). So if the
+  sidecar is made non-root, `api` must run as a different UID.
+
+Meaning: the wrapper design in §1 is feasible with stock parts, but it must not wrap `containerboot`
+naively for the sign-in phase (60 s exit). Hardening: all of cap-drop, read-only root, no-new-privileges
+and no log upload are supported; non-root is feasible but forces a UID plan.
