@@ -168,7 +168,10 @@ async def test_balances_only_document_is_not_marked_parsed(
     text = (FIXTURES / "current" / "account_summary.sanitized.txt").read_text()
     result = await import_statement(factory, household, _parse(text), _meta(8), household_wide=True)
     assert result.balances_only
-    assert await _doc_state(factory, household) == ("pending", False)
+    # Never parsed, never silently pending: a person has to look (hard rule 6). No run, no rows.
+    assert await _doc_state(factory, household) == ("needs_review", True)
+    assert await _count(factory, household, ImportRun) == 0
+    assert await _count(factory, household, Transaction) == 0
 
 
 async def test_concurrent_imports_of_one_account_create_a_single_account(
