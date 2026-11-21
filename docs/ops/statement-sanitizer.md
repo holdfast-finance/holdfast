@@ -1,7 +1,9 @@
 # Statement sanitizer (owner guide)
 
 Turns your real bank, card and brokerage statements into safe fixtures for bank profiles. It runs
-offline on your machine. **No agent reads the input.** Agents only ever see the reviewed output.
+offline on your machine. Its output is the **only** form of a real statement that may be committed as a
+fixture. Whether agents may read the originals on your machine is your call as the instance owner
+([ADR 0019](../adr/0019-owner-real-data-stays-local.md)); either way the originals stay outside the repository.
 
 ## Run it
 
