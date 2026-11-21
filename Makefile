@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked release-check
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked release-check dist
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -114,6 +114,12 @@ sync: ## Fast-forward main to origin/main; on other branches print ahead/behind
 
 release-check: ## Compare product SemVer and Python version. Does not tag or publish.
 	python3 scripts/cut_release.py check
+
+dist: ## Build wheel + sdist (holdfast-finance) and SHA256SUMS into ./dist. Does not publish.
+	rm -rf dist
+	cd backend && uv build --out-dir ../dist
+	rm -f dist/.gitignore
+	python3 scripts/dist_checksums.py dist
 
 test-locked: ## make test under flock so parallel worktrees share the test DB safely
 	@lock="$${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock"; \

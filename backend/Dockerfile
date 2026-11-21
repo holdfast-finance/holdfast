@@ -3,9 +3,10 @@
 #   api:    uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000   (default)
 #   worker: arq app.worker.main.WorkerSettings
 
-ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+# python:3.12-slim-bookworm, pinned by digest (Dependabot bumps it).
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 
-FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
 
 # ---------------------------------------------------------------- build: resolve the venv
 FROM ${PYTHON_IMAGE} AS builder
@@ -39,5 +40,18 @@ COPY --from=builder --chown=root:root /app/migrations /app/migrations
 COPY --from=builder --chown=root:root /app/alembic.ini /app/pyproject.toml /app/
 WORKDIR /app
 USER holdfast
+
+# OCI image labels. VERSION and REVISION are build args set by the release workflow.
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="holdfast-api" \
+      org.opencontainers.image.description="Holdfast API and worker (one image, two commands)" \
+      org.opencontainers.image.source="https://github.com/holdfast-finance/holdfast" \
+      org.opencontainers.image.url="https://github.com/holdfast-finance/holdfast" \
+      org.opencontainers.image.documentation="https://github.com/holdfast-finance/holdfast#readme" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.vendor="Holdfast" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
 EXPOSE 8000
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

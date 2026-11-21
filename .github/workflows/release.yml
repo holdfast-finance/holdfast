@@ -1,0 +1,220 @@
+name: Release
+
+# Keel pushes an annotated `v*` tag (docs/process/RELEASES.md) and then runs `gh release create`.
+# This workflow verifies the tag, builds once, and publishes:
+#   - PyPI (trusted publishing / OIDC, `pypi` environment, no long-lived token)
+#   - GHCR (GITHUB_TOKEN) and, only when the secrets exist, Docker Hub
+#   - the wheel, sdist and SHA256SUMS onto the GitHub Release
+# workflow_dispatch re-runs verify + build for an existing tag and publishes nothing.
+# Free tier only (ADR 0013). No pull_request_target. Phase tags (phase-*) never match `v*`.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing annotated tag to verify and build (dry run; nothing is published)"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  PUBLISH: ${{ github.event_name == 'push' }}
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.v.outputs.sha }}
+      product: ${{ steps.v.outputs.product }}
+      python: ${{ steps.v.outputs.python }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: v
+        name: Annotated, on main, matches the manifests
+        run: |
+          # checkout can leave a lightweight copy of the tag; refetch the real tag object.
+          git tag -d "$TAG"
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          python3 scripts/cut_release.py verify-tag --tag "$TAG" | tee "$RUNNER_TEMP/verify.out"
+          cat "$RUNNER_TEMP/verify.out" >> "$GITHUB_OUTPUT"
+          test "$(git rev-parse HEAD)" = "$(sed -n 's/^sha=//p' "$RUNNER_TEMP/verify.out")"
+
+  dist:
+    name: Build wheel, sdist and checksums
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+      - name: make dist
+        run: make dist
+      - name: Artifact version matches the tag
+        env:
+          PYTHON_VERSION: ${{ needs.verify.outputs.python }}
+        run: |
+          ls -l dist
+          test -f "dist/holdfast_finance-${PYTHON_VERSION}-py3-none-any.whl"
+          test -f "dist/holdfast_finance-${PYTHON_VERSION}.tar.gz"
+          (cd dist && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+  pypi:
+    name: Publish to PyPI
+    needs: [verify, dist]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One-time setup on PyPI: add a trusted publisher for project `holdfast-finance`
+    # (owner holdfast-finance, repo holdfast, workflow release.yml, environment pypi).
+    environment:
+      name: pypi
+      url: https://pypi.org/project/holdfast-finance/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist
+      - name: Only the wheel and sdist go to PyPI
+        run: |
+          mkdir pypi
+          cp dist/*.whl dist/*.tar.gz pypi/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: pypi/
+
+  images:
+    name: Image ${{ matrix.image }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: api, context: backend, file: backend/Dockerfile }
+          - { image: web, context: web, file: web/Dockerfile }
+          - { image: caddy, context: infra/caddy, file: infra/caddy/Dockerfile.prod }
+    env:
+      # Docker Hub is optional: without all three values the job still pushes to GHCR and succeeds.
+      HAVE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' && vars.DOCKERHUB_NAMESPACE != '' }}
+      DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+      PRODUCT: ${{ needs.verify.outputs.product }}
+      SHA: ${{ needs.verify.outputs.sha }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Image tags
+        id: t
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          # The version tag always; `latest` only for a stable release, never a pre-release.
+          names="ghcr.io/holdfast-finance/holdfast-${IMAGE}"
+          if [ "$HAVE_DOCKERHUB" = "true" ]; then names="$names ${DOCKERHUB_NAMESPACE}/holdfast-${IMAGE}"; fi
+          {
+            echo "tags<<EOF"
+            for n in $names; do
+              echo "${n}:${PRODUCT}"
+              if [ "$PRERELEASE" = "false" ]; then echo "${n}:latest"; fi
+            done
+            echo "EOF"
+          } | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && env.HAVE_DOCKERHUB == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.t.outputs.tags }}
+          build-args: |
+            VERSION=${{ env.PRODUCT }}
+            REVISION=${{ env.SHA }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=release-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
+
+  github-release:
+    name: Attach files to the GitHub Release
+    needs: [verify, dist]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist
+      - name: Upload to the Release (waits for Keel to create it)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Keel pushes the tag first and creates the Release right after, so poll for up to 10 minutes.
+          # If it never appears, the files stay in the `dist` workflow artifact; this step does not
+          # create the Release itself and does not fail the run.
+          for _ in $(seq 1 20); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/*.whl dist/*.tar.gz dist/SHA256SUMS --clobber
+              echo "Uploaded to release $TAG" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::warning::No GitHub Release for $TAG after 10 minutes. Run: gh release upload $TAG <files> (artifact: dist)"
