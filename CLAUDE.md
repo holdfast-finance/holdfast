@@ -129,4 +129,4 @@ Docker Compose for services.
 - Plaid Transactions gives about 24 months, so older history comes from statement import.
 - No consumer credit-bureau API exists. Use manual AnnualCreditReport.com PDF import only, with no scraping.
 - HWI is winding down (Aug 2026). Never build signing on server-side USB.
-- Never run anything on county-owned hardware or over the county VPN (PLAN Section 0).
+- Never run anything on employer-owned hardware or over an employer VPN (PLAN Section 0).
