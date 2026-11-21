@@ -78,6 +78,11 @@ class PlaidUnavailable(Exception):
         self.reason = reason
 
 
+def _reject_constant(name: str) -> Decimal:
+    """``NaN`` / ``Infinity`` are not JSON and would come back as ``float``. Refuse them."""
+    raise ValueError("non-finite number in a Plaid response")
+
+
 def _code(value: object, fallback: str) -> str:
     """A Plaid code field, kept only when it looks like one (``UPPER_SNAKE``, bounded)."""
     if (
@@ -145,13 +150,19 @@ class PlaidClient:
         except httpx.HTTPError:
             # ``from None``: the chained httpx error holds the request, headers included.
             raise self._unavailable(path, "network") from None
+        except (UnicodeError, ValueError):
+            # A key with a character that cannot go in a header (a stray non-ASCII byte from a
+            # copy-paste). The original error quotes the offending character, so drop it.
+            raise self._unavailable(path, "bad_credentials") from None
         try:
-            data = json.loads(response.content, parse_float=Decimal)
+            data = json.loads(
+                response.content, parse_float=Decimal, parse_constant=_reject_constant
+            )
         except (ValueError, UnicodeDecodeError):
             raise self._unavailable(path, "bad_response") from None
         if not isinstance(data, dict):
             raise self._unavailable(path, "bad_response")
-        if response.status_code >= 400 or "error_code" in data:
+        if not response.is_success or "error_code" in data:
             error = PlaidError(
                 path=path,
                 http_status=response.status_code,

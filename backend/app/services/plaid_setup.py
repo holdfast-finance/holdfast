@@ -44,11 +44,11 @@ CHECK_WINDOW_SECONDS = 300
 STATEMENTS_PROBE_DAYS = 90
 
 
-def plaid_credentials(settings: Settings) -> PlaidCredentials | None:
-    """The active environment's keys from the deployment settings, or None when incomplete.
+def _plaid_keys(settings: Settings) -> tuple[str, str]:
+    """(client id, the active environment's secret), stripped; ``""`` where unset.
 
-    Self-host reads the environment (ADR 0015). When the resolver from that ADR lands, this is the
-    one function that changes.
+    The only read of the Plaid keys. Self-host reads the environment (ADR 0015); when that ADR's
+    resolver lands, this is the one function that changes.
     """
     secret = (
         settings.plaid_secret_production
@@ -56,11 +56,16 @@ def plaid_credentials(settings: Settings) -> PlaidCredentials | None:
         else settings.plaid_secret_sandbox
     )
     client_id = (settings.plaid_client_id or "").strip()
-    secret_text = secret.get_secret_value().strip() if secret is not None else ""
-    if not client_id or not secret_text:
+    return client_id, secret.get_secret_value().strip() if secret is not None else ""
+
+
+def plaid_credentials(settings: Settings) -> PlaidCredentials | None:
+    """The active environment's keys, or None when either is missing."""
+    client_id, secret = _plaid_keys(settings)
+    if not client_id or not secret:
         return None
     return PlaidCredentials(
-        env=settings.plaid_env, client_id=SecretToken(client_id), secret=SecretToken(secret_text)
+        env=settings.plaid_env, client_id=SecretToken(client_id), secret=SecretToken(secret)
     )
 
 
@@ -71,6 +76,9 @@ def open_client(credentials: PlaidCredentials) -> PlaidClient:
 
 def _probe_error(exc: PlaidError | PlaidUnavailable) -> pf.Probe:
     if isinstance(exc, PlaidUnavailable):
+        if exc.reason == "bad_credentials":
+            # Nothing was sent: the key itself cannot be put in a request.
+            return pf.Probe("rejected", "keys_malformed")
         return pf.Probe("unreachable", exc.reason)
     return pf.Probe("rejected", exc.error_code, exc.request_id)
 
@@ -96,15 +104,11 @@ class PlaidSetupService:
 
     async def _facts(self) -> pf.PreflightFacts:
         settings = self.ctx.settings
-        secret = (
-            settings.plaid_secret_production
-            if settings.plaid_env == "production"
-            else settings.plaid_secret_sandbox
-        )
+        client_id, secret = _plaid_keys(settings)
         return pf.PreflightFacts(
             env=settings.plaid_env,
-            has_client_id=bool((settings.plaid_client_id or "").strip()),
-            has_secret=secret is not None and bool(secret.get_secret_value().strip()),
+            has_client_id=bool(client_id),
+            has_secret=bool(secret),
             products=tuple(settings.plaid_products),
             redirect_uri=settings.plaid_redirect_uri or None,
             suggested_redirect_uri=settings.app_base_url.rstrip("/") + OAUTH_RETURN_PATH,

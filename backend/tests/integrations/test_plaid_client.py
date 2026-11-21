@@ -247,3 +247,43 @@ async def test_no_key_reaches_a_log_line(caplog: pytest.LogCaptureFixture) -> No
 def test_credentials_do_not_render_their_values() -> None:
     text = repr(creds()) + str(creds())
     assert SECRET not in text and CLIENT_ID not in text
+
+
+async def test_a_key_that_cannot_go_in_a_header_fails_without_quoting_it() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("nothing should be sent")
+
+    bad = PlaidCredentials(
+        env="sandbox", client_id=SecretToken(CLIENT_ID), secret=SecretToken("canary-s\u00e9cret")
+    )
+    async with PlaidClient(bad, transport=httpx.MockTransport(handler)) as plaid:
+        with pytest.raises(PlaidUnavailable) as info:
+            await plaid.post("/institutions/get", {})
+    assert info.value.reason == "bad_credentials"
+    assert "\u00e9" not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("status", [204, 301, 302])
+async def test_only_a_2xx_with_a_body_counts_as_success(status: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"link_token": "x", "request_id": "r"})
+
+    async with client_for(handler) as plaid:
+        if status == 204:
+            assert (await plaid.post("/x", {}))["request_id"] == "r"
+        else:
+            with pytest.raises(PlaidError) as info:
+                await plaid.post("/x", {})
+            assert info.value.error_code == "UNKNOWN"
+
+
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+async def test_non_finite_numbers_are_refused_not_parsed_as_float(constant: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"amount":' + constant + b"}")
+
+    async with client_for(handler) as plaid:
+        with pytest.raises(PlaidUnavailable) as info:
+            await plaid.post("/accounts/get", {})
+    assert info.value.reason == "bad_response"

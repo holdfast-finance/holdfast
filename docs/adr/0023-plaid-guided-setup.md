@@ -72,5 +72,15 @@ So the manual steps cannot be removed, but nearly every one can be *checked* by 
   household. Sandbox allows ten `/institutions/get` a minute.
 - When ADR 0015's resolver merges, `plaid_credentials()` in `app/services/plaid_setup.py` is the one
   function that changes.
+- **The slot count here is for display only.** Plaid's limit is per client (per set of keys), not per
+  household, and a deleted `bank_connection` row lowers this count while Plaid never returns the
+  slot. P4's guard must count from a tombstone keyed by Plaid client, and must have a test that
+  deleting a connection does not lower the count. It must not reuse this query.
+- **Hosted mode needs a different throttle.** With operator-owned keys, every household's checks
+  spend the same Plaid rate limit and reveal the operator's product enablement. When ADR 0015's
+  resolver lands, the throttle key includes the credential identity, and shared operator keys make
+  the check operator-only or disable it.
+- `link_token_create` may be called only from the setup probe and the guarded Link service (P4).
+  A test pins the caller list.
 - Follow-ups: Sandbox test link and Link token/exchange with the slot guard (P4), a
   `make plaid-keys` prompt so nobody hand-edits `.env` (Harbor), the Connections page (Prism).

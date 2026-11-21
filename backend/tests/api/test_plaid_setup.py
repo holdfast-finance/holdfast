@@ -232,6 +232,25 @@ async def test_rejected_keys_stop_after_one_call(owner: Owner, fake: FakePlaid) 
     assert_no_key(r.text)
 
 
+async def test_a_key_with_a_stray_non_ascii_character_is_reported_not_a_500(
+    owner: Owner, app: FastAPI, fake: FakePlaid, caplog: pytest.LogCaptureFixture
+) -> None:
+    app.state.settings.plaid_secret_sandbox = SecretStr("canary-s\u00e9cret-2a90")
+    with structlog.testing.capture_logs() as events:
+        r = await owner.client.post("/api/plaid/setup/check")
+    assert r.status_code == 200, r.text
+    assert steps(r.json())["keys_valid"] == {
+        "id": "keys_valid",
+        "state": "action",
+        "reason": "keys_malformed",
+        "request_id": None,
+    }
+    assert fake.requests == []
+    assert (
+        "\u00e9" not in json.dumps(events, default=str, ensure_ascii=False) + caplog.text + r.text
+    )
+
+
 async def test_plaid_down_is_blocked_not_a_500(owner: Owner, fake: FakePlaid) -> None:
     fake.down = True
     r = await owner.client.post("/api/plaid/setup/check")
