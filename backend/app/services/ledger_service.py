@@ -1,6 +1,6 @@
 """The one writer of ledger money fields (ADR 0011, PLAN 20 money review).
 
-``LedgerService`` is the only code allowed to create a ``Transaction`` or ``TransactionSplit``, or
+``LedgerWriter`` is the only code allowed to create a ``Transaction`` or ``TransactionSplit``, or
 to set a transaction's ``amount``, ``category_id``/``category_source``, ``is_transfer`` or
 ``transfer_group_id``. ``tests/test_ledger_single_writer.py`` is a lint over ``app/`` that fails
 the build if any other module does; the real guarantee is RLS plus the database triggers. Reads
@@ -13,8 +13,9 @@ runs them, persists, and audits.
 **Who is acting.** ``household_id`` is taken from the session's RLS context and the argument must
 match it. User edits (``set_category``, ``set_amount``, transfers, splits) need ``user_id`` and are
 always audited. Automated categorisation goes through ``apply_category`` with a closed
-``AutoCategorySource`` and is never audited row by row (nor are ingest inserts: the import or sync
-run is the record). A request can never pick the audit path: ``"user"`` is not an auto source.
+``AutoCategorySource``: it skips a category the user set (and returns ``False``) and is never
+audited row by row, nor are ingest inserts: the import or sync run is the record. A request can
+never pick the audit path: ``"user"`` is not an auto source.
 
 **Failure semantics.** Every check runs before a row is touched. A database failure leaves the
 caller's transaction failed: roll back (``scoped_session`` does on exit). Database errors are
@@ -138,7 +139,7 @@ def _translate(exc: Exception, denied: type[LedgerNotFoundError]) -> Exception:
     return exc
 
 
-class LedgerService:
+class LedgerWriter:
     def __init__(
         self,
         session: AsyncSession,
@@ -149,7 +150,7 @@ class LedgerService:
     ) -> None:
         bound = session.info.get("household_id")
         if bound is None or bound != household_id:
-            raise ValueError("LedgerService needs a session scoped to this household")
+            raise ValueError("LedgerWriter needs a session scoped to this household")
         self._s = session
         self._household_id: uuid.UUID = bound
         self._user_id = user_id
@@ -235,8 +236,12 @@ class LedgerService:
         transaction_id: uuid.UUID,
         category_id: uuid.UUID | None,
         source: AutoCategorySource,
-    ) -> None:
-        """Automated categorisation (rules, Plaid, ML). Not audited per row."""
+    ) -> bool:
+        """Automated categorisation (rules, Plaid, ML). Not audited per row.
+
+        A category the user set is never overwritten by an automated source: the row is left
+        untouched and this returns ``False``. Returns ``True`` when the category was applied.
+        """
         try:
             value = AutoCategorySource(source).value
         except ValueError:
@@ -245,9 +250,12 @@ class LedgerService:
             await self._require_category(category_id)
         txn = (await self._lock_group([transaction_id]))[transaction_id]
         self._require_live(txn)
+        if txn.category_source == "user":
+            return False
         txn.category_id = category_id
         txn.category_source = None if category_id is None else value
         await self._flush()
+        return True
 
     # ------------------------------------------------------------------ amount
 

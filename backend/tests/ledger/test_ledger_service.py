@@ -1,4 +1,4 @@
-"""LedgerService against real Postgres as holdfast_app: invariants, audit, RLS. Synthetic data."""
+"""LedgerWriter against real Postgres as holdfast_app: invariants, audit, RLS. Synthetic data."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from app.services.ledger_service import (
     AutoCategorySource,
     CategoryNotFoundError,
     LedgerRetryableError,
-    LedgerService,
+    LedgerWriter,
     NewTransaction,
     SplitInput,
     SupersededTransactionError,
@@ -67,7 +67,9 @@ async def _account(
 async def _category(f: Factory, hid: uuid.UUID, name: str = "Groceries") -> uuid.UUID:
     cid = uuid.uuid4()
     async with scoped_session(f, hid, None, household_wide=True) as s:
-        s.add(Category(id=cid, household_id=hid, name=name, kind="expense"))
+        s.add(
+            Category(id=cid, household_id=hid, slug=f"custom.{cid.hex}", name=name, kind="expense")
+        )
     return cid
 
 
@@ -75,7 +77,7 @@ async def _txn(
     f: Factory, hid: uuid.UUID, account: uuid.UUID, amount: str, **kw: object
 ) -> uuid.UUID:
     async with scoped_session(f, hid, None, household_wide=True) as s:
-        tid = await LedgerService(s, hid).insert_transaction(
+        tid = await LedgerWriter(s, hid).insert_transaction(
             NewTransaction(
                 account_id=account,
                 posted_date=date(2026, 1, 15),
@@ -117,7 +119,7 @@ async def test_insert_rejects_non_money(
     a = await _account(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(InvalidAmountError):
-            await LedgerService(s, household, user_id=USER).insert_transaction(
+            await LedgerWriter(s, household, user_id=USER).insert_transaction(
                 NewTransaction(a, date(2026, 1, 1), bad, "X", "manual")  # type: ignore[arg-type]
             )
 
@@ -128,7 +130,7 @@ async def test_skip_duplicates_is_idempotent_on_the_external_id(
     a = await _account(factory, household)
     new = NewTransaction(a, date(2026, 1, 1), D("-1.00"), "X", "plaid", external_id="ext-1")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         assert await svc.insert_transaction(new, skip_duplicates=True) is not None
         assert await svc.insert_transaction(new, skip_duplicates=True) is None
         with pytest.raises(LedgerRuleError):
@@ -148,7 +150,7 @@ async def test_insert_into_another_households_account_fails(
         async with scoped_session(factory, household, None, household_wide=True) as s:
             # Denied by RLS in the database (not a pre-check: bulk ingest stays one statement/row).
             with pytest.raises(AccountNotFoundError):
-                await LedgerService(s, household, user_id=USER).insert_transaction(
+                await LedgerWriter(s, household, user_id=USER).insert_transaction(
                     NewTransaction(foreign, date(2026, 1, 1), D("-1.00"), "X", "manual")
                 )
     finally:
@@ -165,7 +167,7 @@ async def test_user_category_edit_is_set_and_audited(
     t = await _txn(factory, household, a, "-5.00")
     c = await _category(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).set_category(t, c)
+        await LedgerWriter(s, household, user_id=USER).set_category(t, c)
     row = await _row(factory, household, t)
     assert (row.category_id, row.category_source) == (c, "user")
     assert await _audit(factory, household) == ["ledger.category_set"]
@@ -178,14 +180,40 @@ async def test_rule_category_is_not_audited_and_none_clears(
     t = await _txn(factory, household, a, "-5.00")
     c = await _category(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         await svc.apply_category(t, c, AutoCategorySource.RULE)
     assert (await _row(factory, household, t)).category_source == "rule"
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household).apply_category(t, None, AutoCategorySource.RULE)
+        await LedgerWriter(s, household).apply_category(t, None, AutoCategorySource.RULE)
     row = await _row(factory, household, t)
     assert (row.category_id, row.category_source) == (None, None)
     assert await _audit(factory, household) == []
+
+
+async def test_automated_source_never_overwrites_a_user_category(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await _account(factory, household)
+    t = await _txn(factory, household, a, "-5.00")
+    mine = await _category(factory, household, "Mine")
+    other = await _category(factory, household, "Other")
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=USER).set_category(t, mine)
+    for source in AutoCategorySource:
+        async with scoped_session(factory, household, None, household_wide=True) as s:
+            assert await LedgerWriter(s, household).apply_category(t, other, source) is False
+        async with scoped_session(factory, household, None, household_wide=True) as s:
+            assert await LedgerWriter(s, household).apply_category(t, None, source) is False
+    row = await _row(factory, household, t)
+    assert (row.category_id, row.category_source) == (mine, "user")
+    # The user can still change their own choice, and an automated source applies elsewhere.
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        await LedgerWriter(s, household, user_id=USER).set_category(t, other)
+    assert (await _row(factory, household, t)).category_id == other
+    t2 = await _txn(factory, household, a, "-6.00")
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        assert await LedgerWriter(s, household).apply_category(t2, other, AutoCategorySource.PLAID)
+    assert (await _row(factory, household, t2)).category_source == "plaid"
 
 
 async def test_unknown_category_and_source_are_rejected(
@@ -194,7 +222,7 @@ async def test_unknown_category_and_source_are_rejected(
     a = await _account(factory, household)
     t = await _txn(factory, household, a, "-5.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         with pytest.raises(CategoryNotFoundError):
             await svc.set_category(t, uuid.uuid4())
         with pytest.raises(LedgerRuleError):
@@ -213,12 +241,12 @@ async def test_pairing_links_two_legs_and_unmark_dissolves_both(
         await _txn(factory, household, a2, "100.00"),
     )
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        group = await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, inn)
+        group = await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, inn)
     r1, r2 = await _row(factory, household, out), await _row(factory, household, inn)
     assert (r1.is_transfer, r2.is_transfer) == (True, True)
     assert r1.transfer_group_id == r2.transfer_group_id == group
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).unmark_transfer(inn)
+        await LedgerWriter(s, household, user_id=USER).unmark_transfer(inn)
     r1, r2 = await _row(factory, household, out), await _row(factory, household, inn)
     assert (r1.is_transfer, r1.transfer_group_id, r2.is_transfer, r2.transfer_group_id) == (
         False,
@@ -242,7 +270,7 @@ async def test_bad_pairs_write_nothing(factory: Factory, household: uuid.UUID) -
     for other in (same_acct_in, out2, eur_in, out):
         async with scoped_session(factory, household, None, household_wide=True) as s:
             with pytest.raises(TransferPairError):
-                await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, other)
+                await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, other)
     assert not (await _row(factory, household, out)).is_transfer
 
 
@@ -256,9 +284,9 @@ async def test_a_leg_cannot_join_two_groups_or_flip_sign(
         await _txn(factory, household, a2, "10.00"),
     )
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, inn)
+        await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, inn)
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         with pytest.raises(TransferPairError):
             await svc.mark_transfer_pair(out, third)
         with pytest.raises(TransferPairError):
@@ -272,7 +300,7 @@ async def test_single_leg_transfer(factory: Factory, household: uuid.UUID) -> No
     a = await _account(factory, household)
     t = await _txn(factory, household, a, "-10.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).mark_transfer_single(t)
+        await LedgerWriter(s, household, user_id=USER).mark_transfer_single(t)
     row = await _row(factory, household, t)
     assert (row.is_transfer, row.transfer_group_id) == (True, None)
 
@@ -287,12 +315,10 @@ async def test_splits_sum_exactly_and_are_replaced_not_appended(
     t = await _txn(factory, household, a, "-30.00")
     c = await _category(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         await svc.write_splits(t, [SplitInput(D("-10.00"), c), SplitInput(D("-20.00"))])
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).write_splits(
-            t, [SplitInput(D("-30.00"), c)]
-        )
+        await LedgerWriter(s, household, user_id=USER).write_splits(t, [SplitInput(D("-30.00"), c)])
     async with scoped_session(factory, household, None, household_wide=True) as s:
         amounts = (await s.execute(select(TransactionSplit.amount))).scalars().all()
     assert amounts == [D("-30.00")]
@@ -304,10 +330,10 @@ async def test_bad_splits_leave_existing_splits_untouched(
     a = await _account(factory, household)
     t = await _txn(factory, household, a, "-30.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).write_splits(t, [SplitInput(D("-30.00"))])
+        await LedgerWriter(s, household, user_id=USER).write_splits(t, [SplitInput(D("-30.00"))])
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(SplitError):
-            await LedgerService(s, household, user_id=USER).write_splits(
+            await LedgerWriter(s, household, user_id=USER).write_splits(
                 t, [SplitInput(D("-10.00")), SplitInput(D("-10.00"))]
             )
     async with scoped_session(factory, household, None, household_wide=True) as s:
@@ -321,17 +347,17 @@ async def test_amount_change_of_a_split_transaction_needs_new_splits(
     a = await _account(factory, household)
     t = await _txn(factory, household, a, "-30.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).write_splits(t, [SplitInput(D("-30.00"))])
+        await LedgerWriter(s, household, user_id=USER).write_splits(t, [SplitInput(D("-30.00"))])
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(LedgerRuleError):
-            await LedgerService(s, household, user_id=USER).set_amount(t, D("-40.00"))
+            await LedgerWriter(s, household, user_id=USER).set_amount(t, D("-40.00"))
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).set_amount(
+        await LedgerWriter(s, household, user_id=USER).set_amount(
             t, D("-40.00"), splits=[SplitInput(D("-15.00")), SplitInput(D("-25.00"))]
         )
     assert (await _row(factory, household, t)).amount == D("-40.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).clear_splits(t)
+        await LedgerWriter(s, household, user_id=USER).clear_splits(t)
         assert (await s.execute(select(TransactionSplit.id))).first() is None
 
 
@@ -353,7 +379,7 @@ async def test_another_household_cannot_write_my_transaction(
     t = await _txn(factory, household, a, "-5.00")
     c = await _category(factory, other_household)
     async with scoped_session(factory, other_household, None, household_wide=True) as s:
-        svc = LedgerService(s, other_household, user_id=USER)
+        svc = LedgerWriter(s, other_household, user_id=USER)
         with pytest.raises(TransactionNotFoundError):
             await svc.set_category(t, c)
         with pytest.raises(TransactionNotFoundError):
@@ -375,7 +401,7 @@ async def test_cross_household_pairing_is_impossible(
     theirs = await _txn(factory, other_household, await _account(factory, other_household), "5.00")
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(TransactionNotFoundError):
-            await LedgerService(s, household, user_id=USER).mark_transfer_pair(mine, theirs)
+            await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(mine, theirs)
 
 
 async def test_a_person_cannot_write_another_persons_private_account(
@@ -390,9 +416,9 @@ async def test_a_person_cannot_write_another_persons_private_account(
     c = await _category(factory, household)
     async with scoped_session(factory, household, sam) as s:
         with pytest.raises(TransactionNotFoundError):
-            await LedgerService(s, household, user_id=USER).set_category(t, c)
+            await LedgerWriter(s, household, user_id=USER).set_category(t, c)
     async with scoped_session(factory, household, alex) as s:
-        await LedgerService(s, household, user_id=USER).set_category(t, c)
+        await LedgerWriter(s, household, user_id=USER).set_category(t, c)
     assert (await _row(factory, household, t)).category_id == c
 
 
@@ -409,7 +435,7 @@ async def test_pair_with_unequal_magnitudes_is_rejected(
     )
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(TransferPairError):
-            await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, inn)
+            await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, inn)
 
 
 async def test_failed_set_amount_validation_leaves_the_stored_amount_unchanged(
@@ -419,7 +445,7 @@ async def test_failed_set_amount_validation_leaves_the_stored_amount_unchanged(
     t = await _txn(factory, household, a, "-30.00")
     # The caller catches the error and the session still commits: nothing may have been mutated.
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         with pytest.raises(SplitError):
             await svc.set_amount(t, D("-40.00"), splits=[SplitInput(D("-10.00"))])
         with pytest.raises(CategoryNotFoundError):
@@ -454,7 +480,7 @@ async def test_database_errors_carry_no_row_values(factory: Factory, household: 
     for account, source, fingerprint, expected in cases:
         async with scoped_session(factory, household, None, household_wide=True) as s:
             with pytest.raises(expected) as info:
-                await LedgerService(s, household).insert_transaction(
+                await LedgerWriter(s, household).insert_transaction(
                     NewTransaction(
                         account,
                         date(2026, 1, 1),
@@ -489,14 +515,14 @@ async def test_concurrent_edits_of_both_legs_never_deadlock(
         await _txn(factory, household, a2, "10.00"),
     )
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, inn)
+        await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, inn)
 
     async def hammer(leg: uuid.UUID, amount: str) -> list[BaseException]:
         errors: list[BaseException] = []
         for _ in range(15):
             try:
                 async with scoped_session(factory, household, None, household_wide=True) as s:
-                    await LedgerService(s, household, user_id=USER).set_amount(leg, D(amount))
+                    await LedgerWriter(s, household, user_id=USER).set_amount(leg, D(amount))
             except LedgerRetryableError:
                 pass  # typed and retryable is acceptable
             except BaseException as exc:
@@ -517,9 +543,9 @@ async def test_unmark_needs_both_legs_writable(factory: Factory, household: uuid
         await _txn(factory, household, a_sam, "10.00"),
     )
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        await LedgerService(s, household, user_id=USER).mark_transfer_pair(out, inn)
+        await LedgerWriter(s, household, user_id=USER).mark_transfer_pair(out, inn)
     async with scoped_session(factory, household, sam) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         with pytest.raises(TransferPairError):
             await svc.unmark_transfer(inn)  # Sam can write only his own leg
         with pytest.raises(TransferPairError):
@@ -531,7 +557,7 @@ async def test_unmark_needs_both_legs_writable(factory: Factory, household: uuid
     async with scoped_session(factory, household, alex) as s:
         pass  # alex alone cannot dissolve it either
         with pytest.raises(TransferPairError):
-            await LedgerService(s, household, user_id=USER).unmark_transfer(out)
+            await LedgerWriter(s, household, user_id=USER).unmark_transfer(out)
 
 
 async def test_person_scoped_split_and_transfer_writes_follow_account_visibility(
@@ -546,7 +572,7 @@ async def test_person_scoped_split_and_transfer_writes_follow_account_visibility
     t_shared = await _txn(factory, household, shared_alex, "-20.00")
     parts = [SplitInput(D("-5.00")), SplitInput(D("-15.00"))]
     async with scoped_session(factory, household, sam) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         await svc.write_splits(t_joint, parts)  # joint: ok
         await svc.mark_transfer_single(t_joint)
         for hidden_or_readonly in (t_private, t_shared):
@@ -555,7 +581,7 @@ async def test_person_scoped_split_and_transfer_writes_follow_account_visibility
             with pytest.raises(TransactionNotFoundError):
                 await svc.mark_transfer_single(hidden_or_readonly)
     async with scoped_session(factory, household, alex) as s:
-        await LedgerService(s, household, user_id=USER).write_splits(t_shared, parts)
+        await LedgerWriter(s, household, user_id=USER).write_splits(t_shared, parts)
 
 
 async def test_superseded_rows_cannot_be_edited_or_paired(
@@ -576,7 +602,7 @@ async def test_superseded_rows_cannot_be_edited_or_paired(
             update(Transaction).where(Transaction.id == old).values(superseded_by_id=winner)
         )
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household, user_id=USER)
+        svc = LedgerWriter(s, household, user_id=USER)
         for call in (
             svc.set_category(old, c),
             svc.apply_category(old, c, AutoCategorySource.RULE),
@@ -604,7 +630,7 @@ async def test_skip_duplicates_skips_on_either_idempotency_key(
         )
 
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        svc = LedgerService(s, household)
+        svc = LedgerWriter(s, household)
         assert await svc.insert_transaction(new("e1", f1), skip_duplicates=True) is not None
         assert await svc.insert_transaction(new("e1", f2), skip_duplicates=True) is None
         assert await svc.insert_transaction(new("e2", f1), skip_duplicates=True) is None
@@ -618,7 +644,7 @@ async def test_user_edits_need_a_user_and_the_session_must_match_the_household(
     t = await _txn(factory, household, a, "-5.00")
     c = await _category(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
-        anonymous = LedgerService(s, household)
+        anonymous = LedgerWriter(s, household)
         for call in (
             anonymous.set_category(t, c),
             anonymous.set_amount(t, D("-6.00")),
@@ -628,10 +654,10 @@ async def test_user_edits_need_a_user_and_the_session_must_match_the_household(
             with pytest.raises(LedgerRuleError):
                 await call
         with pytest.raises(ValueError, match="scoped"):
-            LedgerService(s, uuid.uuid4(), user_id=USER)
+            LedgerWriter(s, uuid.uuid4(), user_id=USER)
     async with factory() as unscoped:
         with pytest.raises(ValueError, match="scoped"):
-            LedgerService(unscoped, household, user_id=USER)
+            LedgerWriter(unscoped, household, user_id=USER)
 
 
 async def test_category_source_cannot_be_user_on_the_automated_paths(
@@ -640,7 +666,7 @@ async def test_category_source_cannot_be_user_on_the_automated_paths(
     a = await _account(factory, household)
     async with scoped_session(factory, household, None, household_wide=True) as s:
         with pytest.raises(LedgerRuleError):
-            await LedgerService(s, household).insert_transaction(
+            await LedgerWriter(s, household).insert_transaction(
                 NewTransaction(
                     a,
                     date(2026, 1, 1),
