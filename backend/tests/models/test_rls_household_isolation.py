@@ -41,6 +41,8 @@ def _clone_for_insert(name: str, row: dict[str, Any]) -> dict[str, Any]:
         clone["id"] = uuid.uuid4()
     elif name == "balance_snapshot":
         clone["as_of_date"] = clone["as_of_date"] + timedelta(days=1)
+    elif name == "price_history":
+        clone["date"] = clone["date"] + timedelta(days=1)
     elif name == "household_setting":
         clone["key"] = f"{clone['key']}.copy"
     return clone

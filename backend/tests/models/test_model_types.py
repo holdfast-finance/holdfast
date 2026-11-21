@@ -21,6 +21,8 @@ NUMERIC_KINDS: dict[str, tuple[int, int]] = {
     "money": (14, 2),
     "quantity": (28, 10),
     "price": (18, 8),
+    "crypto_quantity": (38, 18),
+    "crypto_price": (28, 12),
     "ratio": (5, 4),
     "rate": (7, 4),
 }
@@ -58,6 +60,9 @@ NUMERIC_COLUMNS: dict[tuple[str, str], str] = {
     ("import_run", "closing_balance"): "money",
     ("import_run", "txn_sum"): "money",
     ("import_run", "balance_diff"): "money",
+    ("crypto_tx", "quantity"): "crypto_quantity",
+    ("crypto_tx", "fee_qty"): "crypto_quantity",
+    ("price_history", "close_usd"): "crypto_price",
 }
 
 

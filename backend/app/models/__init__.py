@@ -11,6 +11,7 @@ from app.models.agent import AgentConversation, AgentFinding, AgentMessage
 from app.models.audit import AuditLog
 from app.models.budgets import Budget, BudgetLine
 from app.models.credit import CreditInquiry, CreditReport, CreditScoreEntry, Tradeline
+from app.models.crypto import CryptoAddress, CryptoTx, CryptoWallet, ExchangeAccount, PriceHistory
 from app.models.documents import Document, ParsedField
 from app.models.household import Household, HouseholdSetting, Person
 from app.models.identity import AppUser, AuthSession, TotpRecoveryCode, WebauthnCredential
@@ -36,8 +37,12 @@ __all__ = [
     "CreditInquiry",
     "CreditReport",
     "CreditScoreEntry",
+    "CryptoAddress",
+    "CryptoTx",
+    "CryptoWallet",
     "Document",
     "EstimateSnapshot",
+    "ExchangeAccount",
     "Holding",
     "Household",
     "HouseholdSetting",
@@ -48,6 +53,7 @@ __all__ = [
     "Liability",
     "ParsedField",
     "Person",
+    "PriceHistory",
     "Rule",
     "Security",
     "SyncRun",

@@ -63,6 +63,11 @@ HOUSEHOLD_TABLES = (
     "job_run",
     "import_run",
     "sync_run",
+    "crypto_wallet",
+    "crypto_address",
+    "crypto_tx",
+    "exchange_account",
+    "price_history",
 )
 IDENTITY_TABLES = ("app_user", "webauthn_credential", "auth_session", "totp_recovery_code")
 REFERENCE_TABLES = ("institution", "security")
@@ -389,6 +394,55 @@ def seed_household(engine: Engine, label: str) -> Seed:
         )
         import_run = _insert(c, "import_run", **h, document_id=doc, account_id=acct)
         sync_run = _insert(c, "sync_run", **h, bank_connection_id=conn_id)
+        wallet = _insert(
+            c,
+            "crypto_wallet",
+            **h,
+            owner_person_id=p1,
+            label="Example cold storage",
+            chain="bitcoin",
+            kind="watch_address",
+            identity_hash=uuid.uuid4().hex * 2,
+        )
+        crypto_address = _insert(
+            c,
+            "crypto_address",
+            **h,
+            wallet_id=wallet,
+            address="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+        )
+        exchange = _insert(
+            c,
+            "exchange_account",
+            **h,
+            owner_person_id=p1,
+            exchange_id="example",
+            label="Example exchange",
+            api_key_enc=b"ciphertext",
+            api_secret_enc=b"ciphertext",
+            permissions={"read": True, "trade": False, "withdraw": False, "reported": True},
+        )
+        crypto_tx = _insert(
+            c,
+            "crypto_tx",
+            **h,
+            wallet_id=wallet,
+            chain="bitcoin",
+            tx_hash="ab" * 32,
+            address="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+            direction="in",
+            asset="BTC",
+            quantity=Decimal("0.00100000"),
+        )
+        _insert(
+            c,
+            "price_history",
+            **h,
+            asset="BTC",
+            date=date(2026, 1, 31),
+            source="example",
+            close_usd=Decimal("50000.000000000000"),
+        )
 
     rows: dict[str, dict[str, Any]] = {
         "person": {"id": p1},
@@ -421,6 +475,16 @@ def seed_household(engine: Engine, label: str) -> Seed:
         "job_run": {"id": job_run},
         "import_run": {"id": import_run},
         "sync_run": {"id": sync_run},
+        "crypto_wallet": {"id": wallet},
+        "crypto_address": {"id": crypto_address},
+        "exchange_account": {"id": exchange},
+        "crypto_tx": {"id": crypto_tx},
+        "price_history": {
+            "household_id": hid,
+            "asset": "BTC",
+            "date": date(2026, 1, 31),
+            "source": "example",
+        },
     }
     assert set(rows) == set(HOUSEHOLD_TABLES)
     return Seed(household_id=hid, person_ids=[p1, p2], rows=rows)

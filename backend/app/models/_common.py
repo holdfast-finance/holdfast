@@ -44,6 +44,10 @@ HouseholdId = Annotated[
 Money = Annotated[Decimal, mapped_column(Numeric(14, 2))]
 Quantity = Annotated[Decimal, mapped_column(Numeric(28, 10))]
 Price = Annotated[Decimal, mapped_column(Numeric(18, 8))]
+# Crypto (ADR 0020). 18 decimals is what an EVM wei needs, 20 integer digits cover every real
+# balance. Prices carry 12 decimals so a sub-cent token times a huge quantity does not lose cents.
+CryptoQuantity = Annotated[Decimal, mapped_column(Numeric(38, 18))]
+CryptoPrice = Annotated[Decimal, mapped_column(Numeric(28, 12))]
 # Fractions in [0, 1] such as confidence scores and alert thresholds (0.8000 = 80%). Not money.
 # Every Ratio column carries ``check_ratio``.
 Ratio = Annotated[Decimal, mapped_column(Numeric(5, 4))]
@@ -86,6 +90,31 @@ IMPORT_RUN_STATUSES = ("queued", "running", "succeeded", "failed")
 # ``import_run_guard`` trigger; ``accepted`` is never written on insert.
 RECONCILE_STATUSES = ("pending", "reconciled", "needs_review", "accepted")
 SYNC_RUN_STATUSES = ("running", "succeeded", "failed")
+# Crypto Track (ADR 0020). Spend wallets arrive with Phase 10c, which relaxes ``is_watch_only``.
+CRYPTO_WALLET_KINDS = ("watch_xpub", "watch_descriptor", "watch_address")
+CRYPTO_NETWORKS = ("mainnet", "testnet", "signet", "regtest")
+CRYPTO_SCRIPT_TYPES = ("p2pkh", "p2sh_p2wpkh", "p2wpkh", "p2tr", "p2wsh")
+CRYPTO_WALLET_STATUSES = ("active", "needs_review", "error")
+CRYPTO_TX_DIRECTIONS = ("in", "out")
+CRYPTO_TX_CLASSIFICATIONS = (
+    "buy",
+    "sell",
+    "swap",
+    "transfer_in",
+    "transfer_out",
+    "income_staking",
+    "income_mining",
+    "airdrop",
+    "gift",
+    "spend",
+    "fee",
+)
+EXCHANGE_ACCOUNT_STATUSES = ("active", "needs_attention", "error", "disconnected")
+# A chain or exchange slug, an asset symbol and a price source: short, no spaces.
+CRYPTO_SLUG_PATTERN = "^[a-z][a-z0-9_]{1,63}$"
+CRYPTO_ASSET_PATTERN = "^[A-Z0-9][A-Z0-9._-]{0,31}$"
+# A lower-case transaction hash (Bitcoin: 64 hex, EVM: 0x + 64 hex).
+CRYPTO_TX_HASH_PATTERN = "^(0x)?[0-9a-f]{64}$"
 # Statement reconciliation tolerance in currency units: |closing - (opening + sum)| <= 0.01.
 RECONCILE_TOLERANCE_SQL = "0.01"
 # An exception class name (optionally dotted), never a message: no spaces, quotes or colons, so
