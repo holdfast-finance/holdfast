@@ -34,6 +34,9 @@ dependencies = [
     "pyotp>=2.12.0",
     "webauthn>=3.0.1",
     "pyyaml>=6.0",
+    "embit>=0.8,<0.9",
+    "pycryptodome>=3.20",
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
@@ -109,6 +112,11 @@ warn_unreachable = true
 
 [[tool.mypy.overrides]]
 module = ["arq", "arq.*"]
+ignore_missing_imports = true
+
+# embit ships no type information. Its use is confined to app/domain/crypto/bitcoin.py (ADR 0020).
+[[tool.mypy.overrides]]
+module = ["embit", "embit.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
