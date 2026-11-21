@@ -50,6 +50,9 @@ services:
     build: !reset null
     working_dir: /app
     environment:
+      # Vite only answers host names it knows (web/vite.config.ts). Caddy forwards APP_HOST, so a
+      # stack served under another name (a tailnet name, say) needs it here or Vite answers 403.
+      APP_HOST: ${APP_HOST:-localhost}
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       npm_config_store_dir: /pnpm-store
       CI: "true"
