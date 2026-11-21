@@ -1,0 +1,22 @@
+# Navy Federal Credit Union combined deposit statement (checking, savings, ...). One block per
+# account. Row dates are MM-DD (year from the period). A debit prints a trailing "-" after the
+# amount; a credit has none. Balances print without "$".
+id: navy-federal-deposit
+institution: Navy Federal Credit Union
+kind: asset
+fingerprint:
+  - '~Summary of your deposit accounts~'
+  - '~Statement of Account~'
+period: 'Statement Period\s+(?P<start>\d\d/\d\d/\d\d) - (?P<end>\d\d/\d\d/\d\d)'
+period_date_format: '%m/%d/%y'
+date_format: '%m-%d'
+block_start: '^\s*(?P<name>[A-Z][A-Za-z ]+?) - \d{6}(?P<last4>\d{4})\b'
+opening: '^\s*\d\d-\d\d\s+~Beginning Balance~\s*(?P<v>-?[\d,]+\.\d\d\s*-?)\s*$'
+closing: '^\s*\d\d-\d\d\s+~Ending Balance~\s*(?P<v>-?[\d,]+\.\d\d\s*-?)\s*$'
+groups:
+  - sign: as_is
+    enter: '~Date Transaction Detail~'
+    leave: '^\s*\d\d-\d\d\s+~Ending Balance~'
+    row: '^\s*(?P<date>\d\d-\d\d)\s+(?!(?:~Beginning~|~Ending~)\s*~Balance~)(?P<desc>(?:(?!(?<![\d-])\d\d-\d\d\s).)+?)\s+(?P<amount>[\d,]+\.\d\d)\s*(?P<neg>-)?(?:\s+(?P<balance>-?[\d,]+\.\d\d\s*-?))?\s*$'
+    wrap_start: '^\s*(?P<date>\d\d-\d\d)\s+(?!(?:~Beginning~|~Ending~)\s*~Balance~)(?P<desc>.+?)\s*$'
+    wrap_end: '^\s*(?!\d\d-\d\d\s)(?P<desc>[^\d\s].*?)?\s*(?P<amount>[\d,]+\.\d\d)\s*(?P<neg>-)?(?:\s+(?P<balance>-?[\d,]+\.\d\d\s*-?))?\s*$'

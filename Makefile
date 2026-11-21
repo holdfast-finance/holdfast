@@ -98,6 +98,11 @@ migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` 
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
 
+.PHONY: import-measure
+import-measure: ## Aggregate-only parse report over a directory of statements: make import-measure DIR=<dir>
+	@test -n "$(DIR)" || { echo "usage: make import-measure DIR=<dir of PDFs or sanitized .txt>"; exit 2; }
+	@cd backend && uv run --extra sanitize python -m app.importers.harness "$(abspath $(DIR))"
+
 .PHONY: sanitize
 sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-private/inbox OUT=$$HOME/holdfast-private/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
 	@test -n "$(IN)" || { echo "usage: make sanitize IN=<dir|zip|file> OUT=<dir> [REVIEW=1] [KEEP=Word]"; exit 2; }
