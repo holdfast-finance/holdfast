@@ -99,8 +99,11 @@ seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
 
 .PHONY: sanitize
-sanitize: ## Sanitize real statements offline: make sanitize IN=~/holdfast-private/inbox OUT=~/holdfast-private/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
+sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-private/inbox OUT=$$HOME/holdfast-private/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
 	@test -n "$(IN)" || { echo "usage: make sanitize IN=<dir|zip|file> OUT=<dir> [REVIEW=1] [KEEP=Word]"; exit 2; }
+	@for p in "$(abspath $(IN))" $(if $(OUT),"$(abspath $(OUT))"); do \
+	  case "$$p/" in "$(CURDIR)"/*) echo "sanitize: $$p is inside the repository. Real statements and sanitizer output stay outside it (ADR 0019). Use an absolute path such as $$HOME/holdfast-private/..." >&2; exit 2;; esac; \
+	done
 	@cd backend && uv run --extra sanitize python -m app.importers.sanitize "$(abspath $(IN))" $(if $(REVIEW),--review,"$(abspath $(OUT))") $(if $(CLEAR),--clear-out) $(foreach w,$(KEEP),--keep "$(w)")
 
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)

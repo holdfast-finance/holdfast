@@ -5,8 +5,8 @@
 # Output is file names only. A denylist hit never prints the matching text.
 set -euo pipefail
 mode="${1:-tree}"
-allow='^(docs/brand/[^/]+\.pdf|docs/research/[^/]+\.pdf|backend/tests/fixtures/.+\.sanitized\.[a-z]+)$'
-types='\.(pdf|ofx|qfx|qbo|xls|xlsx|zip)$'
+allow='^(docs/brand/[^/]+\.pdf|docs/research/[^/]+\.pdf|backend/tests/fixtures/.+\.sanitized\.[a-z]+|backend/tests/fixtures/.+\.csv)$'
+types='\.(pdf|csv|ofx|qfx|qbo|xls|xlsx|zip)$'
 fail=0
 
 if [ "$mode" = staged ]; then
