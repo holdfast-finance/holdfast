@@ -456,7 +456,7 @@ wheels = [
 ]
 
 [[package]]
-name = "holdfast"
+name = "holdfast-finance"
 version = "0.0.0a0"
 source = { virtual = "." }
 dependencies = [

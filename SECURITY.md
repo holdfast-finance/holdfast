@@ -1,9 +1,9 @@
 # Security policy
 
-Holdfast is pre-alpha. Don't run it with real financial data on an internet-exposed host.
+Holdfast is alpha software. Don't run it with real financial data on an internet-exposed host.
 
 ## Reporting a vulnerability
-Please report privately, not in a public issue. Use GitHub's "Report a vulnerability" (private advisory) on this repository once it's public. We aim to acknowledge reports within 72 hours.
+Please report privately, not in a public issue. Use GitHub's "Report a vulnerability" (private advisory) on this repository. We aim to acknowledge reports within 72 hours.
 
 ## Design commitments
 - No public ports: access is through Tailscale (or your own WireGuard).
