@@ -11,6 +11,7 @@ Nothing here returns, logs or audits a key. The response says only whether a key
 from __future__ import annotations
 
 import contextlib
+import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -42,6 +43,7 @@ CLIENT_NAME = "Holdfast"
 CHECKS_PER_WINDOW = 6
 CHECK_WINDOW_SECONDS = 300
 STATEMENTS_PROBE_DAYS = 90
+_KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 
 
 def _plaid_keys(settings: Settings) -> tuple[str, str]:
@@ -72,6 +74,15 @@ def plaid_credentials(settings: Settings) -> PlaidCredentials | None:
 def open_client(credentials: PlaidCredentials) -> PlaidClient:
     """Seam for tests, which replace this with a client on a recorded transport."""
     return PlaidClient(credentials)
+
+
+def _malformed(credentials: PlaidCredentials) -> bool:
+    """True when a key holds anything but printable ASCII (a line break or stray byte from a
+    copy-paste). Such a key cannot be sent as a header, so it is refused before any request."""
+    return not all(
+        _KEY_SHAPE.fullmatch(value.reveal())
+        for value in (credentials.client_id, credentials.secret)
+    )
 
 
 def _probe_error(exc: PlaidError | PlaidUnavailable) -> pf.Probe:
@@ -134,7 +145,9 @@ class PlaidSetupService:
             )
         facts = await self._facts()
         credentials = plaid_credentials(self.ctx.settings)
-        if credentials is not None:
+        if credentials is not None and _malformed(credentials):
+            facts = _with(facts, keys=pf.Probe("rejected", "keys_malformed"))
+        elif credentials is not None:
             async with open_client(credentials) as plaid:
                 facts = await _probe(plaid, facts, self.ctx.settings, datetime.now(UTC).date())
         result = pf.evaluate(facts)
