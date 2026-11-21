@@ -41,6 +41,14 @@ async function upload(file: File) {
   await userEvent.click(screen.getByRole('button', { name: 'Import statement' }))
 }
 
+// The shell footer has its own status region, so pick the upload card's live region by its marker.
+const uploadStatus = (): HTMLElement => {
+  const region = screen
+    .getAllByRole('status')
+    .find((el) => el.getAttribute('aria-atomic') === 'true')
+  if (!region) throw new Error('upload live region not found')
+  return region
+}
 const queue = () => screen.findByRole('region', { name: /Needs review/ })
 const result = () => screen.findByRole('region', { name: 'Import result' })
 
@@ -56,24 +64,65 @@ describe('Import page: runs and the review queue', () => {
     expect(
       within(review).getByText(/From the figures: Holdfast could not find/),
     ).toBeInTheDocument()
-    expect(within(review).getByText(/From the figures: Opening balance plus/)).toBeInTheDocument()
+    expect(within(review).getByText(/^Opening balance plus/)).toBeInTheDocument()
     const recent = screen.getByRole('region', { name: 'Recent imports' })
-    expect(within(recent).getAllByRole('listitem')).toHaveLength(5)
+    expect(within(recent).getAllByRole('listitem')).toHaveLength(6)
     expect(within(recent).getByText(/ParseError, nothing was added/)).toBeInTheDocument()
     expect(within(recent).getByText(/accepted Oct 4/)).toBeInTheDocument()
   })
 
-  it('explains when the list cannot tell why a statement was flagged', async () => {
+  it.each<[string, RegExp[]]>([
+    ['balance_mismatch', [/^Opening balance plus/]],
+    ['missing_balance', [/^Holdfast could not find/]],
+    ['date_out_of_period', [/^Some transactions are dated outside/]],
+    ['no_transactions_in_document', [/^This statement had balances but no transactions/]],
+    ['unexplained_duplicates', [/^Some rows were skipped as duplicates/]],
+    [
+      'balance_mismatch, date_out_of_period',
+      [/^Opening balance plus/, /^Some transactions are dated outside/],
+    ],
+    ['unknown', [/^From the figures: Opening balance plus/]],
+    ['odd_new_code', [/^From the figures: Opening balance plus/]],
+    [
+      'date_out_of_period,odd_new_code',
+      [/^Some transactions are dated outside/, /^From the figures: Opening balance plus/],
+    ],
+  ])('shows reason %s in the queue and accept sheet', async (reason, expected) => {
+    seedHousehold({ signedIn: true })
+    seedLedger()
+    seedImportRuns({ empty: true })
+    importFile('example-review.pdf', 'review')
+    const run = db.importRuns[0]
+    if (!run) throw new Error('seed missing')
+    run.reason = reason
+    renderApp('/import')
+    const review = await queue()
+    const assertReasons = (scope: HTMLElement) => {
+      for (const line of expected) expect(within(scope).getByText(line)).toBeVisible()
+      expect(within(scope).queryByText(/^Flagged:/)).not.toBeInTheDocument()
+      expect(within(scope).queryAllByText(/^From the figures:/)).toHaveLength(
+        expected.filter((line) => line.source.startsWith('^From the figures:')).length,
+      )
+    }
+    assertReasons(review)
+    await userEvent.click(within(review).getByRole('button', { name: 'Review and accept' }))
+    assertReasons(await screen.findByRole('dialog', { name: 'Accept this statement?' }))
+  })
+
+  it('explains when a stored code and the figures give no reason', async () => {
     seedHousehold({ signedIn: true })
     seedLedger()
     seedImportRuns({ empty: true })
     importFile('example-dates.pdf', 'dates')
+    const run = db.importRuns[0]
+    if (!run) throw new Error('seed missing')
+    run.reason = 'unknown'
     renderApp('/import')
     const review = await queue()
-    expect(within(review).getByText("This list doesn't carry the reason.")).toBeInTheDocument()
+    const fallback = 'From the figures: No reason could be determined.'
+    expect(within(review).getByText(fallback)).toBeVisible()
     await userEvent.click(within(review).getByRole('button', { name: 'Review and accept' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Accept this statement?' })
-    expect(within(dialog).getByText("This list doesn't carry the reason.")).toBeInTheDocument()
+    expect(within(await screen.findByRole('dialog')).getByText(fallback)).toBeVisible()
   })
 
   it('shows an empty state with no imports', async () => {
@@ -109,7 +158,12 @@ describe('Import page: runs and the review queue', () => {
         }
         if (failNext) {
           return HttpResponse.json(
-            { error: { code: 'server_error', message: 'Older imports are temporarily unavailable.' } },
+            {
+              error: {
+                code: 'server_error',
+                message: 'Older imports are temporarily unavailable.',
+              },
+            },
             { status: 500 },
           )
         }
@@ -123,8 +177,11 @@ describe('Import page: runs and the review queue', () => {
     expect(await review.findByRole('alert')).toHaveTextContent(
       'Older imports are temporarily unavailable.',
     )
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(review.getByRole('button', { name: 'Retry' })).toBeEnabled()
+    const recent = within(screen.getByRole('region', { name: 'Recent imports' }))
     failNext = false
-    await userEvent.click(review.getByRole('button', { name: 'Retry' }))
+    await userEvent.click(recent.getByRole('button', { name: 'Retry' }))
     expect(await review.findByText('Every imported statement reconciled.')).toBeVisible()
   })
 
@@ -150,7 +207,7 @@ describe('Import page: runs and the review queue', () => {
     expect(within(review).getByText('This queue covers loaded pages only.')).toBeInTheDocument()
     await userEvent.click(within(review).getByRole('button', { name: 'Load more' }))
     await waitFor(() => {
-      expect(within(recent).getAllByRole('listitem')).toHaveLength(25)
+      expect(within(recent).getAllByRole('listitem')).toHaveLength(26)
     })
     expect(within(recent).queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
   })
@@ -168,7 +225,7 @@ describe('Import page: accepting a flagged statement', () => {
 
   it('shows why and the difference first, says it does not reconcile, then accepts', async () => {
     const dialog = await openAccept()
-    expect(within(dialog).getByText(/From the figures: Opening balance plus/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/^Opening balance plus/)).toBeInTheDocument()
     expect(within(dialog).getByText('-$45.25')).toBeInTheDocument()
     expect(within(dialog).getByText(/make it reconciled/)).toBeInTheDocument()
     await userEvent.click(within(dialog).getByRole('button', { name: 'Accept statement' }))
@@ -182,6 +239,7 @@ describe('Import page: accepting a flagged statement', () => {
     expect(
       db.importRuns.find((r) => r.account_name === 'Sample travel card')?.reconcile_status,
     ).toBe('accepted')
+    expect(db.importRuns.find((r) => r.account_name === 'Sample travel card')?.reason).toBeNull()
   })
 
   it('cancel leaves the run untouched', async () => {
@@ -194,7 +252,7 @@ describe('Import page: accepting a flagged statement', () => {
       const review = screen.getByRole('region', { name: /Needs review/ })
       expect(within(review).getAllByRole('button', { name: 'Review and accept' })[0]).toHaveFocus()
     })
-    expect(db.importRuns.filter((r) => r.reconcile_status === 'needs_review')).toHaveLength(2)
+    expect(db.importRuns.filter((r) => r.reconcile_status === 'needs_review')).toHaveLength(3)
   })
 
   it('shows the server answer when the run is no longer reviewable', async () => {
@@ -245,7 +303,7 @@ describe('Import page: uploading', () => {
     await waitFor(() => {
       expect(
         within(screen.getByRole('region', { name: 'Recent imports' })).getAllByRole('listitem'),
-      ).toHaveLength(6)
+      ).toHaveLength(7)
     })
   })
 
@@ -265,13 +323,16 @@ describe('Import page: uploading', () => {
     open()
     await upload(pdf('november-review.pdf'))
     const res = await result()
+    expect(uploadStatus()).toHaveTextContent('Imported, needs review')
     expect(within(res).getByText(/does not equal the closing balance/)).toBeInTheDocument()
     await userEvent.click(within(res).getByRole('button', { name: 'Review and accept' }))
     const dialog = await screen.findByRole('dialog', { name: 'Accept this statement?' })
     // The upload response carries the reason, so it is shown here too.
     expect(within(dialog).getByText(/does not equal the closing balance/)).toBeInTheDocument()
     await userEvent.click(within(dialog).getByRole('button', { name: 'Accept statement' }))
-    expect(await within(res).findByRole('heading', { name: 'Imported and accepted' })).toBeVisible()
+    const heading = await within(res).findByRole('heading', { name: 'Imported and accepted' })
+    await waitFor(() => expect(heading).toHaveFocus())
+    expect(uploadStatus()).toBeEmptyDOMElement()
     expect(within(res).getByText('Accepted')).toBeInTheDocument()
     expect(within(res).queryByRole('button', { name: 'Review and accept' })).not.toBeInTheDocument()
     expect(db.importRuns[0]?.reconcile_status).toBe('accepted')

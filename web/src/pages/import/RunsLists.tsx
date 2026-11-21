@@ -35,14 +35,15 @@ function ReviewItem({
         </div>
         <ReconcileBadge status={run.reconcile_status} />
       </div>
-      <ReasonList reason={undefined} numbers={run} />
+      <ReasonList reason={run.reason} numbers={run} fromRun />
       <ReconcileFacts numbers={run} currency={run.currency} />
       <AcceptButton
         runId={run.id}
         label={runLabel(run)}
         numbers={run}
         currency={run.currency}
-        reason={undefined}
+        reason={run.reason}
+        fromRun
         fallbackFocus={fallbackFocus}
         onAccepted={onAccepted}
       />
@@ -131,25 +132,15 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
     : allReconciled
       ? 'Every imported statement reconciled.'
       : 'Nothing needs review.'
-  const pagination = (
-    <>
-      {runs.isFetchNextPageError && (
-        <div role="alert">
-          <p className="text-sm font-medium text-destructive-text">Couldn't load more.</p>
-          <p className="text-sm text-muted-foreground">{errorMessage(runs.error)}</p>
-        </div>
-      )}
-      {runs.hasNextPage && (
-        <Button
-          variant="outline"
-          size="lg"
-          disabled={runs.isFetchingNextPage}
-          onClick={() => void runs.fetchNextPage()}
-        >
-          {runs.isFetchingNextPage ? 'Loading…' : runs.isFetchNextPageError ? 'Retry' : 'Load more'}
-        </Button>
-      )}
-    </>
+  const pagination = runs.hasNextPage && (
+    <Button
+      variant="outline"
+      size="lg"
+      disabled={runs.isFetchingNextPage}
+      onClick={() => void runs.fetchNextPage()}
+    >
+      {runs.isFetchingNextPage ? 'Loading…' : runs.isFetchNextPageError ? 'Retry' : 'Load more'}
+    </Button>
   )
   return (
     <>
@@ -184,6 +175,12 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
               />
             ))}
           </ul>
+        )}
+        {runs.isFetchNextPageError && (
+          <div role="alert">
+            <p className="text-sm font-medium text-destructive-text">Couldn't load more.</p>
+            <p className="text-sm text-muted-foreground">{errorMessage(runs.error)}</p>
+          </div>
         )}
         {pagination}
       </section>
