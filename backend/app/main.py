@@ -21,6 +21,7 @@ from app import __version__
 from app.api import errors
 from app.config import Settings, get_settings
 from app.db import CONNECT_TIMEOUT_SECONDS, create_engine, create_session_factory
+from app.integrations.registry import registry as connector_registry
 from app.logging import configure_logging, get_logger
 from app.security import crypto
 from app.security.body_limit import BodySizeLimitMiddleware
@@ -148,6 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.fernet_key is not None:
             crypto.load_ring(settings.fernet_key)  # malformed or duplicate keys fail startup
+        connector_registry.freeze()  # no registration after startup
         log.info("api.startup", version=__version__, app_env=settings.app_env)
         task = asyncio.create_task(_setup_token_loop(app))
         try:
