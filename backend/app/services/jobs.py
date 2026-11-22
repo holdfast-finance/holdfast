@@ -12,7 +12,19 @@ no-op)::
 
 A ``running`` row may be re-claimed only by a runner holding the household lock: while the lock
 is held nobody else can be running that household's jobs, so the row is an orphan of a dead
-worker.
+worker. Every mark after a claim also matches the attempt number it claimed, so an execution
+that lost its row to a re-claim can't overwrite the newer attempt's outcome.
+
+**Enqueue authority.** The worker runs handlers household-wide, so enqueue is the only place
+the requester's own rights apply. It takes the *authenticated* household and person, never the
+payload's word for them, and checks every referenced id in that person's RLS-scoped session
+before anything is recorded or queued: a ``Ref`` the job writes (the default) must pass the
+table's UPDATE policy, a ``Ref(..., access="read")`` its SELECT policy.
+
+**Redelivery.** Pushing a run to arq is always safe to repeat: arq drops a push whose
+``_job_id`` it still holds, and a second delivery can only claim the run under the household
+lock with a conditional UPDATE. So a duplicate enqueue re-pushes any unfinished run, and the
+worker's sweeper (``app.jobs.runner.sweep_stalled_runs``) re-pushes runs arq has lost.
 """
 
 from __future__ import annotations
@@ -20,10 +32,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,11 +56,68 @@ class IdempotencyConflict(ValueError):
     """The idempotency key was already used for the same job with a different payload."""
 
 
+class JobReferenceNotVisible(LookupError):
+    """The payload names a household or row the requester can't see, or can't write when the
+    job writes it. Render it as not found.
+
+    The message names the job and the field, never the id.
+    """
+
+
 @dataclass(frozen=True)
 class EnqueueResult:
     run_id: uuid.UUID
     created: bool  # False: an existing run with this key was returned (no new side effect)
     status: str
+
+
+async def _check_references(
+    session: AsyncSession, spec: JobSpec[Any], payload: JobPayload, household_id: uuid.UUID
+) -> None:
+    """Every ``Ref`` field must name a row the session (the requester's rights) may use.
+
+    For a write reference the lookup takes a ``FOR KEY SHARE`` row lock. Postgres applies a
+    table's UPDATE policies (their USING clause) to any row a ``SELECT ... FOR UPDATE/SHARE``
+    locks, and drops the rows that fail them, so the lookup finds exactly the rows the requester
+    could update directly. ``KEY SHARE`` is the weakest row lock (it blocks only deletes and key
+    changes) and lasts until enqueue commits. Locking needs the UPDATE privilege on the table:
+    a table the app can't update has nothing for a job to write either, so use ``access="read"``.
+    """
+    for field, ref in spec.payload.refs.items():
+        table = ref.model.__table__
+        stmt = select(table.c.id).where(
+            table.c.id == getattr(payload, field),
+            table.c.household_id == household_id,  # RLS does this too; belt and braces
+        )
+        if ref.access == "write":
+            stmt = stmt.with_for_update(read=True, key_share=True)
+        if (await session.execute(stmt)).first() is None:
+            raise JobReferenceNotVisible(f"{spec.name}: {field} not found")
+
+
+async def push(
+    queue: JobQueue,
+    job_name: str,
+    household_id: uuid.UUID,
+    run_id: uuid.UUID,
+    payload_json: str,
+    status: str,
+    next_attempt_at: datetime | None,
+) -> bool:
+    """(Re-)push an unfinished run to arq under ``_job_id=run_id``. Returns whether it pushed.
+
+    ``queued`` and ``running`` go out now; ``retrying`` waits for ``next_attempt_at``. arq
+    drops the push if it still holds that job id (queued, deferred or in progress), so this only
+    ever revives a run arq has lost. Finished runs are never pushed.
+    """
+    if status not in CLAIMABLE:
+        return False
+    args = (job_name, str(household_id), str(run_id), payload_json)
+    if status == "retrying" and next_attempt_at is not None:
+        await queue.enqueue_job(*args, _job_id=str(run_id), _defer_until=next_attempt_at)
+    else:
+        await queue.enqueue_job(*args, _job_id=str(run_id))
+    return True
 
 
 async def enqueue[P: JobPayload](
@@ -57,20 +126,68 @@ async def enqueue[P: JobPayload](
     spec: JobSpec[P],
     payload: P | Mapping[str, Any],
     *,
+    household_id: uuid.UUID,
+    requested_by: uuid.UUID | None,
     idempotency_key: str,
 ) -> EnqueueResult:
-    """Validate, record and queue one run. Same ``(household, job, key)`` twice = one run.
+    """Validate, authorize, record and queue one run. Same ``(household, job, key)`` twice = one
+    run.
 
-    Raises ``InvalidJobPayload`` / ``InvalidIdempotencyKey`` before touching Postgres or Redis.
-    A duplicate whose run is still ``queued`` is pushed to arq again under the same arq job id
-    (arq drops it if the job is already there), which heals a crash between commit and push.
+    ``household_id`` and ``requested_by`` come from the authenticated caller (the session's
+    user), never from ``payload``. ``requested_by`` is the person whose rights the payload's
+    ids are checked against. ``None`` is for system callers and gets RLS's person-less view,
+    never a household-wide one: it may *read* shared, summary-only and joint rows and *write*
+    joint rows only (plus tables with no per-person rule). A worker-side scheduler that needs a
+    person's own rows uses ``app.jobs.runner.enqueue_household_wide``, which ``app.api`` and
+    ``app.services`` can't import.
+
+    Raises ``InvalidJobPayload`` / ``InvalidIdempotencyKey`` before touching Postgres or Redis,
+    and ``JobReferenceNotVisible`` (nothing recorded or queued) if the payload names another
+    household or a row the requester can't use. The check runs for duplicates too, so a key
+    can't be used to probe someone else's run.
+
+    A duplicate whose run is unfinished is pushed to arq again (see :func:`push`), which heals a
+    crash between commit and push and a run arq dropped (its backstop timeout).
+    """
+    return await _enqueue(
+        factory,
+        queue,
+        spec,
+        payload,
+        household_id=household_id,
+        requested_by=requested_by,
+        household_wide=False,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _enqueue[P: JobPayload](
+    factory: async_sessionmaker[AsyncSession],
+    queue: JobQueue,
+    spec: JobSpec[P],
+    payload: P | Mapping[str, Any],
+    *,
+    household_id: uuid.UUID,
+    requested_by: uuid.UUID | None,
+    household_wide: bool,
+    idempotency_key: str,
+) -> EnqueueResult:
+    """:func:`enqueue`, with the reference check optionally household-wide.
+
+    The household-wide check is for the worker's own schedulers only, through
+    ``app.jobs.runner.enqueue_household_wide`` (``tests/jobs/test_job_boundaries.py`` fails if
+    anything else calls this).
     """
     validated = spec.validate(payload)
     check_idempotency_key(idempotency_key)
-    household_id = validated.household_id
+    if validated.household_id != household_id:
+        raise JobReferenceNotVisible(f"{spec.name}: household_id not found")
     body = validated.model_dump(mode="json")
 
-    async with scoped_session(factory, household_id, None) as s:
+    async with scoped_session(
+        factory, household_id, requested_by, household_wide=household_wide
+    ) as s:
+        await _check_references(s, spec, validated, household_id)
         stmt = (
             insert(JobRun)
             .values(
@@ -84,12 +201,13 @@ async def enqueue[P: JobPayload](
             .returning(JobRun.id)
         )
         new_id = (await s.execute(stmt)).scalar_one_or_none()
+        next_attempt_at: datetime | None = None
         if new_id is not None:
             run_id, status, created = new_id, "queued", True
         else:
             row = (
                 await s.execute(
-                    select(JobRun.id, JobRun.status, JobRun.payload).where(
+                    select(JobRun.id, JobRun.status, JobRun.payload, JobRun.next_attempt_at).where(
                         JobRun.household_id == household_id,
                         JobRun.job_name == spec.name,
                         JobRun.idempotency_key == idempotency_key,
@@ -99,66 +217,161 @@ async def enqueue[P: JobPayload](
             if row.payload != body:
                 raise IdempotencyConflict(f"{spec.name}: key reused with a different payload")
             run_id, status, created = row.id, row.status, False
+            next_attempt_at = row.next_attempt_at
 
-    if status == "queued":
-        await queue.enqueue_job(
-            spec.name,
-            str(household_id),
-            str(run_id),
-            validated.model_dump_json(),
-            _job_id=str(run_id),
-        )
-    log.info("job.enqueued", job=spec.name, run_id=str(run_id), created=created, status=status)
+    pushed = await push(
+        queue,
+        spec.name,
+        household_id,
+        run_id,
+        validated.model_dump_json(),
+        status,
+        next_attempt_at,
+    )
+    log.info(
+        "job.enqueued",
+        job=spec.name,
+        run_id=str(run_id),
+        created=created,
+        status=status,
+        pushed=pushed,
+    )
     return EnqueueResult(run_id=run_id, created=created, status=status)
+
+
+@dataclass(frozen=True)
+class StalledRun:
+    id: uuid.UUID
+    job_name: str
+    status: str
+    payload: dict[str, Any]
+    started_at: datetime | None
+    next_attempt_at: datetime | None
+    now: datetime  # the database's clock when the row was read
+
+
+async def stalled_runs(
+    factory: async_sessionmaker[AsyncSession],
+    household_id: uuid.UUID,
+    *,
+    pending_grace: timedelta,
+    running_after: timedelta,
+    limit: int,
+) -> list[StalledRun]:
+    """Unfinished runs of one household that arq may have lost, oldest first.
+
+    ``queued`` for longer than ``pending_grace``, ``retrying`` more than ``pending_grace`` past
+    ``next_attempt_at``, and ``running`` for longer than ``running_after`` (the caller narrows
+    that per job, from its timeout). Read-only; the database's clock is the only clock.
+    """
+    now = func.now()
+    async with scoped_session(factory, household_id, None) as s:
+        rows = (
+            await s.execute(
+                select(
+                    JobRun.id,
+                    JobRun.job_name,
+                    JobRun.status,
+                    JobRun.payload,
+                    JobRun.started_at,
+                    JobRun.next_attempt_at,
+                    now.label("now"),
+                )
+                .where(
+                    JobRun.household_id == household_id,
+                    or_(
+                        (JobRun.status == "queued") & (JobRun.enqueued_at < now - pending_grace),
+                        (JobRun.status == "retrying")
+                        & (
+                            func.coalesce(JobRun.next_attempt_at, JobRun.enqueued_at)
+                            < now - pending_grace
+                        ),
+                        (JobRun.status == "running") & (JobRun.started_at < now - running_after),
+                    ),
+                )
+                .order_by(JobRun.enqueued_at)
+                .limit(limit)
+            )
+        ).all()
+    return [
+        StalledRun(
+            id=r.id,
+            job_name=r.job_name,
+            status=r.status,
+            payload=r.payload,
+            started_at=r.started_at,
+            next_attempt_at=r.next_attempt_at,
+            now=r.now,
+        )
+        for r in rows
+    ]
 
 
 def _where(run_id: uuid.UUID, statuses: tuple[str, ...]) -> Any:
     return (JobRun.id == run_id) & JobRun.status.in_(statuses)
 
 
+def _owned(run_id: uuid.UUID, attempt: int) -> Any:
+    """The row is still ``running`` *this* attempt (not a later re-claim of it)."""
+    return _where(run_id, ("running",)) & (JobRun.attempts == attempt)
+
+
+@dataclass(frozen=True)
+class Claim:
+    attempt: int
+    payload: dict[str, Any]  # job_run.payload: what the handler runs on, never Redis's copy
+
+
 async def claim(
-    factory: async_sessionmaker[AsyncSession], household_id: uuid.UUID, run_id: uuid.UUID
-) -> int | None:
+    factory: async_sessionmaker[AsyncSession],
+    household_id: uuid.UUID,
+    run_id: uuid.UUID,
+    job_name: str,
+) -> Claim | None:
     """Mark the run ``running`` and count the attempt. Call only while holding the household
-    lock. Returns the attempt number, or None when the run isn't claimable (done, failed,
-    unknown, or an orphan with no attempts left, which is marked failed here)."""
+    lock. Returns the attempt number and the stored payload, or None when the run isn't
+    claimable (done, failed, unknown, another job's run, or an orphan with no attempts left,
+    which is marked failed here)."""
+    mine = _where(run_id, CLAIMABLE) & (JobRun.job_name == job_name)
     async with scoped_session(factory, household_id, None) as s:
-        attempt = (
+        row = (
             await s.execute(
                 update(JobRun)
-                .where(_where(run_id, CLAIMABLE), JobRun.attempts < JobRun.max_attempts)
+                .where(mine, JobRun.attempts < JobRun.max_attempts)
                 .values(
                     status="running",
                     attempts=JobRun.attempts + 1,
                     started_at=func.now(),
                     next_attempt_at=None,
                 )
-                .returning(JobRun.attempts)
+                .returning(JobRun.attempts, JobRun.payload)
             )
-        ).scalar_one_or_none()
-        if attempt is None:
+        ).one_or_none()
+        if row is None:
             # A worker died on the last attempt: close the run out.
             await s.execute(
                 update(JobRun)
-                .where(_where(run_id, ("running",)))
+                .where(_where(run_id, ("running",)), JobRun.job_name == job_name)
                 .values(
                     status="failed",
                     finished_at=func.now(),
                     last_error=func.coalesce(JobRun.last_error, "WorkerLost"),
                 )
             )
-        return attempt
+            return None
+        return Claim(attempt=row.attempts, payload=row.payload)
 
 
 class RunLost(RuntimeError):
-    """The run's row was no longer ``running`` when the handler finished (rolls its work back)."""
+    """The run's row was no longer ``running`` this attempt when the handler finished (rolls
+    its work back)."""
 
 
-async def mark_succeeded(session: AsyncSession, run_id: uuid.UUID) -> None:
+async def mark_succeeded(session: AsyncSession, run_id: uuid.UUID, attempt: int) -> None:
     """Mark success inside the handler's session, so it commits atomically with its writes."""
     result = await session.execute(
         update(JobRun)
-        .where(_where(run_id, ("running",)))
+        .where(_owned(run_id, attempt))
         .values(status="succeeded", finished_at=func.now(), last_error=None)
         .returning(JobRun.id)
     )
@@ -170,13 +383,14 @@ async def mark_retrying(
     factory: async_sessionmaker[AsyncSession],
     household_id: uuid.UUID,
     run_id: uuid.UUID,
+    attempt: int,
     error: str,
     delay: timedelta,
 ) -> None:
     async with scoped_session(factory, household_id, None) as s:
         await s.execute(
             update(JobRun)
-            .where(_where(run_id, ("running",)))
+            .where(_owned(run_id, attempt))
             .values(
                 status="retrying",
                 last_error=error[:ERROR_MAX],
@@ -189,16 +403,36 @@ async def mark_failed(
     factory: async_sessionmaker[AsyncSession],
     household_id: uuid.UUID,
     run_id: uuid.UUID,
+    attempt: int,
     error: str,
-    *,
-    from_statuses: tuple[str, ...] = ("running",),
 ) -> None:
-    """Terminal failure. ``from_statuses`` guards against overwriting a run another delivery
-    owns: pre-claim failures pass ``PENDING`` so a ``running`` row is never touched."""
+    """Terminal failure of a claimed attempt."""
     async with scoped_session(factory, household_id, None) as s:
         await s.execute(
             update(JobRun)
-            .where(_where(run_id, from_statuses))
+            .where(_owned(run_id, attempt))
+            .values(
+                status="failed",
+                finished_at=func.now(),
+                next_attempt_at=None,
+                last_error=error[:ERROR_MAX],
+            )
+        )
+
+
+async def fail_unclaimed(
+    factory: async_sessionmaker[AsyncSession],
+    household_id: uuid.UUID,
+    run_id: uuid.UUID,
+    job_name: str,
+    error: str,
+) -> None:
+    """Terminal failure before any claim (a malformed delivery, a household that stayed busy).
+    Matches ``queued``/``retrying`` only, so a run another delivery owns is never touched."""
+    async with scoped_session(factory, household_id, None) as s:
+        await s.execute(
+            update(JobRun)
+            .where(_where(run_id, PENDING), JobRun.job_name == job_name)
             .values(
                 status="failed",
                 finished_at=func.now(),

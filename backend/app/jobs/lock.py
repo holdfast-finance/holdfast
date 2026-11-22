@@ -8,6 +8,7 @@ Advisory locks need no table grants, and the key is not household data, so RLS d
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,9 +22,14 @@ LOCK_NAMESPACE = 0x48464A42
 
 
 def lock_key(household_id: uuid.UUID) -> int:
-    """Second key: the household UUID's first 32 bits (random for v4 ids). A collision between
-    two households only serializes their jobs; it never mixes their data."""
-    return int.from_bytes(household_id.bytes[:4], "big", signed=True)
+    """Second key: a 32-bit hash of the **whole** household UUID.
+
+    Not its leading bytes: a UUIDv7 starts with a millisecond timestamp, so households created
+    close together would share a lock. A hash collision between two households only serializes
+    their jobs; it never mixes their data.
+    """
+    digest = hashlib.blake2b(household_id.bytes, digest_size=4).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 _TRY_LOCK = text("SELECT pg_try_advisory_lock(:ns, :key)")
