@@ -26,12 +26,19 @@ tool is alpha and its interface can change.
    passed. Do not pass it. A Grok read worker still has a shell with no permission prompts (only
    its two edit tools are removed), and Codex runs commands too, so rule 1 applies to read jobs
    exactly as it does to write jobs.
-4. **Workers never commit, push or merge.** Keel reviews the diff, runs the suite, commits with
-   the worker's agent trailer, scans, and lands the PR.
+4. **Workers never commit, push or merge.** Keel reviews the diff, then runs the suite, commits
+   with the worker's agent trailer, scans, and lands the PR.
 5. **A Codex or Grok review is a second opinion.** It never satisfies `review-gate`. Gate
    sign-offs come from the project's own reviewers, bound to the head SHA.
-6. **Verify a worker's test claims.** Codex cannot run database tests or `pnpm` in its sandbox.
-   Run `make test-locked` and `make lint` on the applied diff before believing a pass.
+6. **Review before anything runs, then verify the worker's test claims.** A local run executes the
+   worker's code as the owner, outside the sandbox, with the docker group, `.env` and the private
+   data directory in reach (ADR 0036 point 5). Before `make test`, `make test-locked`, `make lint`,
+   `uv sync`, `pnpm install` or `git commit` on an applied diff, read every changed line of any
+   file a run executes or that configures one: `conftest.py` and tests, `pyproject.toml`,
+   `uv.lock`, `package.json`, `pnpm-lock.yaml`, `Makefile`, `scripts/`, `.githooks/`,
+   `migrations/env.py`, Docker files. A diff that cannot be reviewed in time goes to CI only.
+   Then run `make test-locked` and `make lint` before believing a pass: Codex cannot run database
+   tests or `pnpm` in its sandbox.
 7. **One session ID per lead session.** Pass `--session <id>` before the subcommand on every call.
    `collect`, `finish`, `conduct cancel` and `conduct resume` are refused from another session.
 8. **Check usage before a sprint** with `firstchair auth usage --refresh`, and pass
