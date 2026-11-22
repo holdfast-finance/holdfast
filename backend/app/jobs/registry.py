@@ -224,6 +224,13 @@ class JobContext:
     one of those at a time: a run's budget is three pooled connections (lock, ``session``, one
     side session; ``app.worker.main.MAX_JOBS``).
 
+    ``requested_by`` is the person who enqueued the run (``job_run.requested_by``), whose rights
+    enqueue checked the payload against; ``None`` for a system caller or a worker scheduler. It
+    comes from ``job_run``, never from Redis or the payload. ``session`` stays household-wide
+    either way: a handler that must act with the requester's rights opens
+    ``scoped_session(..., household_id, ctx.requested_by)`` itself, and one that enqueues a
+    follow-up passes ``requested_by=ctx.requested_by`` on.
+
     The handler runs under ``asyncio.timeout(spec.timeout)``. On expiry it is cancelled, its
     uncommitted writes roll back and the run is retried or failed like any other error.
     """
@@ -231,6 +238,7 @@ class JobContext:
     run_id: uuid.UUID
     household_id: uuid.UUID
     attempt: int
+    requested_by: uuid.UUID | None
     session: AsyncSession
     factory: HouseholdSessions
 

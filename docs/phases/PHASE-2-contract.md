@@ -551,6 +551,13 @@ C3e.
 - **P4-map:**
   - Un-adopt deletes only connector-sourced snapshots dated on or after `adopted_at`. M1 refuses
     manual balances on adopted accounts.
+  - Service tests (Ledger on #74): after un-adopt the account has no `account_coverage` rows and
+    no snapshots with a `bank_connection_id`.
+  - Deleting a connection that still has adopted accounts gives `409
+    connection_has_adopted_accounts`. Un-adopt them first (ADR 0033 §5).
+- **P2a and P5b (snapshots, Ledger on #74):** a connector snapshot upsert on `(account_id,
+  as_of_date)` never overwrites a manual snapshot (one with `bank_connection_id IS NULL`). It
+  skips that date and counts the skip.
   - Bulwark rules in that review on assigning another person as owner of a `new` account.
   - Before adoption ships, a chosen-account upload refuses `account_currency_mismatch` unless the
     account currency equals the file's (USD today).
