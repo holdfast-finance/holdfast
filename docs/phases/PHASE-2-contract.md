@@ -552,6 +552,11 @@ C3e.
   - Un-adopt deletes only connector-sourced snapshots dated on or after `adopted_at`. M1 refuses
     manual balances on adopted accounts.
   - Bulwark rules in that review on assigning another person as owner of a `new` account.
+  - Before adoption ships, a chosen-account upload refuses `account_currency_mismatch` unless the
+    account currency equals the file's (USD today).
+  - Check that totals exclude or flag `needs_review` runs.
+- **Follow-up (next migration window):** add a CHECK requiring the `hf2.` prefix on
+  `household_setting.value_enc` and `bank_connection.access_token_enc`.
 - **P5b and P7:** every scheduled job skips `pending_setup` connections. The M-link Item stays
   untouched until its mapping is decided.
 - **H2:**

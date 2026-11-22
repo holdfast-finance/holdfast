@@ -3,13 +3,18 @@
 Two checks over ``backend/app``. The raw ``app.household_wide`` setting appears only in
 ``db_context.py``. And a ``household_wide=`` keyword on any call must be the literal ``False``
 unless the module is in ``KEYWORD_ALLOWED``, each with the reason it needs the household-wide
-view. ``tests/models/test_household_wide_guard.py`` (a line grep for literal ``True`` on request
-paths) stays as a second, independent net.
+view. Outside that allowlist a call may not unpack keywords (``f(**kw)``) either, since
+``scoped_session(..., **{"household_wide": True})`` would hide the flag; the exceptions are
+logger calls and the reviewed call sites in ``UNPACK_ALLOWED``. It is an AST tripwire: code that
+builds the call dynamically (``getattr``, ``functools.partial``) can still get past it.
+``tests/models/test_household_wide_guard.py`` (a line grep for literal ``True`` on request paths)
+stays as a second, independent net.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +38,19 @@ KEYWORD_ALLOWED: dict[Path, str] = {
     / "store_sweep.py": "orphan-file sweep reads every account (a background job)",
     APP / "security" / "rotation.py": "rotate-keys re-seals every person's connections (ADR 0015)",
 }
+# Reviewed **-unpacking call sites outside KEYWORD_ALLOWED: (module, callee as written) -> why the
+# unpacked mapping can't carry household_wide.
+UNPACK_ALLOWED: dict[tuple[Path, str], str] = {
+    (APP / "jobs" / "queue.py", "ArqRedis"): "serializer and queue-name options only",
+    (APP / "services" / "audit.py", "add"): "audit_log columns, built in the same function",
+    (APP / "services" / "auth.py", "audit.add"): "audit_log columns from the route's own kwargs",
+    (APP / "services" / "imports.py", "super().__init__"): "ApiError headers only",
+    (
+        APP / "worker" / "main.py",
+        "cls",
+    ): "MaskedRedisSettings rebuilt from RedisSettings' own fields",
+}
+LOGGER = re.compile(r"(log|logger)\.(debug|info|warning|error|exception|critical)")
 
 
 def setting_violations(source: str, path: Path) -> list[str]:
@@ -55,6 +73,13 @@ def keyword_violations(source: str, path: Path) -> list[str]:
         if not isinstance(node, ast.Call):
             continue
         for keyword in node.keywords:
+            if keyword.arg is None:
+                callee = ast.unparse(node.func)
+                if not LOGGER.fullmatch(callee) and (path, callee) not in UNPACK_ALLOWED:
+                    hits.append(
+                        f"{path}:{keyword.lineno}: no **kwargs here (could hide household_wide)"
+                    )
+                continue
             if keyword.arg != "household_wide":
                 continue
             if isinstance(keyword.value, ast.Constant) and keyword.value.value is False:
@@ -114,6 +139,24 @@ def test_keyword_checker_catches_nonliteral_false_values_anywhere_in_app() -> No
             assert keyword_violations(source, path) == [
                 f"{path}:2: household_wide must be literal False",
             ], (path, value)
+
+
+def test_keyword_checker_catches_unpacked_keywords() -> None:
+    path = APP / "services" / "example.py"
+    source = 'scoped_session(f, h, None, **{"household_wide": True})\nopen_session(**options)\n'
+    assert keyword_violations(source, path) == [
+        f"{path}:1: no **kwargs here (could hide household_wide)",
+        f"{path}:2: no **kwargs here (could hide household_wide)",
+    ]
+    assert keyword_violations("log.info('job.done', **fields)\n", path) == []
+    assert keyword_violations("audit.add(s, a, **kw)\n", APP / "services" / "auth.py") == []
+    assert keyword_violations("other(s, **kw)\n", APP / "services" / "auth.py") != []
+
+
+def test_unpack_allowlist_names_real_files() -> None:
+    for (path, callee), reason in UNPACK_ALLOWED.items():
+        assert (ROOT / path).is_file(), path
+        assert callee and reason.strip(), path
 
 
 def test_keyword_checker_skips_allowlisted_modules() -> None:
