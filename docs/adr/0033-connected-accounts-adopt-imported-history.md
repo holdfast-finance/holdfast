@@ -130,6 +130,25 @@ first adoption.
 - back to `import`: only when no rows with a connector source remain, with `bank_connection_id`
   set NULL in the same UPDATE.
 
+**As built in P4a (migration `0011_connector_link`, trigger `account_guard_source`).** The rule
+is tightened so the database holds the whole adoption shape, not just `source`:
+- Adoption also needs `adopted_at` in the same UPDATE, and the connection's `provider` must equal
+  the new `source`.
+- Un-adopt applies only to an adopted account (`adopted_at` was set). The same UPDATE clears
+  `adopted_at` and sets `external_account_id = statement_key`. A native connector account never
+  becomes `import`.
+- `adopted_at` changes only together with `source`. CHECK `adopted_is_connected`: an adopted
+  account has a statement key and a connector source.
+- `statement_key` is final once set. `UNIQUE (household_id, statement_key)` replaces the 0006
+  partial index on `external_account_id`, and the backfill copies `external_account_id` for every
+  `import` account. The database does not force `import` accounts to carry a key, because a few
+  test helpers insert keyless ones. The resolver (`app/services/statement_accounts.py`) always
+  writes both, and an account without a key can't be adopted.
+- `connector_account_link.account_id` has no ON DELETE action. An account under a mapped link
+  can't be deleted until the link is un-mapped. Deleting the connection deletes its links.
+- `balance_snapshot.bank_connection_id` (`SET NULL`) marks connector snapshots (Bulwark, #62).
+  Un-adopt can then delete exactly those.
+
 ### 7. Sandbox and real data never share a household (R2-B7, Bulwark)
 "Real data" means any account, import run, manual entry or production connection. The rule is
 enforced in services, with a test for each direction:

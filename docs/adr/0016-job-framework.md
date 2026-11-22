@@ -150,9 +150,13 @@ household context.
   self-host scale, revisit with retention pruning.
 - Open (not built): the lock connection dropping mid-run (Postgres releases the lock while the
   handler keeps running, so a second delivery could claim the "orphan"); a Redis writer can still
-  deny service (flood deliveries, delete jobs), though never run a forged payload; and
-  `job_run` doesn't record `requested_by` (needs a migration), so a run's requester isn't auditable
-  and the sweeper re-pushes without knowing who asked.
+  deny service (flood deliveries, delete jobs), though never run a forged payload.
+- **Built in P4a (0011):** `job_run.requested_by` (FK to the run household's `person`, `SET NULL`)
+  is written by enqueue, read back by `claim` and handed to the handler as
+  `JobContext.requested_by`. Redis and the payload never supply it. The handler's session stays
+  household-wide. A handler that needs the requester's rights opens a person-scoped session
+  itself, and one that chains a job passes `requested_by=ctx.requested_by` on. Reusing a key under
+  another requester raises `IdempotencyConflict`, just like a different payload.
 - Follow-ups: retention pruning of old `job_run` rows, wiring `arq_pool(app.state.redis)` into the
   API once the first API-triggered job lands (P7), and Bulwark's Redis-auth item. The import-linter
   domain contract also forbids `app.jobs`.
