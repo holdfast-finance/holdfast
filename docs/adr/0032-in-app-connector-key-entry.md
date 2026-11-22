@@ -36,7 +36,9 @@ Three more facts matter:
 
 1. **Key groups.** The resolver decides the source per **group**, not per name. Plaid's
    `plaid_client_id`, `plaid_secret_sandbox` and `plaid_secret_production` are one group: all of
-   them come from env, or all from rows. Any other name is a group of one. In `self_host`,
+   them come from env, or all from rows. `openai_compat_base_url` and `openai_compat_api_key` are
+   another group: changing the host needs step-up, is audited, and requires the key to be entered
+   again. Any other name is a group of one. In `self_host`,
    `get_secret(household_id, name, *, settings, household_value_enc)` looks at every member of the
    name's group in both sources (the caller passes the group's rows):
    - some member set in env (non-blank), and no member has a row: the env value.
@@ -51,8 +53,8 @@ Three more facts matter:
    - `GET /api/settings/secrets` returns, for each allowlisted name, one of `not_set`,
      `set_in_app`, `set_in_env` or `conflict`. It never returns the value, a prefix, a suffix or a
      length.
-   - `PUT /api/settings/secrets/{name}` with `{value}` seals the value as `hf1` into
-     `household_setting`. It returns `409 managed_in_env` when the env value is set. Values are
+   - `PUT /api/settings/secrets/{name}` with `{value}` seals the value as `hf2`, bound to
+     `(household_id, household_setting, value_enc, name)`, into `household_setting` (F5d). It returns `409 managed_in_env` when the env value is set. Values are
      trimmed. Empty, line-broken or over-length values are refused, and the P3 client's
      malformed-key check runs here too.
    - `DELETE /api/settings/secrets/{name}` removes the row.
@@ -83,7 +85,11 @@ See the options table. Option A was rejected by the owner. Options B and C are t
 modes ADR 0015 names. Option E widens what the API process can write.
 
 ## Consequences
-- K1 (Phase 2 contract) builds this. It edits `app/security/secrets.py` (protected path) and adds
+- K1 (Phase 2 contract) builds this after F5d and M-live.
+  - `PUT` and `DELETE` return a status only.
+  - A `plaid_client_id` change audits the new `client_fp`.
+  - The runbook documents step-up when TOTP can't be decrypted after a lost `FERNET_KEY`: passkey
+    only, or recovery codes. It edits `app/security/secrets.py` (protected path) and adds
   `app/services/secret_settings.py`, `app/api/routes_settings_secrets.py` and tests. When K1 merges,
   the K1 PR adds "Amended by 0032" to ADR 0015 §1 and to ADR 0023 §7.
 - ADR 0015's tests change. A mixed group (client id in env, secret in a row) raises

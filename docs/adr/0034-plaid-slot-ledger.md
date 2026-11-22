@@ -1,17 +1,16 @@
-# 0034. Plaid slots: a per-client ledger, reserved at Link-token time, cross-checked against the dashboard
+# 0034. Plaid slots: a per-client ledger, reserved at Link-token time, cross-checked against the owner's count
 
-- Status: Accepted (revision 2, after Gadfly's B8 and S4)
+- Status: Accepted (revision 3, after Gadfly round 2 (R2-B5, R2-S1, R2-S4) and Bulwark's
+  must-fixes 1, 2 and 5 on PR #62)
 - Date: 2026-11-21
-- Deciders: Lattice (architect). Keel ruled on B8. Bulwark reviews P4a and P4.
+- Deciders: Lattice (architect). Keel ruled on B8 and deleted the override phrase. Bulwark reviews
+  P4a and P4-link.
 
 ## Context
 Hard rule 4 requires the slot guard: a typed confirmation at 8 or more, and never an 11th. Plaid's
-Trial allows 10 production Items **per client id**, ever. `/item/remove` returns nothing.
-
-The Item exists at Plaid as soon as the person finishes Link, before Holdfast sees a
-`public_token`. Every fact Holdfast keeps about slots and tokens lives in Postgres, and the access
-tokens are sealed under `FERNET_KEY`. Both can be lost (Gadfly B8). Plaid offers no API that counts
-a client's Items (ADR 0023).
+Trial allows 10 production Items per client id, ever. `/item/remove` returns nothing. The Item
+exists at Plaid when the person finishes Link, before Holdfast sees a `public_token`. Every fact
+Holdfast keeps lives in Postgres, under `FERNET_KEY`.
 
 ## Decision
 
@@ -25,109 +24,140 @@ P4a adds `plaid_link_slot`:
 | `client_fp` | 16 lowercase hex characters of SHA-256 of the client id |
 | `env` | |
 | `state` | `reserved`, `linked`, `abandoned` or `unknown` |
-| `link_token_fp` | |
-| `dashboard_count` | smallint, 0 to 10 |
+| `link_token_enc` | bytea NULL |
+| `owner_count` | smallint, 0 to 10 |
 | `item_id` | unique, nullable |
 | `bank_connection_id` | `SET NULL` |
 | `created_by_user_id` | |
 | `created_at`, `resolved_at` | |
+| `flag` | text NULL, for example `second_public_token` |
 
 Access and constraints:
-- Forced RLS with the standard policy, for reads by people.
+- Forced RLS with the standard policy.
 - `holdfast_app` gets SELECT, INSERT and UPDATE only, with no DELETE grant. A trigger refuses
   DELETE outside a household cascade.
 - Allowed transitions: `reserved` → any other state, and `unknown` → `abandoned`.
-- **Keyed by client, not household:**
-  - The partial unique index allowing one `reserved` row is on `(client_fp, env)`.
-  - The count comes from `plaid_slot_count(client_fp, env) RETURNS integer`, a `SECURITY DEFINER`
-    function that returns a number and nothing else. It follows the pattern #31 uses for
-    `list_household_ids()`: an owner-only SELECT policy, `search_path` pinned, EXECUTE only for
-    `holdfast_app`.
-  - Two households on one client therefore share one count.
+- A partial unique index allows one `reserved` row per `(client_fp, env)`.
+- `plaid_slot_count(client_fp, env) RETURNS integer` is `SECURITY DEFINER` and returns a number
+  only. It follows #31's `list_household_ids` pattern: an owner-only SELECT policy, `search_path`
+  pinned, EXECUTE only for `holdfast_app`.
 
-### 2. Every production new-Item link is confirmed against the dashboard
-`POST /api/connections/plaid/link-plan` is a dry call: no Plaid call and no token. It returns:
+**What counts.** The count is every row for `(client_fp, env = 'production')` in state `reserved`,
+`linked` or `unknown`. Only `abandoned` is excluded. `env` is written from the server's
+`PLAID_ENV`, never from the request.
+
+### 2. Every production new-Item link is confirmed
+`POST /api/connections/plaid/link-plan` is a dry call with no Plaid call. It returns:
 - the ledger count
-- the effective `products`, `optional_products` and `days_requested` (Phase 2 contract D5, D6, B4)
-- the list of existing connections, for the duplicate-login check
+- the products and `days_requested` for the requested `login_kind` (contract §5.1; an allowlist,
+  so there is no override path)
+- the existing connections, for the duplicate-login check
 
 `POST /api/connections/plaid/link-token` for a new production Item requires:
-- `dashboard_count`: the production Item count the owner reads in Plaid's dashboard. Holdfast uses
-  `n = max(ledger count, dashboard_count)`.
-- `not_a_duplicate: true`, after the owner has seen the existing connections.
-- the exact phrase `use slot <n + 1> of 10`. When the effective products or days differ from the
-  contract defaults, the phrase is `use slot <n + 1> of 10 with <products> for <days> days`.
+- `owner_count`: the owner's count of production Items on this Plaid client. Holdfast uses
+  `n = max(ledger count, owner_count)`. What the owner reads it from is **VERIFY** in P4-link
+  (R2-S4):
+  - if Plaid's dashboard shows the Trial's lifetime usage, that number
+  - if it shows only active Items, which under-count after removals and restores, the owner's
+    written slot log (PLAN 3.2)
+  The link-plan copy names the source the check found.
+- `not_a_duplicate: true`, after the existing connections were shown.
+- The exact phrase `use slot <n + 1> of 10`. There is no other phrase variant.
 
 Outcomes:
 - `n >= 10`: `409 no_slots_left`, before any Plaid call.
 - A missing or wrong field: `409 confirm_required`.
 - Update-mode (relink) tokens reserve nothing and need step-up only.
-- Sandbox tokens write `env = 'sandbox'` rows. They are never counted, need no dashboard count, and
-  are refused on an instance holding real data (contract B5).
+- Sandbox tokens write `env = 'sandbox'` rows, which are never counted, and follow ADR 0033 §7.
 
-This is stricter than hard rule 4, which asks for a phrase only from 8. The dashboard count is what
-makes the guard survive a restore.
+### 3. Resolving a reservation, and the Link token (R2-B5)
+**The Link token is kept, sealed, only while the reservation is open.**
+- It is sealed `hf2`, bound to `household_id|plaid_link_slot|link_token_enc|id`, into
+  `link_token_enc`.
+- It is set to NULL in the same UPDATE that leaves `reserved`, and after 4 hours (the Link token
+  lifetime) at the latest, when the row becomes `unknown`.
+- It is the third ciphertext column under ADR 0015 §2 and F5d. The rotator re-seals it, and a NULL
+  value is skipped.
+- Canary tests cover it in logs, responses, audit rows and job payloads.
+- Bulwark rules on it as a short-lived credential in P4-link's review.
 
-### 3. Resolving a reservation
-- **Exchange is idempotent on `reservation_id`.** The browser may retry within the `public_token`
-  lifetime (30 minutes). The server:
-  1. exchanges the token
-  2. seals the access token, inserts `bank_connection` (status `pending_setup`, `client_fp`) and
-     sets the slot to `linked` with the `item_id`, and **commits all of that first**
-  3. only then calls `/accounts/get`
-  A crash after the commit loses nothing.
-- A `reserved` row is resolved through `/link/token/get` on its Link token. Its `link_sessions`
-  results report the Items added, and **VERIFY** this on Trial in P4. That call:
-  - recovers a lost `public_token` (exchange it)
-  - confirms "no Item" before `abandoned`
-  - lets a stuck row (crashed tab) be resolved at once instead of after 4 hours
-- `onExit` from the browser only *triggers* that check. It never marks `abandoned` by itself.
-- When `/link/token/get` is unavailable on the plan, a reservation older than 4 hours becomes
-  `unknown` and still counts. The owner may move `unknown` to `abandoned` with step-up and the
-  phrase `I did not finish this link`.
-- Plaid's own limit is the backstop. The Trial limit error name (`TRIAL_CONNECTION_LIMIT` in
-  Plaid's docs) and where it surfaces (Link `onExit`, not the exchange) are **VERIFY** items for P4.
-  The mapping in either place is `no_slots_left`.
+**Resolution uses `/link/token/get`** on the unsealed token. Its `link_sessions` results report the
+Items added (**VERIFY** on Trial). It:
+- recovers a lost `public_token` (exchange it)
+- confirms "no Item" before `abandoned`
+- resolves a crashed tab's reservation at once
+
+Browser `onExit` only triggers this check.
+
+**Fallback.** If `/link/token/get` is unavailable on the plan:
+- After 4 hours the row becomes `unknown`, still counts, and its token is NULLed.
+- The owner may move `unknown` to `abandoned` with step-up and the phrase
+  `I did not finish this link`.
+- The per-client `reserved` lock blocks new links for at most those 4 hours. The owner can end it
+  sooner with the same abandon step.
+
+**Exchange.**
+- It is idempotent on `reservation_id`. The `public_token` must be bound to its reservation: same
+  household, `created_by_user_id` is the caller, state `reserved`.
+- A **different** `public_token` arriving on a reservation already `linked` is a new Item. It gets
+  its own counted row with `flag = 'second_public_token'`, and the connections list shows it.
+- An update-mode exchange never creates a connection.
+- Order of work:
+  1. parse the access token straight into `SecretToken` and seal it `hf2`, bound to its
+     `bank_connection` row. The row id is generated before sealing.
+  2. insert the connection (status `pending_setup`, `client_fp`), and set the slot to `linked` with
+     its `item_id`
+  3. **commit**
+  4. only then call `/accounts/get`
+- No Plaid response body is ever logged.
+
+Plaid's own limit is the backstop. The Trial limit error name and where it surfaces (Link `onExit`
+or the exchange) are **VERIFY**. Both map to `no_slots_left`.
 
 ### 4. What loses slots, plainly
 | Event | Access tokens | Slot ledger | Result |
 |---|---|---|---|
-| Restore a backup **older** than a link | that Item's token is gone; Plaid never reissues it | under-counts by the links after the backup | those Items are orphaned and their slots are spent for good; relinking them costs new slots. The dashboard count in §2 keeps the next guard correct |
-| Restore a backup taken **after** the last link (DB and the same `FERNET_KEY`) | intact | intact | nothing lost |
-| Fresh install, same Plaid client | none | empty | every old Item is orphaned unless the old DB and key are restored. The dashboard count keeps the guard correct |
-| New or lost `FERNET_KEY` (`gen-keys.py --force`, a lost `.env`) | every `hf1` value is unreadable: Plaid tokens, SimpleFIN access URLs, in-app keys, TOTP secrets | intact but useless | every Plaid Item is orphaned (slots spent), SimpleFIN needs a fresh setup token (free), keys must be re-entered and TOTP re-enrolled. `make rotate-keys` with the old key **prepended**, never replaced, is the only safe key change (ADR 0015) |
-| Delete a connection in the app | removed | unchanged | the slot stays spent, as Plaid's own count does |
+| Restore a backup older than a link | that Item's token is gone; Plaid never reissues it | under-counts | the Item is orphaned and its slot spent for good. The owner's count in §2 keeps the next guard right |
+| Restore a backup taken after the last link (DB and the same `FERNET_KEY`) | intact | intact | nothing lost |
+| Fresh install, same client | none | empty | old Items orphaned unless the old DB and key are restored. The owner's count keeps the guard right |
+| New or lost `FERNET_KEY` | every sealed value unreadable (tokens, access URLs, in-app keys, TOTP) | intact, useless | every Plaid Item orphaned, SimpleFIN re-claimed (free), keys re-entered, TOTP re-enrolled. Only `make rotate-keys` with the old key **prepended** is safe |
+| Delete a connection | removed | unchanged | the slot stays spent |
 
-The setup check reports `tokens_unreadable` when any `bank_connection` fails to open, and
-`ledger_orphans` when a `linked` slot row has no connection.
+The setup check reports `tokens_unreadable` (it opens each token without `reveal()`) and
+`ledger_orphans` (a `linked` row with no connection).
 
-### 5. Backups the owner must keep (an M-live precondition)
-- A `pg_dump` of the instance database and the document store, kept off the machine. Take one
-  before and right after every production link.
-- **Every** key in `FERNET_KEY`, kept in a password manager, **separately** from the dump.
-- The Plaid client id and secrets (re-enterable from the dashboard), and the SimpleFIN Bridge login.
-- One restore drill into the throwaway sandbox project before M-live, which proves the dump opens
-  and the key decrypts.
+### 5. Backups the owner keeps (an M-link precondition)
+- A `pg_dump` of the instance database plus the document store, kept off the machine, before and
+  right after every production link.
+- Every key in `FERNET_KEY`, in a password manager, **separately** from the dumps.
+- The Plaid keys (re-enterable from the dashboard) and the slot log.
 
-`scripts/backup.sh` is not implemented yet (Phase 9). The contract adds a minimal Harbor slice (H1)
-before M-live.
+The H1 runbook (`docs/ops/backup.md`) gives the commands. Its one verified restore uses a
+**synthetic** dump with a synthetic key, in the throwaway sandbox project. A real dump and the real
+`FERNET_KEY` never enter the sandbox project or any project agents operate. If the owner wants to
+prove their real backup restores, the runbook describes an owner-only scratch project, destroyed
+afterwards, that agents never touch.
 
 ## Alternatives considered
-- **Count `bank_connection` rows:** deletion lowers it, and failed exchanges never add one.
-- **A typed slot floor stored once:** it goes stale after the next restore. A count typed per link
-  doesn't.
-- **A per-household count:** two households on one client could each count to 10 (B8).
-- **Trust Link `onExit`:** the client's word would decide what is counted (S4).
+- **Count `bank_connection` rows:** deletion lowers the count.
+- **Store only a fingerprint of the Link token (revision 2):** `/link/token/get` needs the token
+  itself (R2-B5).
+- **A typed floor stored once:** stale after the next restore.
+- **A per-household count:** two households on one client could each reach 10.
+- **Trust `onExit`:** the client's word would decide what is counted.
+- **The env-override phrase (revision 2):** deleted. Products are an allowlist (Bulwark 2).
 
 ## Consequences
-- P4 owns the guard, the plan call, the idempotent exchange and `/link/token/get` resolution.
 - Tests:
-  - the guard at ledger counts of 7, 8, 9 and 10, and with a dashboard count above the ledger
-  - deleting a connection doesn't lower the count
-  - two concurrent reservations from two households on one client leave one `reserved` row
-  - a sandbox reservation is not counted
+  - the guard at 7, 8, 9 and 10, and with an owner count above the ledger
+  - deleting a connection leaves the count unchanged
+  - two households on one client get one `reserved` row
+  - sandbox rows are not counted
   - a relink reserves nothing
   - an 11th request is refused before any Plaid call
-  - an exchange retried after a crash between commit and `/accounts/get` creates no second
+  - an exchange retried after a crash between commit and `/accounts/get` makes no second
     connection
-  - `onExit` alone never yields `abandoned`
+  - a second `public_token` on a `linked` row is counted and flagged
+  - `onExit` alone never abandons
+  - `link_token_enc` is NULL after every resolution and after 4 hours
+  - the rotator re-seals a live `link_token_enc`

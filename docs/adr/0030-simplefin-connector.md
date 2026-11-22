@@ -57,8 +57,9 @@ the Bridge's developer, pricing and security pages, all read on 2026-11-21:
    Holdfast account's `external_account_id` is `<conn_id>:<account id>`, because account ids are
    unique only per connection. A transaction's `external_id` is the SimpleFIN transaction id,
    unique per account through `(account_id, external_id)`.
-3. **Credential storage.** The access URL is sealed as an `hf1` envelope (ADR 0015) in
-   `bank_connection.access_token_enc`, exactly like a Plaid access token, and is opened only inside
+3. **Credential storage.** The access URL is sealed as an `hf2` envelope bound to its
+   `bank_connection` row (ADR 0015 §6), in `bank_connection.access_token_enc`, exactly like a
+   Plaid access token. That needs F5d first (Phase 2 contract). It is opened only inside
    the client call. **It is not a `get_secret` name.** S1 removes `simplefin_access_url` from the
    resolver allowlist, from `Settings` and from `.env.example`. Linked-connection credentials live on
    the connection (ADR 0015 already says so for Plaid), and one deployment can hold several access
@@ -126,7 +127,11 @@ the Bridge's developer, pricing and security pages, all read on 2026-11-21:
 - Data is daily, posted-only, uncategorized and holdings-free, and it passes through two third
   parties. Sync Health shows "updates daily" for SimpleFIN connections.
 - S1 edits `app/security/secrets.py` (protected path) to drop the allowlist name, so it needs a
-  Bulwark verdict.
+  Bulwark verdict. It depends on F5d (`hf2`).
+- Client rules from Bulwark:
+  - send `Authorization: Basic` itself, because `resolve_outbound` strips userinfo from the URL
+  - `trust_env=False` and `follow_redirects=False`
+  - keep the claim body out of all request logging
 - Tests: recorded, sanitized JSON only, with the socket guard on. Fixtures cover claim `200` and
   `403`; `/accounts` with `errlist` of each prefix; a custom currency; a 90-day window walk; a
   repeated id across two connections; and replaying the same batch twice, which inserts nothing.

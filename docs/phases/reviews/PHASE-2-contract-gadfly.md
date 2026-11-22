@@ -297,3 +297,292 @@ gate runs (rebase once, review once).
 5. Enrol a passkey or TOTP on the **dedicated** instance, since step-up needs it.
 6. Decide the owner and visibility for each mapped account at the mapping step.
 7. Provide sandbox recording keys before P5 (S8).
+
+---
+
+# Round 2 (91f6b72)
+
+- Checked against: the contract and ADRs 0032–0035 at `91f6b72`; `origin/main` (`6fea745`,
+  #56 merged); `origin/docs/phase4-wiring-contract` at `f651389`; the models and profiles on
+  main.
+- Real data: none read. The worked examples below are synthetic.
+
+## Verdict: REWORK-small
+
+The redesign is the right shape: a horizon, a windowed match, a preview, un-adopt, a per-client
+ledger, isolated projects and a measured gate. Seven defects remain. Each is a bounded edit to
+the spec, not a redesign. Two of them (R2-B1 and R2-B5) make a round-1 fix impossible to build
+as written.
+
+## Round-1 blockers: closed on paper, or not
+
+| # | Status | Why |
+|---|---|---|
+| B1 | **partly** | Windowed matching is in, but the greedy order leaves duplicates (R2-B2) and the single horizon drops gap months (R2-B3) |
+| B2 | **partly** | Preview, ranking, `ignore`, `close` and un-adopt are in, but un-adopt can't restore history or balances (R2-B4) |
+| B3 | **open** | #59 defines a different, incompatible supersede verb (R2-B1) |
+| B4 | closed, but over-built | The override phrase path should be deleted (R2-S1) |
+| B5 | **partly** | Three gaps (R2-B7) |
+| B6 | **partly** | Measures 3 and 6 can fail correct data and pass wrong data (R2-B6) |
+| B7 | closed | — |
+| B8 | **partly** | The `/link/token/get` resolution can't run on what is stored (R2-B5). The dashboard count is unverified (R2-S4) |
+
+"Closed against the code" can't be shown yet: none of P1–P5 exists. Closure is a property of
+the spec plus the named acceptance tests. Where a test is named (the P2b fixture gate, P4's
+sandbox `409`), it is noted below.
+
+## Blockers
+
+### R2-B1. Two supersede verbs with incompatible rules (§3.3 against #59 §3.3 and §5)
+**Failure.** #59 (`f651389`, PHASE-4-contract lines 494–510 and 684–700) defines
+`LedgerWriter.supersede_transaction(old_id, new_id)` as "the only writer of
+`superseded_by_id`", with its own single-writer lint entry. Its rules:
+- The new row must be not a transfer, with no splits.
+- It moves only a **user** category.
+- It allows **unequal** amounts (the pair dissolves, and splits raise `LedgerRuleError`).
+- It audits `ledger.superseded`.
+- Rejections, links and recurring members are re-pointed by a **DB trigger**
+  (`transaction_supersede_repoint`, AFTER UPDATE when `superseded_by_id` goes from NULL to a
+  value).
+
+Phase 2 §3.3 defines `supersede(loser, winner)` differently:
+- equal amounts only
+- the category by rank (user > rule > plaid > ml)
+- splits kept on both sides when both have them
+- tax, receipt and notes carried
+- not audited per row
+- steps 7–9 written as writer steps "C4c/C5b/C4d adds this"
+- a **reverse** path
+
+#59 has no reverse trigger. When un-adopt or `removed` clears `superseded_by_id`, nothing moves
+rejections, links or members back. Deleting the winner then drops them through FK actions, or
+`transaction_dissolve_orphan` refuses the delete with `42501` when the partner leg is in an
+account the session can't write. The clause Phase 4 is meant to adopt lives in
+`~/.local/state/holdfast-keel/supersede-clause.md`, outside the repo, and #59 doesn't contain it.
+P2a "lands before C3b", so P2a ships a verb that #59 then contradicts.
+
+**Change.** One verb, one name, one text, written in **both** contracts before P2a starts:
+1. Pick Phase 2's semantics: equal amounts, rank-based category, the carried fields.
+2. Keep #59's trigger for rejections, links and members, and add its reverse
+   (`AFTER UPDATE`, value → NULL, re-point onto `OLD.id`).
+3. Un-adopt runs household-wide, so the `42501` refusal can't fire on a joint pair.
+4. Delete §3.3 steps 7–9 from Phase 2 (the trigger owns them).
+
+### R2-B2. ADR 0035 §3: sorting by `d` first is not a maximum matching
+**Failure.** It's a worked case of the common kind: the same amount daily (transit, parking, a
+regular coffee), `authorized_date` NULL (it is "often" present, so sometimes absent), and a
+one-day posting lag.
+- Import rows i1–i4 are dated days 1–4. Connector rows c1–c4 are posted days 2–5.
+- The `d = 0` edges are i2–c1, i3–c2 and i4–c3. Greedy accepts all three first.
+- i1 and c4 are then 4 days apart, so they have no edge. Both stay live.
+- Result: five live rows for four purchases. The true matching (i1–c1 … i4–c4, every `d = 1`)
+  is never found.
+- V1 measure 3 then fails M-live on c1–i1 (`d = 1`), and the only remedy (un-adopt, re-sync)
+  replays the same algorithm.
+
+The cross-batch run breaks the stated invariant too. Plaid fills history in phases (recent days
+first), and §3 freezes earlier supersessions ("already a loser or winner"). The pairing therefore
+depends on which batch a row arrived in. "100 random interleavings reach the same end state"
+can't hold for the pairing, only for the live multiset.
+
+**Change.**
+- Within each `(account, amount)` group, use an **order-preserving** match. Sort both sides by
+  effective date (import `posted_date`; connector `authorized_date` when present, else
+  `posted_date`) and pair them with a two-pointer walk. Accept a pair when the connector row's
+  date is at most 1 day **before** and at most 3 days **after** the import row's: posting lag is
+  almost always non-negative.
+- Or use min-cost maximum-cardinality matching per group. The groups are tiny.
+- Restate the property: the same live multiset and zero live duplicates, not the same pairs.
+- Add the i1–i4/c1–c4 case, with and without `authorized_date`, to the P2b table.
+
+### R2-B3. ADR 0035 §1: one horizon per account drops the owner's gap months for good
+**Failure.**
+- `connector_since = max(period_end) + 1` over reconciled **or accepted** runs. With about 14
+  missing statement months, every gap that falls inside Plaid's 730 days lies before `H`. Its
+  connector rows are dropped, and `connector_since` "never moves". The months Plaid could fill
+  stay empty for good. A null-cursor re-sync after un-adopt drops them again.
+- `accepted` runs are, by definition, unreconciled. Letting one set `H` freezes a statement that
+  may be missing rows, and the connector rows that would show the gap are dropped.
+- Measure 6 uses "the last **reconciled** statement", which is a different `H`.
+- With `close: [twin]`, `H` comes from the adopted account only. Adopt the older twin, and
+  everything after its `H` overlaps the newer twin's rows in **another** account. Supersession
+  can't cross accounts, and `closed_at` doesn't hide rows, so that whole period is duplicated.
+
+**Change.**
+- Replace the scalar with **coverage intervals**: the union over reconciled runs (not
+  `accepted`) of `[start, period_end]`. For `start`, use `period_start` when present. The card
+  profile has only `end`, so otherwise use `min(row posted_date in the run)`.
+- Connector rows inside coverage are dropped. Rows in gaps are inserted. The matcher runs at
+  every interval edge.
+- The intervals are computed over the adopted account **plus** every account in `close`.
+- Store them in a small `account_coverage` table, or recompute them from `import_run` (it is
+  final).
+- Measure 6 uses the same definition.
+
+### R2-B4. ADR 0033 §5: un-adopt doesn't restore what the M-live fix path needs
+**Failure.** §6.4 says "the fix is un-adopt, a code fix, then another preview. No new Item is
+needed". But:
+1. Un-adopt leaves `bank_connection.tx_cursor` advanced. After re-adopting, `/transactions/sync`
+   resumes from that cursor and **never re-sends** the 24 months it deleted, so the account keeps
+   only new rows.
+2. "Connector balance snapshots stay". `balance_snapshot` has no source column (PK
+   `(account_id, as_of_date)`), and statement import writes none. After a wrong match, the
+   imported account's latest balance is the **other** account's, indefinitely.
+3. User edits on connector-only rows (after `H`) are deleted without warning.
+4. R2-B1's missing reverse trigger.
+
+**Change.** Un-adopt runs household-wide. It:
+- sets the connection's `tx_cursor = NULL` (the replay is idempotent through `upsert_external`
+  and the horizon)
+- deletes the account's `balance_snapshot` rows dated on or after `adopted_at` (a new column),
+  or all of them, since imports write none
+- returns `{rows_removed, user_edited_rows_lost}` to a confirm step that needs the typed count
+
+The test re-adopts and asserts the history is back.
+
+### R2-B5. ADR 0034 §3 and contract §9: `/link/token/get` needs the token, which isn't stored
+**Failure.** §9 says the Link token is "never (`link_token_fp` only)". `/link/token/get` takes
+the `link_token` itself, so none of the S4 resolution can run: recovering a lost `public_token`,
+confirming "no Item", unsticking a crashed tab. The fallback (4 hours, then `unknown`, then
+abandon by phrase) becomes the only path. The single `reserved` row per `(client_fp, env)`, now
+**across** households, blocks every link on that client for those 4 hours.
+**Change.** Seal the Link token (`hf1`) into `plaid_link_slot.link_token_enc` until the row
+resolves, then NULL it. Add it to the rotator's targets, or document that it never outlives 4
+hours. Bulwark rules on it as a short-lived credential. The canary tests cover it.
+
+### R2-B6. §6.4 V1: the gate fails correct data and passes risky data
+**Failure.**
+- **Measure 3** counts any live connector row on or after `S` against any live import row with
+  equal amount and `d ≤ 3`. The import side is authoritative before `S` by design, so a daily
+  equal charge at the boundary (import S−1, connector S+1, two different purchases) is a "duplicate".
+  M-live fails on correct data.
+- Real duplicates with a lag over 3 days (a Friday purchase before a Monday holiday, hotel or
+  rental holds) are missed.
+- **Measure 6** reports `n/a` for an account with no reconciled statement. Those are exactly the
+  accounts with `connector_since = NULL`, where the full 24-month overlap goes through the
+  matcher. The riskiest account passes vacuously.
+- Plaid's `current` from `/transactions/sync` is cached and often lags the transaction list, so
+  measure 6 can flake.
+
+**Change.**
+- Measure 6 is the gate. Measure 3 becomes a report, failing only for pairs where both rows are
+  on or after `S`.
+- Add measure 3b: per day after `S`, connector count against import count, for statements
+  imported after adoption.
+- Adoption at M-live only for accounts with a reconciled run (otherwise `new`).
+- Measure 6 must hold on two consecutive syncs at least 6 hours apart, or be read with P6's
+  `/accounts/balance/get` (**VERIFY** cost on Trial).
+
+### R2-B7. Sandbox isolation (D12, D13, H2): three gaps
+1. `.env.example` line 58 ships `PLAID_ENV=sandbox`. `holdfast-instance` is only "allowed to be
+   production", and §11 tells the owner to re-import from scratch into it. On that fresh real
+   instance, before the first import, the P4 refusal ("a household with an import run or a
+   production connection") doesn't fire. A sandbox Item and its fake `new` accounts then sit in
+   the real household for good.
+2. ADR 0034 §5 has the owner run "one restore drill into the throwaway sandbox project". That
+   puts the **real** dump and the **real** `FERNET_KEY` (needed "to prove the key decrypts") into
+   the project agents and Sounding operate in. H1's acceptance says a synthetic dataset. The two
+   texts contradict.
+3. Nothing stops `docker volume prune` or `docker system prune --volumes` from an agent shell on
+   the same Docker host. That is the real-data volume.
+
+**Change.**
+- `holdfast-instance` refuses to start unless `PLAID_ENV=production`, and refuses sandbox Link
+  tokens outright: an `INSTANCE_KIND=real` deployment flag, not a data heuristic.
+- The owner's real restore drill goes into a third, owner-only project (`holdfast-drill`), which
+  is destroyed afterwards. Agents never touch it.
+- The real instance's data lives on bind mounts in a 0700 directory outside the repo.
+- `guard-secrets.sh` (or a Bash hook) blocks `docker * prune` with volumes.
+
+## Should-fix
+
+**R2-S1. D7 and §5.1: delete the override path, don't gate it.**
+- A typed phrase naming `transactions,balance,investments,liabilities` doesn't help the owner
+  see that required `investments` hides their credit union in Link. They will type it to
+  proceed.
+- No M-live user needs an override.
+- Link ignores `PLAID_PRODUCTS` (it remains a probe input). `days_requested` is a constant.
+- The long phrase variant and the "deviations" field go.
+- Also **VERIFY** that `balance` is accepted in `products`. Plaid treats Balance as not
+  initialized through `products`.
+
+**R2-S2. ADR 0035 §5: cross-merchant pairing carries transfer and user state to the wrong row.**
+- Round amounts (20, 25, 50, 100) within 3 days are common: an ATM withdrawal and a transfer
+  to savings, say. Pairing the import transfer leg to the Plaid ATM row moves the transfer
+  membership. Spending is then wrong in both directions, and measure 6 stays green.
+- Fix: when an `(account, amount)` group has more than one candidate on either side, use a
+  description-token overlap (the Phase 4 `merchant.py` key) as the first tie-break.
+- And never carry `is_transfer` or a `user` category across an edge that wasn't unique in its
+  window. Leave those rows live and count them for the preview.
+
+**R2-S3. ADR 0033 §2 and §6.3: the owner can't "explain every unmatched row" from counts.**
+- The counts-only rule exists for agents, logs and Redis (ADR 0019), not for the owner's own
+  screen.
+- The preview GET should return, to the owner session only, the unmatched rows (date, amount,
+  description), recomputed from the job's in-memory result, or stored sealed. Redis keeps the
+  counts only.
+- Adopt is refused until `history_status = HISTORICAL_UPDATE_COMPLETE`. Before that, the 0.95
+  ratio is computed on a partial window.
+
+**R2-S4. ADR 0034 §2: VERIFY what the dashboard number is.**
+- If Plaid's dashboard shows **active** Items, not the Trial's lifetime usage, typing it
+  under-counts after removals and restores. That is the case the field exists for.
+- Q1 must name the exact dashboard field. If there is no lifetime counter, the owner keeps a
+  written slot log (PLAN 3.2) and types that number.
+
+**R2-S5. §4: Phase 4's C3b sits on Phase 2's critical path for no Phase 2 reason.**
+- The token order is 0010 → C3b → P4a. `ledger_service.py` order is P2a → C3b, so C3b can't
+  merge before P2a. P4a "depends on P2b" only for the matcher call.
+- The chain is therefore P2a → P2b → C3b review → P4a → P4.
+- The skip rule fires only when "the next holder has no **open PR**", so an open C3b PR stuck in
+  rework holds the token indefinitely.
+- **Change:** P4a's migration takes the token right after 0010. It depends on L1 only. The
+  resolver switch stays with it, and the matcher call moves to P4. Extend the skip rule to "an
+  open PR without both verdicts one window after the token frees".
+
+**R2-S6. §6.1 P4 is XL.** It has link plan, guard, idempotent exchange, `/link/token/get`,
+`optional_products`, preview job, decisions, un-adopt, sandbox refusal and the `client_fp` check:
+more than the P2 slices that were split to avoid L. Split it into **P4-link** (plan, guard, token,
+exchange, resolve, `client_fp`) and **P4-map** (preview, decisions, un-adopt). P5 depends on
+both, and P9b-min can ship link first.
+
+**R2-S7. V1's run context.** "Sounding runs V1 on `holdfast-instance`" means
+`docker compose exec` into a container whose environment holds the production Plaid secret.
+That puts an agent one `env` away from live keys, which SDLC §3 forbids. Run V1 as a one-off
+`audit` service with DB-only env (the app role, household-wide, read-only transaction), or have
+the owner run it and paste the counts.
+
+**R2-S8. H2 against #31.** #31 edits `Makefile`, `docker-compose.yml` and `scripts/dev.ps1`, and
+H2 owns all three. H2's "Depends: —" is wrong: make it depend on L1. Its acceptance should also
+prove `make down -v` in the main checkout leaves `holdfast-instance` alone. It currently says
+`make down`.
+
+## What can still be cut for a sooner first real link (no data risk, no wasted slot)
+
+1. **Split the irreversible step from the ledger work: an M-link milestone.**
+   - Creating the Item needs L1 (sealing), L2, P4a's slot and connection columns, P4-link,
+     P9b-link (plan dialog, Link button, slot counter) and the backup (a runbook is enough).
+   - The Item then waits in `pending_setup`: token sealed, slot recorded, nothing ingested.
+     Plaid keeps the history, and a null-cursor sync fetches it later.
+   - Linking earlier loses nothing and anchors the 730 days sooner.
+   - The real preview (P1, P2b's pure matcher, P4-map) then runs **read-only** on the real
+     Item before any ledger write exists.
+   - Roughly 3–4 windows to M-link, and M-live follows without touching Plaid again.
+   - Cost: a week or two with an Item and no sync. An expired login needs P7's update mode,
+     which reserves nothing.
+2. **Delete the env-override phrase path** (R2-S1). That is one fewer P4 branch, one fewer
+   P9b-min dialog state, and tests.
+3. **H1 as a runbook** (`docs/ops/backup.md`: the `pg_dump` and document-store commands, plus
+   the key steps), not a scripted slice with its own Bulwark run. Script it in Phase 9.
+4. **Drop the owner's SBX sandbox smoke.** R1's recording replay plus hand-built fixtures cover
+   it. Keep R1, which D11's VERIFY needs.
+5. **P4a's migration takes the token right after 0010** (R2-S5). That takes one review cycle off
+   the critical path.
+
+## Estimate
+
+6–8 windows to M-live is plausible only with P4 split (R2-S6) and P4a ahead of C3b (R2-S5).
+Otherwise P4's review loop and the C3b wait push it to 9–10. The path is 14 steps. On the order
+in this contract, the critical path runs P2a → P2b → C3b → P4a → P4 → P5 → V1 → SBX: eight
+serial review gates, most of them Ledger plus Bulwark. H1 and H2 are off the critical path once
+they depend on L1.
