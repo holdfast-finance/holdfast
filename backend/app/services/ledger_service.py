@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import enum
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from typing import TypeVar
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,13 +47,16 @@ from app.db_context import is_household_wide
 from app.domain.category_precedence import can_replace_category
 from app.domain.ledger_rules import (
     LedgerRuleError,
+    SupersedeConflict,
     TransferLeg,
     TransferPairError,
+    first_present,
+    outranks,
     validate_amount,
     validate_splits,
     validate_transfer_pair,
 )
-from app.models import Account, Category, Transaction, TransactionSplit
+from app.models import Account, BankConnection, Category, Transaction, TransactionSplit
 from app.models._common import TRANSACTION_SOURCES
 from app.security.client_ip import IPAddress
 from app.services import audit
@@ -62,6 +66,17 @@ T = TypeVar("T")
 RLS_DENIED = "42501"
 RETRYABLE_SQLSTATES = frozenset({"40001", "40P01", "55P03"})
 LOCK_ATTEMPTS = 3
+CONNECTOR_SOURCES = ("plaid", "simplefin")
+# What a sync may refresh on an existing row. Category, amount and the rest have their own rules.
+_UPSERT_FIELDS = (
+    "posted_date",
+    "authorized_date",
+    "description_raw",
+    "merchant_name",
+    "plaid_pfc_primary",
+    "plaid_pfc_detailed",
+    "is_pending",
+)
 
 
 class LedgerNotFoundError(LedgerRuleError):
@@ -118,6 +133,23 @@ class NewTransaction:
     pending_external_id: str | None = None
 
 
+class UpsertAction(enum.StrEnum):
+    INSERTED = "inserted"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    """What ``upsert_external`` did. The caller folds these into the sync run's counts."""
+
+    transaction_id: uuid.UUID
+    action: UpsertAction
+    splits_cleared: bool = False  # the amount changed on a split row
+    transfer_dissolved: bool = False  # the amount changed on a paired leg and broke the pair
+    category_kept: bool = False  # a user or rule category held against the incoming one
+
+
 @dataclass(frozen=True)
 class SplitInput:
     amount: Decimal
@@ -157,6 +189,11 @@ class LedgerWriter:
         self._household_id: uuid.UUID = bound
         self._user_id = user_id
         self._ip = ip
+        # Per-unit-of-work tallies for the caller's sync run (no per-row audit, PHASE-2 3.3):
+        # ``rows_superseded``, ``rows_unsuperseded``, ``splits_kept_on_old``,
+        # ``supersede_conflict``,
+        # ``supersede_amount_mismatch``, ``splits_cleared``, ``transfers_dissolved``.
+        self.counts: Counter[str] = Counter()
 
     # ------------------------------------------------------------------ insert
 
@@ -416,6 +453,403 @@ class LedgerWriter:
             TransactionNotFoundError,
         )
         self._audit("ledger.splits_cleared", transaction_id, {}, user)
+
+    # -------------------------------------------------------------- sync verbs (PHASE-2 3.3)
+
+    async def upsert_external(self, new: NewTransaction) -> UpsertOutcome:
+        """Insert or update a connector row, keyed on ``(account_id, external_id)``.
+
+        Never replaces a ``user`` or ``rule`` category. A changed amount clears the row's splits
+        and, for a paired transfer leg, dissolves the pair (the legs no longer match); both are
+        reported on the outcome and tallied in ``counts``. Not audited per row: the sync run is
+        the record.
+
+        **P5b must surface ``transfers_dissolved``** to the user (a transfer they or the matcher
+        paired just broke because the bank changed an amount); it is not silent bookkeeping.
+        An existing row whose ``source`` differs from the incoming one is refused. A ``None``
+        ``pending_external_id`` never erases the one already stored.
+
+        Needs an acting user or a system job (household-wide) session.
+        """
+        await self._require_actor_or_system()
+        validate_amount(new.amount)
+        if new.external_id is None or new.source not in CONNECTOR_SOURCES:
+            raise LedgerRuleError("upsert_external needs a connector row with an external id")
+        existing_id = await self._id_by_external(new.account_id, new.external_id)
+        if existing_id is None:
+            inserted = await self.insert_transaction(new, skip_duplicates=True)
+            if inserted is not None:
+                return UpsertOutcome(inserted, UpsertAction.INSERTED)
+            existing_id = await self._id_by_external(new.account_id, new.external_id)
+            if existing_id is None:
+                raise LedgerRetryableError("row appeared and vanished; retry the unit of work")
+        rows = await self._lock_group([existing_id])
+        txn = rows[existing_id]
+        self._require_live(txn)
+        if txn.source != new.source:
+            raise LedgerRuleError("upsert_source_mismatch")
+        changed = False
+        for attr in _UPSERT_FIELDS:
+            value = getattr(new, attr)
+            if getattr(txn, attr) != value:
+                setattr(txn, attr, value)
+                changed = True
+        if new.pending_external_id is not None and txn.pending_external_id != (
+            new.pending_external_id
+        ):
+            txn.pending_external_id = new.pending_external_id
+            changed = True
+        category_kept = False
+        if new.category_id is not None and new.category_source is not None:
+            incoming = AutoCategorySource(new.category_source).value
+            if txn.category_id != new.category_id or txn.category_source != incoming:
+                if txn.category_source in ("user", "rule"):
+                    category_kept = True
+                elif can_replace_category(txn.category_source, incoming):
+                    await self._require_category(new.category_id)
+                    txn.category_id = new.category_id
+                    txn.category_source = incoming
+                    changed = True
+        splits_cleared = dissolved = False
+        if txn.amount != new.amount:
+            splits_cleared = await self._has_splits(txn.id)
+            if splits_cleared:
+                await self._delete_splits(txn.id)
+                self.counts["splits_cleared"] += 1
+            if txn.transfer_group_id is not None:
+                partner = self._partner(txn, rows)
+                try:
+                    await self._check_pair(txn, partner, amount_a=new.amount)
+                except TransferPairError:
+                    self._dissolve_group(txn, rows)
+                    dissolved = True
+            txn.amount = new.amount
+            changed = True
+        await self._flush()
+        return UpsertOutcome(
+            txn.id,
+            UpsertAction.UPDATED if changed else UpsertAction.UNCHANGED,
+            splits_cleared=splits_cleared,
+            transfer_dissolved=dissolved,
+            category_kept=category_kept,
+        )
+
+    async def remove_external(self, account_id: uuid.UUID, external_id: str) -> bool:
+        """Delete a connector row (Plaid ``removed``). ``False`` when there is no such row.
+
+        A winner is un-superseded first, so the row it replaced counts again and gets back the
+        state the winner holds. A paired leg's partner is released here while this session can
+        lock it (counted as ``transfers_dissolved``; the caller should surface it). A partner this
+        session can't see is left to the Phase 4 orphan trigger, which stays the backstop.
+
+        Needs an acting user or a system job (household-wide) session.
+        """
+        await self._require_actor_or_system()
+        tid = await self._id_by_external(account_id, external_id)
+        if tid is None:
+            return False
+        replaced = (
+            await self._db(
+                self._s.execute(select(Transaction.id).where(Transaction.superseded_by_id == tid)),
+                TransactionNotFoundError,
+            )
+        ).scalar_one_or_none()
+        if replaced is not None:
+            await self.unsupersede_transaction(replaced)
+        rows = await self._lock_group([tid])
+        txn = rows[tid]
+        if txn.transfer_group_id is not None:
+            self._dissolve_group(txn, rows)
+            await self._flush()
+        result = await self._db(
+            self._s.execute(delete(Transaction).where(Transaction.id == tid)),
+            TransactionNotFoundError,
+        )
+        if getattr(result, "rowcount", 0) != 1:
+            raise TransactionNotFoundError("transaction not found")
+        self._s.expunge(txn)
+        return True
+
+    async def post_pending(self, pending_external_id: str, posted: NewTransaction) -> uuid.UUID:
+        """Replace a pending row with its posted row in one unit; returns the posted row's id.
+
+        The posted row takes the pending row's category when that source outranks its own, the
+        notes, tax and receipt fields, the transfer state, and the splits when the amount is
+        unchanged. When the amount changed, the splits go with the pending row and a paired
+        pending leg's pair is dissolved. Both are tallied in ``counts``.
+
+        **Replay:** when the posted row already exists with this ``pending_external_id`` and the
+        pending row is gone, it returns the posted id and writes nothing. A pending row that was
+        never seen raises ``TransactionNotFoundError``: **P2b routes that case to
+        ``upsert_external``** (the posted row simply arrives without a pending twin).
+
+        Needs an acting user or a system job (household-wide) session.
+        """
+        await self._require_actor_or_system()
+        validate_amount(posted.amount)
+        if posted.external_id is None or posted.source not in CONNECTOR_SOURCES:
+            raise LedgerRuleError("post_pending needs a connector row with an external id")
+        if posted.is_pending:
+            raise LedgerRuleError("the posted row cannot be pending")
+        if posted.pending_external_id not in (None, pending_external_id):
+            raise LedgerRuleError("pending_external_id does not match the posted row")
+        pending_id = await self._id_by_external(posted.account_id, pending_external_id)
+        existing_id = await self._id_by_external(posted.account_id, posted.external_id)
+        if pending_id is None:
+            if existing_id is None:
+                raise TransactionNotFoundError("pending transaction not found")
+            existing = (await self._lock_group([existing_id]))[existing_id]
+            if existing.pending_external_id == pending_external_id:
+                return existing_id
+            raise LedgerRuleError("posted transaction already exists")
+        if existing_id is not None:
+            raise LedgerRuleError("posted transaction already exists")
+        # Validate the pending row under lock before anything is inserted.
+        pending = (await self._lock_group([pending_id]))[pending_id]
+        self._require_live(pending)
+        if not pending.is_pending:
+            raise LedgerRuleError("the replaced row is not pending")
+        posted_id = await self.insert_transaction(
+            replace(posted, pending_external_id=pending_external_id), skip_duplicates=True
+        )
+        if posted_id is None:
+            raise LedgerRetryableError("posted row appeared meanwhile; retry the unit of work")
+        rows = await self._lock_group([pending_id, posted_id])
+        pending, post = rows[pending_id], rows[posted_id]
+        if outranks(pending.category_source, post.category_source):
+            post.category_id, post.category_source = pending.category_id, pending.category_source
+        post.notes = pending.notes
+        post.is_tax_relevant = pending.is_tax_relevant
+        post.tax_tag = pending.tax_tag
+        post.receipt_document_id = pending.receipt_document_id
+        await self._flush()
+        if pending.amount == post.amount:
+            await self._move_splits(pending.id, post.id)
+            await self._move_transfer_state(pending, post)
+        else:
+            if await self._has_splits(pending.id):
+                self.counts["splits_cleared"] += 1
+            if pending.transfer_group_id is not None:
+                self._dissolve_group(pending, rows)
+            elif pending.is_transfer:
+                pending.is_transfer = False
+                post.is_transfer = True
+            await self._flush()
+        result = await self._db(
+            self._s.execute(delete(Transaction).where(Transaction.id == pending_id)),
+            TransactionNotFoundError,
+        )
+        if getattr(result, "rowcount", 0) != 1:
+            raise TransactionNotFoundError("pending transaction not found")
+        self._s.expunge(pending)
+        return posted_id
+
+    # ------------------------------------------------------------------- supersede
+
+    async def supersede_transaction(self, old_id: uuid.UUID, new_id: uuid.UUID) -> None:
+        """A connector row (``new``) replaces an imported row (``old``). The single definition,
+        PHASE-2 3.3: preconditions first (nothing is written if one fails), then ``new`` takes
+        what people corrected on ``old``, then ``old`` is marked. Not audited per row.
+
+        Raises ``LedgerRuleError("supersede_amount_mismatch")`` for unequal amounts and
+        ``SupersedeConflict`` for transfer state that can't be taken over. Both rows stay live.
+
+        **The counters increment before the raise** (``supersede_amount_mismatch``,
+        ``supersede_conflict``). A caller that catches the error and carries on in the same
+        session must run each call in a savepoint (``session.begin_nested()``), so a later
+        rollback of the unit cannot leave a half-counted run. Only locks are taken before a raise.
+
+        Needs an acting user or a system job (household-wide) session.
+        """
+        await self._require_actor_or_system()
+        if old_id == new_id:
+            raise LedgerRuleError("supersede_same_row")
+        rows = await self._lock_group([old_id, new_id])
+        old, new = rows[old_id], rows[new_id]
+        if old.account_id != new.account_id:
+            raise LedgerRuleError("supersede_account_mismatch")
+        if old.source != "import" or new.source not in CONNECTOR_SOURCES:
+            raise LedgerRuleError("supersede_source")
+        if not await self._is_production(new.account_id):
+            raise LedgerRuleError("supersede_not_production")
+        if (
+            old.is_pending
+            or new.is_pending
+            or old.superseded_by_id is not None
+            or new.superseded_by_id is not None
+            or await self._in_supersession(old_id, new_id)
+        ):
+            raise LedgerRuleError("supersede_not_eligible")
+        if old.amount != new.amount:
+            self.counts["supersede_amount_mismatch"] += 1
+            raise LedgerRuleError("supersede_amount_mismatch")
+        if new.is_transfer and (
+            not old.is_transfer or new.transfer_group_id != old.transfer_group_id
+        ):
+            self.counts["supersede_conflict"] += 1
+            raise SupersedeConflict("supersede_transfer_conflict")
+        # 1. Category by rank. (C3b adds category_rule_id to this move.)
+        if outranks(old.category_source, new.category_source):
+            new.category_id, new.category_source = old.category_id, old.category_source
+        # 2. Splits.
+        if await self._has_splits(old_id):
+            if await self._has_splits(new_id):
+                self.counts["splits_kept_on_old"] += 1
+            else:
+                await self._move_splits(old_id, new_id)
+        # 3. Transfer state. No rejection row is written.
+        if not new.is_transfer:
+            await self._move_transfer_state(old, new)
+        # 4 to 6. Tax, receipt, notes.
+        new.is_tax_relevant = new.is_tax_relevant or old.is_tax_relevant
+        new.tax_tag = first_present(new.tax_tag, old.tax_tag)
+        if new.receipt_document_id is None:
+            new.receipt_document_id = old.receipt_document_id
+        new.notes = first_present(new.notes, old.notes)
+        await self._flush()
+        # 7. Mark. The Phase 4 trigger moves rejections, links and recurring members.
+        old.superseded_by_id = new_id
+        await self._flush()
+        self.counts["rows_superseded"] += 1
+
+    async def unsupersede_transaction(self, old_id: uuid.UUID) -> None:
+        """Undo ``supersede_transaction``: ``old`` is live again and takes back what the winner
+        holds where its own value is empty (or lower-ranked, for the category). The winner's
+        transfer state is always cleared, so deleting it afterwards leaves no orphan leg.
+
+        Splits and transfer state move to ``old`` only when the two amounts are equal. If the
+        winner's amount drifted since (a sync changed it), its splits are dropped
+        (``splits_cleared``) and its pair is dissolved on both legs (``transfers_dissolved``),
+        because neither fits ``old``'s amount.
+
+        Needs an acting user or a system job session. Un-adopt calls it in the requester's
+        person-scoped session (PHASE-2 3.2), so RLS still decides which rows it may touch.
+        """
+        await self._require_actor_or_system()
+        found = (
+            await self._db(
+                self._s.execute(
+                    select(Transaction.superseded_by_id).where(Transaction.id == old_id)
+                ),
+                TransactionNotFoundError,
+            )
+        ).first()
+        if found is None:
+            raise TransactionNotFoundError("transaction not found")
+        w_id: uuid.UUID | None = found[0]
+        if w_id is None:
+            raise LedgerRuleError("transaction is not superseded")
+        rows = await self._lock_group([old_id, w_id])
+        old, win = rows[old_id], rows[w_id]
+        if old.superseded_by_id != w_id:
+            raise LedgerRetryableError("supersession changed while locking; retry the unit of work")
+        old.superseded_by_id = None  # the trigger moves the derived rows back
+        await self._flush()
+        same_amount = old.amount == win.amount
+        if await self._has_splits(w_id):
+            if not same_amount:
+                await self._delete_splits(w_id)
+                self.counts["splits_cleared"] += 1
+            elif not await self._has_splits(old_id):
+                await self._move_splits(w_id, old_id)
+        if win.is_transfer or win.transfer_group_id is not None:
+            if same_amount:
+                await self._move_transfer_state(win, old)
+            else:
+                self._dissolve_group(win, rows)
+                await self._flush()
+        old.is_tax_relevant = old.is_tax_relevant or win.is_tax_relevant
+        old.tax_tag = first_present(old.tax_tag, win.tax_tag)
+        if old.receipt_document_id is None:
+            old.receipt_document_id = win.receipt_document_id
+        old.notes = first_present(old.notes, win.notes)
+        if outranks(win.category_source, old.category_source):
+            old.category_id, old.category_source = win.category_id, win.category_source
+        await self._flush()
+        self.counts["rows_unsuperseded"] += 1
+
+    async def _id_by_external(self, account_id: uuid.UUID, external_id: str) -> uuid.UUID | None:
+        return (
+            await self._db(
+                self._s.execute(
+                    select(Transaction.id).where(
+                        Transaction.account_id == account_id,
+                        Transaction.external_id == external_id,
+                    )
+                ),
+                TransactionNotFoundError,
+            )
+        ).scalar_one_or_none()
+
+    async def _delete_splits(self, transaction_id: uuid.UUID) -> None:
+        await self._db(
+            self._s.execute(
+                delete(TransactionSplit).where(TransactionSplit.transaction_id == transaction_id)
+            ),
+            TransactionNotFoundError,
+        )
+
+    async def _move_splits(self, source_id: uuid.UUID, target_id: uuid.UUID) -> None:
+        """Re-parent every split row (amounts are equal, so the exact-sum check still holds)."""
+        await self._db(
+            self._s.execute(
+                update(TransactionSplit)
+                .where(TransactionSplit.transaction_id == source_id)
+                .values(transaction_id=target_id)
+            ),
+            TransactionNotFoundError,
+        )
+
+    def _dissolve_group(self, txn: Transaction, rows: dict[uuid.UUID, Transaction]) -> None:
+        """Clear the transfer state of ``txn`` and every locked leg of its group."""
+        group = txn.transfer_group_id
+        legs = [txn]
+        if group is not None:
+            legs += [r for r in rows.values() if r is not txn and r.transfer_group_id == group]
+            self.counts["transfers_dissolved"] += 1
+        for leg in legs:
+            leg.is_transfer = False
+            leg.transfer_group_id = None
+
+    async def _require_actor_or_system(self) -> None:
+        """The sync and supersede verbs are for a system job (household-wide session) or a named
+        acting user, never an anonymous request handler (same rule as ``apply_transfer_pair``)."""
+        if self._user_id is None and not await is_household_wide(self._s):
+            raise LedgerRuleError("this verb needs an acting user or a system job session")
+
+    async def _move_transfer_state(self, src: Transaction, dst: Transaction) -> None:
+        """``src`` leaves its group (or single mark) first, then ``dst`` takes it."""
+        group = src.transfer_group_id
+        if group is None and not src.is_transfer:
+            return
+        src.is_transfer = False
+        src.transfer_group_id = None
+        await self._flush()
+        dst.is_transfer = True
+        dst.transfer_group_id = group
+        await self._flush()
+
+    async def _is_production(self, account_id: uuid.UUID) -> bool:
+        env = (
+            await self._db(
+                self._s.execute(
+                    select(BankConnection.env)
+                    .join(Account, Account.bank_connection_id == BankConnection.id)
+                    .where(Account.id == account_id)
+                ),
+                AccountNotFoundError,
+            )
+        ).scalar_one_or_none()
+        return env == "production"
+
+    async def _in_supersession(self, a: uuid.UUID, b: uuid.UUID) -> bool:
+        found = await self._db(
+            self._s.execute(
+                select(Transaction.id).where(Transaction.superseded_by_id.in_((a, b))).limit(1)
+            ),
+            TransactionNotFoundError,
+        )
+        return found.first() is not None
 
     # ----------------------------------------------------------------- helpers
 
