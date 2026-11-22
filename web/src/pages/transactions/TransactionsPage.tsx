@@ -1,15 +1,24 @@
-import { Landmark, ListFilter, Search, X } from 'lucide-react'
+import { Landmark, ListFilter, Search, Tags, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { errorMessage } from '@/api/client'
-import { useAccounts, useTransactionSummary, useTransactions } from '@/api/ledger'
+import {
+  useAccounts,
+  useCategories,
+  useReleaseCategory,
+  useSetCategory,
+  useTransactionSummary,
+  useTransactions,
+  type Transaction,
+} from '@/api/ledger'
 import { ResponsiveSheet } from '@/components/ResponsiveSheet'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useIsWide } from '@/hooks/useBreakpoint'
 import { AccountsPanel, AccountsSkeleton } from './AccountsPanel'
+import { indexCategories, withDescendants } from './categories'
 import { FiltersForm } from './FiltersForm'
 import {
   activeFilterCount,
@@ -20,6 +29,7 @@ import {
   type ViewFilters,
 } from './filters'
 import { SummaryStrip } from './SummaryStrip'
+import { TransactionSheet } from './TransactionSheet'
 import { ListSkeleton, TransactionList } from './TransactionList'
 
 const SEARCH_DEBOUNCE_MS = 300
@@ -74,12 +84,44 @@ export function TransactionsPage() {
   const visibleIds = accounts.filter((a) => !a.is_hidden).map((a) => a.id)
   const hasHidden = visibleIds.length !== accounts.length
   const defaultIds = hasHidden && !filters.showHidden ? visibleIds : null
-  const apiFilters = toApiFilters({ ...filters, accounts: selected }, defaultIds)
+  const categoriesQuery = useCategories()
+  const tree = useMemo(() => categoriesQuery.data ?? [], [categoriesQuery.data])
+  const categoryIndex = useMemo(() => indexCategories(tree), [tree])
+  const categoryIds = filters.category ? withDescendants(tree, filters.category) : []
+  const apiFilters = toApiFilters({ ...filters, accounts: selected }, defaultIds, categoryIds)
 
-  const ready = accountsQuery.isSuccess && accounts.length > 0
+  const ready =
+    accountsQuery.isSuccess &&
+    accounts.length > 0 &&
+    (!filters.category || categoriesQuery.isSuccess)
   const list = useTransactions(apiFilters, ready)
   const summary = useTransactionSummary(apiFilters, ready)
   const items = useMemo(() => list.data?.pages.flatMap((p) => p.items) ?? [], [list.data])
+
+  const setCategory = useSetCategory()
+  const releaseCategory = useReleaseCategory()
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const open = items.find((t) => t.id === openId) ?? null
+  const failed = (t: Transaction, what: string) => (error: Error) => {
+    setSaveError(
+      `Couldn't ${what} for ${t.description}. It's back how it was. ${errorMessage(error)}`,
+    )
+  }
+  const onSetCategory = (t: Transaction, categoryId: string) => {
+    setSaveError(null)
+    setOpenId(null)
+    setCategory.mutate({ id: t.id, categoryId }, { onError: failed(t, 'save the category') })
+  }
+  const onRelease = (t: Transaction) => {
+    setSaveError(null)
+    setOpenId(null)
+    releaseCategory.mutate({ id: t.id }, { onError: failed(t, 'hand it back') })
+  }
+  const toggleUncategorized = () => {
+    update({ uncategorized: !filters.uncategorized, category: '', source: '' })
+    setResetCount((n) => n + 1)
+  }
 
   const filterCount = activeFilterCount(filters)
   const anyFilter = filterCount > 0 || selected.length > 0 || filters.showHidden
@@ -104,7 +146,9 @@ export function TransactionsPage() {
       }}
     />
   )
-  const filtersForm = <FiltersForm key={resetCount} filters={filters} onApply={applyForm} />
+  const filtersForm = (
+    <FiltersForm key={resetCount} filters={filters} categories={tree} onApply={applyForm} />
+  )
 
   const loadMoreFailed = list.isFetchNextPageError
   let body
@@ -132,7 +176,14 @@ export function TransactionsPage() {
   } else {
     body = (
       <>
-        <TransactionList items={items} accounts={accounts} />
+        <TransactionList
+          items={items}
+          accounts={accounts}
+          categories={categoryIndex}
+          onOpen={(t) => {
+            setOpenId(t.id)
+          }}
+        />
         {list.hasNextPage && (
           <div className="flex justify-center py-6">
             <Button
@@ -214,6 +265,14 @@ export function TransactionsPage() {
                 </Button>
               </>
             )}
+            <Button
+              variant={filters.uncategorized ? 'default' : 'outline'}
+              aria-pressed={filters.uncategorized}
+              onClick={toggleUncategorized}
+            >
+              <Tags aria-hidden="true" />
+              Needs category
+            </Button>
             {anyFilter && (
               <Button variant="ghost" onClick={clearAll}>
                 <X aria-hidden="true" />
@@ -221,6 +280,25 @@ export function TransactionsPage() {
               </Button>
             )}
           </div>
+
+          {saveError && (
+            <div
+              role="alert"
+              className="flex items-start justify-between gap-3 rounded-card border border-destructive/50 p-3 text-sm text-destructive-text"
+            >
+              <p>{saveError}</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label="Dismiss message"
+                onClick={() => {
+                  setSaveError(null)
+                }}
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </div>
+          )}
 
           {ready && (
             <SummaryStrip
@@ -234,6 +312,17 @@ export function TransactionsPage() {
           <div className="rounded-card border border-border bg-card">{body}</div>
         </div>
       </div>
+
+      <TransactionSheet
+        transaction={open}
+        account={open ? accounts.find((a) => a.id === open.account_id) : undefined}
+        categories={tree}
+        onClose={() => {
+          setOpenId(null)
+        }}
+        onSetCategory={onSetCategory}
+        onRelease={onRelease}
+      />
 
       {!isWide && (
         <>

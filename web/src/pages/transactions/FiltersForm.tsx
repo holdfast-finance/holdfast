@@ -4,6 +4,8 @@ import { useForm } from 'react-hook-form'
 
 import { Field } from '@/components/forms/Field'
 import { Input, NativeSelect } from '@/components/ui/input'
+import type { CategoryNode } from '@/api/ledger'
+import { pickerGroups, SOURCE_LABELS } from './categories'
 import { filterFormSchema, type FilterFormValues, type ViewFilters } from './filters'
 
 const DEBOUNCE_MS = 300
@@ -15,8 +17,10 @@ const DEBOUNCE_MS = 300
 export function FiltersForm({
   filters,
   onApply,
+  categories = [],
 }: {
   filters: ViewFilters
+  categories?: CategoryNode[]
   onApply: (values: FilterFormValues) => void
 }) {
   const form = useForm<FilterFormValues>({
@@ -29,6 +33,9 @@ export function FiltersForm({
       min: filters.min,
       max: filters.max,
       hideTransfers: filters.hideTransfers,
+      onlyTransfers: filters.onlyTransfers,
+      category: filters.category,
+      source: filters.source,
     },
   })
   const apply = useRef(onApply)
@@ -71,6 +78,34 @@ export function FiltersForm({
       <Field label="To" error={errors.to?.message}>
         {(p) => <Input type="date" {...p} {...form.register('to')} />}
       </Field>
+      <Field label="Category" className="col-span-2 min-[1200px]:col-span-1">
+        {(p) => (
+          <NativeSelect {...p} {...form.register('category')}>
+            <option value="">Any category</option>
+            {pickerGroups(categories).map((g) => (
+              <optgroup key={g.id} label={g.label}>
+                {g.options.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </NativeSelect>
+        )}
+      </Field>
+      <Field label="Set by" className="col-span-2 min-[1200px]:col-span-1">
+        {(p) => (
+          <NativeSelect {...p} {...form.register('source')}>
+            <option value="">Anyone</option>
+            {(Object.keys(SOURCE_LABELS) as (keyof typeof SOURCE_LABELS)[]).map((k) => (
+              <option key={k} value={k}>
+                {SOURCE_LABELS[k]}
+              </option>
+            ))}
+          </NativeSelect>
+        )}
+      </Field>
       <Field label="Direction" className="col-span-2 min-[1200px]:col-span-1">
         {(p) => (
           <NativeSelect {...p} {...form.register('direction')}>
@@ -93,10 +128,23 @@ export function FiltersForm({
         <input
           type="checkbox"
           className="size-5 shrink-0 accent-primary"
-          {...form.register('hideTransfers')}
+          {...form.register('hideTransfers', { deps: ['onlyTransfers'] })}
         />
         <span className="text-sm">Hide transfers</span>
       </label>
+      <label className="col-span-2 flex min-h-11 cursor-pointer items-center gap-3 min-[1200px]:col-span-1">
+        <input
+          type="checkbox"
+          className="size-5 shrink-0 accent-primary"
+          {...form.register('onlyTransfers', { deps: ['hideTransfers'] })}
+        />
+        <span className="text-sm">Only transfers</span>
+      </label>
+      {errors.onlyTransfers?.message && (
+        <p role="alert" className="col-span-2 text-xs text-destructive-text">
+          {errors.onlyTransfers.message}
+        </p>
+      )}
     </form>
   )
 }
