@@ -25,6 +25,7 @@ x-backend-env: &backend-env
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
   APP_ENV: ${APP_ENV:-dev}
+  APP_DEPLOYMENT: ${APP_DEPLOYMENT:-}
   E2E_HOOKS: ${E2E_HOOKS:-false}
   APP_BASE_URL: ${APP_BASE_URL:-}
   APP_HOST: ${APP_HOST:-}
@@ -157,6 +158,33 @@ services:
   worker:
     <<: *backend
     command: ["arq", "app.worker.main.WorkerSettings"]
+
+  # One-off: `make rotate-keys` (dev) / `make rotate-keys-prod`. Runs as holdfast_app (DATABASE_URL), never the owner or admin
+  # role, with the same FERNET_KEY ring as api/worker. Not started by `up` (profile). ADR 0015.
+  rotate-keys:
+    <<: *hardening
+    restart: "no"
+    profiles: [tools]
+    image: holdfast-backend:local
+    build: ./backend
+    command: ["python", "-m", "app.security.rotation"]
+    # Minimal env like `migrate`: the rotator needs the app DB role and the key ring, nothing
+    # else (no session secret, no Plaid or exchange credentials, no Redis).
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      APP_ENV: ${APP_ENV:-dev}
+      DATABASE_URL: ${DATABASE_URL:?set in .env (run make keys)}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
+      FERNET_KEY: ${FERNET_KEY:?set in .env (run make keys)}
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
 
   # One-off: `make migrate` (docker compose run --rm migrate). The only container that gets the
   # owner role's credentials. Not started by `up` (profile).

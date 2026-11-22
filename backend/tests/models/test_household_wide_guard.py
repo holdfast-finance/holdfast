@@ -15,7 +15,8 @@ APP = Path(__file__).resolve().parents[2] / "app"
 SCANNED = ("api", "services", "domain", "security")
 # Paths relative to app/. Add a worker/job module here only with a comment saying why it needs
 # the household-wide view. app/db_context.py (where the flag is defined) sits outside SCANNED.
-ALLOWED: frozenset[str] = frozenset()
+# security/rotation.py: the rotate-keys job re-seals every person's bank connections (ADR 0015).
+ALLOWED: frozenset[str] = frozenset({"security/rotation.py"})
 WIDE = re.compile(
     r"household_wide\s*=\s*True|set_config\(\s*'app\.household_wide'"
     r"|info\[\s*[\"']household_wide[\"']\s*\]\s*=\s*True"

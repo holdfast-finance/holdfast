@@ -102,6 +102,12 @@ async def apply_context(
     await session.execute(SET_CONTEXT_SQL, _context_params(household_id, person_id, household_wide))
 
 
+async def list_household_ids(session: AsyncSession) -> list[uuid.UUID]:
+    """Every household id, from an unscoped session (SECURITY DEFINER; ids only, no names)."""
+    rows = await session.execute(text("SELECT list_household_ids()"))
+    return [r[0] for r in rows]
+
+
 async def is_household_wide(session: AsyncSession) -> bool:
     """Whether the database setting for this transaction is household-wide (a system job).
 
