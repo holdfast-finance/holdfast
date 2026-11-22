@@ -7,17 +7,18 @@ tool is alpha and its interface can change.
 
 ## Rules for this repo
 
-1. **Always confine a Codex or Grok worker, with the full hide list.** Pass the flags that
-   `scripts/fc-hides.sh` prints: `firstchair delegate run codex ... $(scripts/fc-hides.sh)`. They
-   are `--confine` plus `--hide` for the private data directory (ADR 0019), the container sockets
-   (`/run/docker.sock`, `/var/run/docker.sock`, the rootless ones under `/run/user/<uid>/`), the
-   session bus and keyring sockets (`/run/user/<uid>/bus`, `keyring`, `gnupg`, `gcr`) and the lead
-   session's scratch directory. `--confine` alone is not enough: it is a filesystem view under the
-   lead's own user and groups, not a user boundary. It hides the project's checkouts and common
-   secret stores but no sockets, so without the extra hides a worker could reach the running
-   stack through the container socket, or a Git host token through the desktop keyring. Real
-   statements and anything derived from them must never reach another vendor's CLI. `--confine`
-   needs bubblewrap and refuses to run without it. Never type the flags by hand.
+1. **Start every Codex or Grok worker through `scripts/fc-delegate.sh`, never `firstchair delegate
+   run` directly.** The wrapper takes the same arguments as `delegate run`, adds `--confine` and a
+   `--hide` for the private data directory (ADR 0019), the container sockets, the session bus, the
+   systemd user manager, the accessibility bus, the keyring and agent sockets, the X11 cookie, Git
+   credential prompt sockets and the lead's scratch directory, and drops the display and bus
+   variables from the worker's environment. It fails closed: no bubblewrap, no private data
+   directory (set `HOLDFAST_PRIVATE_DIR`, or `none` on a machine with no real data), or a dry run
+   that does not report `"confined": true`, and nothing starts. Call it by absolute path or from
+   the repo root; it works from any directory. `--confine` alone is not enough: it is a filesystem
+   view under the lead's own user and groups, not a user boundary, and it hides no sockets.
+   Residual risk until a separate OS user exists for these workers: loopback TCP ports and
+   abstract Unix sockets (the X server) stay reachable.
 2. **`conduct` cannot confine.** `conduct run` has no `--confine`, `--hide`, `--base`, `--model` or
    `--effort`. On a machine that holds real data, a score may use only the `claude` and `self`
    seats. Fan out Codex and Grok with several `delegate run` jobs in the background instead.
@@ -41,8 +42,8 @@ tool is alpha and its interface can change.
 
 | Need | Command |
 |---|---|
-| One build task for Codex | `delegate run codex --mode write` |
-| One second-opinion review of a PR branch | `delegate run auto --mode read --base origin/<branch>` |
+| One build task for Codex | `scripts/fc-delegate.sh codex --mode write ...` |
+| One second-opinion review of a PR branch | `scripts/fc-delegate.sh auto --mode read --base origin/<branch> ...` |
 | A plan checked by a second model, nothing written | `run --provider codex --reviewer grok --workspace <dir>` |
 | Several independent Claude-only parts, or a part that reads an earlier part's reply | `conduct run` with a score |
 | What a write worker changed | `delegate diff <name>` |
