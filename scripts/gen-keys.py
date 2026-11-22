@@ -38,6 +38,7 @@ def generate() -> dict[str, str]:
     return {
         "FERNET_KEY": fernet_key(),
         "SESSION_SECRET": secrets.token_urlsafe(48),
+        "IMPORT_ID_KEY": secrets.token_urlsafe(48),
         # urlsafe alphabet needs no escaping inside the database URLs.
         "POSTGRES_PASSWORD": secrets.token_urlsafe(32),
         "POSTGRES_OWNER_PASSWORD": secrets.token_urlsafe(32),
