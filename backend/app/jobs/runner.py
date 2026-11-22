@@ -10,7 +10,9 @@ arq delivers at least once. These rules turn that into "one successful side effe
    ``job_run``. **That** payload is what the handler gets: it was validated and authorized at
    enqueue, while the Redis copy is unauthenticated. A Redis copy that differs is logged and
    ignored. A run that already succeeded or failed is skipped, so a duplicate delivery does
-   nothing.
+   nothing. So is a run another execution started less than ``spec.orphan_after`` ago, even
+   with the lock in hand: a dropped lock connection frees the lock while that execution still
+   runs. The sweeper re-pushes it once it is old enough to be a real orphan.
 4. The handler runs in a household-wide session under ``asyncio.timeout(spec.timeout)``; the
    success mark commits in that same session, atomically with whatever the handler left
    uncommitted. arq's own timeout sits ``ARQ_TIMEOUT_MARGIN`` above, as a backstop only.
@@ -44,10 +46,11 @@ from arq import Retry
 from arq.worker import Function, func
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db_context import scoped_session, unscoped_session
+from app.db_context import list_household_ids, scoped_session, unscoped_session
 from app.jobs.lock import household_lock
 from app.jobs.queue import JobQueue
 from app.jobs.registry import (
+    ARQ_TIMEOUT_MARGIN,
     HouseholdSessions,
     InvalidJobPayload,
     JobContext,
@@ -58,15 +61,11 @@ from app.jobs.registry import (
 )
 from app.logging import get_logger
 from app.services import jobs as job_runs
-from app.services import users
 
 log = get_logger(__name__)
 
 Outcome = Literal["succeeded", "failed", "skipped", "rejected"]
 CTX_KEY = "holdfast_jobs"
-# arq's per-function timeout = spec.timeout + this. It covers the bookkeeping around the handler
-# (pool checkout waits up to 30 s, lock, claim, marks); the runner's own timeout fires first.
-ARQ_TIMEOUT_MARGIN = timedelta(seconds=60)
 CANCELLED = "CancelledError"
 # Sweeper (rule 8). A queued/retrying run this far past due, or a running run this far past its
 # arq backstop, is presumed lost. Too early only costs a push arq drops (it still has the job).
@@ -163,7 +162,7 @@ async def execute(
             log.info("job.deferred", reason="household_busy", **fields)
             raise Retry(defer=spec.retry.lock_retry_delay)
 
-        claimed = await job_runs.claim(deps.factory, household_id, run_id, spec.name)
+        claimed = await job_runs.claim(deps.factory, household_id, run_id, spec)
         if claimed is None:
             log.info("job.skipped", reason="not_claimable", **fields)
             return "skipped"
@@ -240,7 +239,7 @@ def arq_function(spec: JobSpec[Any]) -> Function:
         run,
         name=spec.name,
         max_tries=spec.retry.queue_max_tries,
-        timeout=(spec.timeout + ARQ_TIMEOUT_MARGIN).total_seconds(),
+        timeout=spec.arq_timeout.total_seconds(),
         keep_result=0,
     )
 
@@ -297,7 +296,7 @@ async def sweep_household(
             continue
         spec = specs.get(row.job_name)
         if row.status == "running" and row.started_at is not None:
-            backstop = spec.timeout + ARQ_TIMEOUT_MARGIN + SWEEP_RUNNING_MARGIN
+            backstop = spec.orphan_after + SWEEP_RUNNING_MARGIN
             if row.now - row.started_at < backstop:
                 continue  # may still be live work
         try:
@@ -326,12 +325,14 @@ async def sweep_household(
 
 
 async def sweep_all(deps: RunnerDeps, queue: JobQueue, specs: JobRegistry) -> int:
-    """:func:`sweep_household` for every household with a login. Returns how many it pushed.
+    """:func:`sweep_household` for every household. Returns how many it pushed.
 
-    One household's failure (logged by class name) doesn't stop the others.
+    Households come from ``list_household_ids()`` (migration 0010: SECURITY DEFINER, ids only),
+    so a household with no login is swept too. One household's failure (logged by class name)
+    doesn't stop the others.
     """
     async with unscoped_session(deps.factory) as s:
-        households = await users.household_ids(s)
+        households = await list_household_ids(s)
     pushed = 0
     for household_id in households:
         try:

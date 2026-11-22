@@ -204,7 +204,7 @@ async def test_totp_reenrolled_during_verification_fails_the_login(
         ok = await real_verify(password_hash, password)
         # Codes re-enrolled (new secret, still enabled) while argon2 ran.
         async with unscoped_session(app.state.session_factory) as s:
-            new_secret = crypto.seal(SecretToken(totp.new_secret()))
+            new_secret = crypto.seal_unbound(SecretToken(totp.new_secret()))
             await s.execute(
                 update(AppUser).where(AppUser.id == user_id).values(totp_secret_enc=new_secret)
             )

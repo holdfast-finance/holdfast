@@ -16,6 +16,7 @@ from arq.connections import RedisSettings
 from app import __version__
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
+from app.integrations.registry import registry as connector_registry
 from app.jobs import queue
 from app.jobs.registry import discover_jobs
 from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function, sweep_stalled_runs
@@ -52,6 +53,7 @@ async def heartbeat(ctx: dict[str, Any]) -> None:
 
 async def startup(ctx: dict[str, Any]) -> None:
     configure_logging()
+    connector_registry.freeze()  # no registration after startup
     if (key := get_settings().fernet_key) is not None:
         crypto.load_ring(key)  # malformed or duplicate keys fail startup
     engine = create_engine(get_settings())
