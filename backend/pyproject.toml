@@ -187,7 +187,35 @@ forbidden_modules = ["app.models", "app.db", "app.db_context"]
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-name = "Request code never imports the job runner (worker-only, household-wide paths; ADR 0016)"
+name = "Only app.jobs and app.worker import the job runner (household-wide paths; ADR 0016)"
 type = "forbidden"
-source_modules = ["app.api", "app.services"]
+# Every top-level module but app.jobs and app.worker. tests/jobs/test_job_boundaries.py also
+# fails if enqueue_household_wide is named anywhere else, so a new package can't slip past.
+source_modules = [
+    "app.agent",
+    "app.api",
+    "app.config",
+    "app.db",
+    "app.db_context",
+    "app.domain",
+    "app.importers",
+    "app.integrations",
+    "app.logging",
+    "app.main",
+    "app.models",
+    "app.notify",
+    "app.openapi_export",
+    "app.schemas",
+    "app.security",
+    "app.services",
+    "app.tax",
+]
 forbidden_modules = ["app.jobs.runner"]
+
+[[tool.importlinter.contracts]]
+name = "Job handlers use JobContext sessions, never their own (ADR 0016)"
+type = "forbidden"
+source_modules = ["app.jobs.handlers"]
+forbidden_modules = ["app.db", "app.db_context"]
+# Direct imports only: handlers call services, which own sessions through db_context.
+allow_indirect_imports = true
