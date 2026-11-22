@@ -74,6 +74,8 @@ class ImportBlockOut(ReconcileNumbers):
     rows_parsed: int
     rows_inserted: int
     rows_duplicate: int
+    # Inserted rows that may already be in the account from another file (``possible_overlap``).
+    rows_overlap: int = 0
     # False: this file was already imported and nothing was written for this block.
     created: bool
     # Why a block that isn't reconciled needs a look (a fixed code such as ``balance_mismatch`` or

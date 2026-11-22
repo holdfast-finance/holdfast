@@ -159,7 +159,7 @@ export function uploadStatement(
     const form = new FormData()
     if (target && !/\.pdf$/i.test(file.name)) {
       form.append('account', target.account)
-      if (target.account === NEW_ACCOUNT) form.append('account_kind', target.accountKind)
+      form.append('account_kind', target.accountKind) // must agree with an existing account
     }
     form.append('file', file, file.name)
     xhr.send(form)

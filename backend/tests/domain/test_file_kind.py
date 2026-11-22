@@ -14,6 +14,12 @@ OFX_XML = b'<?xml version="1.0" encoding="UTF-8"?>\n<?OFX OFXHEADER="200"?>\n<OF
         (b"\n  " + OFX_SGML, "ofx"),
         (OFX_XML, "ofx"),
         (b"<OFX>\n<BANKMSGSRSV1>", "ofx"),
+        # A namespaced root with no <?OFX?> instruction, and a header that starts with DATA:.
+        (b'<OFX xmlns="http://ofx.net/types/2003/04">\n<BANKMSGSRSV1>', "ofx"),
+        (b'<?xml version="1.0"?>\n<OFX xmlns="http://ofx.net/types/2003/04">', "ofx"),
+        (b"DATA:OFXSGML\nVERSION:102\n\n<OFX>", "ofx"),
+        (b"\xef\xbb\xbfOFXHEADER:100\nCHARSET:1252\n\n<OFX>", "ofx"),
+        (b"<OFXFAKE,a,b>\n1,2,3\n", "csv"),
         (b"Date,Payee,Amount\n2026-01-01,Shop,-1.00\n", "csv"),
         (b"\xef\xbb\xbfDate;Payee;Amount\n", "csv"),
         ("Date,Payee\n".encode("utf-16"), "csv"),

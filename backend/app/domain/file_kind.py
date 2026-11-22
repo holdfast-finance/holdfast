@@ -20,11 +20,14 @@ _WIDE_BOMS = (
 # Control bytes that never appear in text (tab, LF, FF and CR are allowed).
 _CONTROL = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f\x7f]")
 _CONTROL_TEXT = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
-# OFX 1.x starts with an OFXHEADER block, OFX 2.x with an <?OFX?> instruction after the XML
-# declaration, and a bare SGML body with <OFX>. Anchored, so a CSV that merely mentions "<OFX>"
-# in a description is still a CSV.
+# What an OFX document starts with (after an optional BOM and whitespace): an OFXHEADER or DATA
+# header line (OFX 1.x SGML), an <?OFX?> instruction after the XML declaration (OFX 2.x), or the
+# root element itself, with or without attributes such as xmlns. Anchored, so a CSV that merely
+# mentions "<OFX>" in a description is still a CSV. The OFX parser uses the same predicate, so the
+# sniffer and the parser can't disagree about what is OFX.
 _OFX_START = re.compile(
-    r"\A(?:<\?xml[^>]{0,200}\?>\s*)?(?:<\?OFX\b|<OFX\s*>|OFXHEADER\s*:)", re.IGNORECASE
+    r"\A(?:<\?xml[^>]{0,200}\?>\s*)?(?:<\?OFX\b|<OFX[\s>]|OFXHEADER\s*:|DATA\s*:)",
+    re.IGNORECASE,
 )
 _DELIMITERS = (",", ";", "\t", "|")
 
@@ -50,6 +53,11 @@ def _decode_head(head: bytes) -> str | None:
     return head.decode("utf-8", errors="replace").removeprefix("﻿")
 
 
+def looks_like_ofx(text: str) -> bool:
+    """True if decoded text opens like an OFX or QFX document."""
+    return _OFX_START.match(text.removeprefix("\ufeff").lstrip()) is not None
+
+
 def detect_file_kind(head: bytes) -> FileKind | None:
     """``pdf``, ``ofx`` (OFX or QFX), ``csv`` (any delimited text), or ``None`` (not importable)."""
     if head.startswith(PDF_MAGIC):
@@ -58,7 +66,7 @@ def detect_file_kind(head: bytes) -> FileKind | None:
     if text is None:
         return None
     text = text.lstrip()
-    if _OFX_START.match(text):
+    if looks_like_ofx(text):
         return "ofx"
     if text and any(d in text for d in _DELIMITERS):
         return "csv"

@@ -241,6 +241,7 @@ export function importFile(
     rows_parsed: 27,
     rows_inserted: already ? 0 : 27,
     rows_duplicate: already ? 27 : 0,
+    rows_overlap: 0,
     created: !already,
   }
   if (!already) {

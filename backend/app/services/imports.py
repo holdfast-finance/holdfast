@@ -112,6 +112,10 @@ TARGET_MESSAGES = {
     "account_kind_mismatch": "That file is the other kind (bank or card) than the chosen account.",
     "target_needs_single_account": "That file has several accounts. Import it as a new account.",
 }
+OTHER_ACCOUNT_NOTICE = (
+    "This exact file is already in Holdfast under a different account, so nothing was added "
+    "to the account you chose."
+)
 UNSUPPORTED = "That file isn't a PDF, CSV or OFX/QFX export."
 UPLOADS_PER_MINUTE = 10
 CHUNK = 64 * 1024
@@ -454,7 +458,7 @@ class ImportService:
                 raise UploadRefused(
                     "bad_account", "validation_error", "That account choice isn't valid."
                 ) from None
-        elif kind == "csv" and fields.account_kind not in ("bank", "card"):
+        if kind == "csv" and fields.account_kind not in ("bank", "card"):
             raise UploadRefused(
                 "account_kind_required",
                 "validation_error",
@@ -470,6 +474,7 @@ class ImportService:
             joint=joint and account_id is None,
             new_token=sha[:16] if kind == "csv" else None,
             kind_from_file=kind == "ofx",
+            declared_kind=fields.account_kind if kind == "csv" else None,
         )
 
     async def _upload(
@@ -662,6 +667,8 @@ class ImportService:
         new_account = any(r.created and r.account_id not in known_accounts for r in result.blocks)
         if kind != "pdf" and known_accounts and new_account:
             notice = SEPARATE_ACCOUNT_NOTICE
+        if result.in_other_account:
+            notice = OTHER_ACCOUNT_NOTICE
         return existing is None, result.document_id, doc, blocks, result.balances_only, notice
 
     async def _blocks(self, results: tuple[BlockResult, ...]) -> list[ImportBlockOut]:
@@ -695,6 +702,7 @@ class ImportService:
                         "rows_parsed": run.rows_parsed,
                         "rows_inserted": r.rows_inserted,
                         "rows_duplicate": r.rows_duplicate,
+                        "rows_overlap": r.rows_overlap,
                         "created": r.created,
                         "reason": (r.reason or stored_review_reason(run))
                         if run.reconcile_status == "needs_review"

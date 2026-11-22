@@ -244,9 +244,9 @@ async def test_an_ofx_card_statement_becomes_a_credit_account_with_owed_negative
     app: FastAPI, owner: Owner
 ) -> None:
     txns = (
-        "<STMTTRN><DTPOSTED>20260105<TRNAMT>-20.00<FITID>c1<NAME>Example Store"
+        "<STMTTRN><DTPOSTED>20260105<TRNAMT>-20.00<TRNTYPE>POS<FITID>c1<NAME>Example Store"
         "<BALAMT>-132.00</STMTTRN>\n"
-        "<STMTTRN><DTPOSTED>20260106<TRNAMT>-5.00<FITID>c2<NAME>Example Cafe"
+        "<STMTTRN><DTPOSTED>20260106<TRNAMT>-5.00<TRNTYPE>POS<FITID>c2<NAME>Example Cafe"
         "<BALAMT>-137.00</STMTTRN>\n"
     )
     r = await up(
@@ -505,7 +505,7 @@ async def test_ofx_bank_and_card_with_the_same_last_four_are_different_accounts(
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
     card_txns = (
-        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<FITID>k1<NAME>Example Books"
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<TRNTYPE>POS<FITID>k1<NAME>Example Books"
         "<BALAMT>-7.00</STMTTRN>\n"
     )
     bank = await up(owner.client, ofx(TXNS_WITH_BALANCES, acct="BANK-AAAA-0000"), "b.ofx", "")
@@ -537,7 +537,7 @@ async def test_an_ofx_into_an_account_of_the_other_kind_is_refused(owner: Owner)
     bank = await up(owner.client, OFX_GOOD, "b.ofx", "")
     target = bank.json()["blocks"][0]["account_id"]
     card_txns = (
-        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<FITID>k1<NAME>Example Books"
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<TRNTYPE>POS<FITID>k1<NAME>Example Books"
         "<BALAMT>-7.00</STMTTRN>\n"
     )
     r = await up(
@@ -647,3 +647,136 @@ async def test_another_household_cannot_see_or_collide_with_a_csv_import(
     assert (await other.get("/api/imports/runs")).json()["items"][0]["document_id"] == mine.json()[
         "document_id"
     ]
+
+
+# --- overlap with another file
+
+
+async def debit_account(app: FastAPI, hid: uuid.UUID) -> str:
+    """The checking account the PDF fixture created."""
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        found = (
+            await s.execute(
+                select(Transaction.account_id).where(
+                    Transaction.description_raw.like("Example Deposit One%")
+                )
+            )
+        ).scalar_one()
+    return str(found)
+
+
+async def pdf_then_account(app: FastAPI, owner: Owner) -> tuple[uuid.UUID, str, int]:
+    hid = uuid.UUID(owner.household["id"])
+    await up(owner.client, pdf_bytes(DEBIT), "debit.pdf", "application/pdf")
+    return hid, await debit_account(app, hid), await count(app, hid, Transaction)
+
+
+async def test_differently_worded_rows_in_an_existing_account_are_flagged_not_dropped(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid, account, before = await pdf_then_account(app, owner)
+    # The bank's CSV words the same two purchases differently, a day apart from the PDF dates.
+    csv = HEADER + (
+        "2019-03-05,ACH CREDIT PAYROLL 0001,800.00,800.00\n"
+        "2019-03-06,POS DEBIT CORNER STORE,-20.00,780.00\n"
+    )
+    r = await up(owner.client, csv.encode(), account=account)
+    assert r.status_code == 200, r.text
+    (block,) = r.json()["blocks"]
+    assert (block["rows_inserted"], block["rows_duplicate"], block["rows_overlap"]) == (2, 0, 2)
+    assert block["reconcile_status"] == "needs_review"
+    assert "possible_overlap" in block["reason"]
+    assert await count(app, hid, Transaction) == before + 2  # nothing is deleted
+    runs = (await owner.client.get("/api/imports/runs")).json()["items"]
+    assert any("possible_overlap" in (x["reason"] or "") for x in runs)
+
+
+async def test_identical_descriptions_still_dedupe_without_a_flag(
+    app: FastAPI, owner: Owner
+) -> None:
+    _, account, _ = await pdf_then_account(app, owner)
+    r = await up(owner.client, OVERLAP.encode(), account=account)
+    (block,) = r.json()["blocks"]
+    assert (block["rows_inserted"], block["rows_duplicate"], block["rows_overlap"]) == (0, 2, 0)
+    assert block["reconcile_status"] == "reconciled"
+
+
+async def test_a_period_far_from_the_existing_rows_is_not_flagged(
+    app: FastAPI, owner: Owner
+) -> None:
+    _, account, _ = await pdf_then_account(app, owner)
+    # Same amounts, four days off the PDF dates: outside the three day window.
+    csv = HEADER + (
+        "2019-03-11,Later Deposit,800.00,800.00\n2019-03-12,Later Purchase,-20.00,780.00\n"
+    )
+    r = await up(owner.client, csv.encode(), account=account)
+    (block,) = r.json()["blocks"]
+    assert (block["rows_inserted"], block["rows_overlap"]) == (2, 0)
+    assert block["reconcile_status"] == "reconciled"
+
+
+async def test_equal_same_day_amounts_pair_one_to_one(app: FastAPI, owner: Owner) -> None:
+    _, account, _ = await pdf_then_account(app, owner)
+    # The account holds one -20.00 near 7 March. Two equal new rows can match it only once.
+    csv = HEADER + "2019-03-07,Cafe One,-20.00,100.00\n2019-03-07,Cafe Two,-20.00,80.00\n"
+    r = await up(owner.client, csv.encode(), account=account)
+    (block,) = r.json()["blocks"]
+    assert (block["rows_inserted"], block["rows_overlap"]) == (2, 1)
+    assert "possible_overlap" in block["reason"]
+
+
+async def test_the_same_file_sent_to_another_account_says_where_it_already_is(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid, account, _ = await pdf_then_account(app, owner)
+    first = await up(owner.client, CSV_A.encode())
+    assert first.json()["notice"] is not None  # its own new account
+    rows = await count(app, hid, Transaction)
+    again = await up(owner.client, CSV_A.encode(), account=account)
+    assert again.status_code == 200, again.text
+    assert again.json()["created"] is False
+    assert "different account" in again.json()["notice"]
+    assert await count(app, hid, Transaction) == rows
+    # Replaying into the account it is already in is not "a different account".
+    same = await up(owner.client, CSV_A.encode(), account=first.json()["blocks"][0]["account_id"])
+    assert same.json()["notice"] is None
+
+
+async def test_a_csv_into_an_existing_account_must_agree_on_bank_or_card(
+    app: FastAPI, owner: Owner
+) -> None:
+    _, account, before = await pdf_then_account(app, owner)
+    wrong = await up(owner.client, CSV_A.encode(), account=account, account_kind="card")
+    assert wrong.status_code == 409
+    assert "other kind" in wrong.json()["error"]["message"]
+    missing = await owner.client.post(
+        "/api/imports/statements",
+        files={"file": ("a.csv", CSV_A.encode(), "text/csv")},
+        data={"account": account},
+    )
+    assert missing.status_code == 422
+    assert await count(app, uuid.UUID(owner.household["id"]), Transaction) == before
+
+
+async def test_a_card_ofx_without_a_usable_type_is_flagged_sign_unverified(
+    owner: Owner,
+) -> None:
+    def card(trn: str, amount: str, acct: str, balances: tuple[str, str], closing: str) -> bytes:
+        rows = (
+            f"<STMTTRN><DTPOSTED>20260105<TRNAMT>{amount}{trn}<FITID>a{acct}<NAME>Example Store"
+            f"<BALAMT>{balances[0]}</STMTTRN>\n"
+            f"<STMTTRN><DTPOSTED>20260106<TRNAMT>{amount}{trn}<FITID>b{acct}<NAME>Example Cafe"
+            f"<BALAMT>{balances[1]}</STMTTRN>\n"
+        )
+        return ofx(rows, closing=closing, acct=acct, card=True)
+
+    cases = {
+        # No TRNTYPE at all, otherwise consistent.
+        "none": card("", "-20.00", "NOTYPE0001", ("-20.00", "-40.00"), "-40.00"),
+        # An inverted but self-consistent file: purchases stored as inflows, balance positive.
+        "other": card("<TRNTYPE>OTHER", "20.00", "INVERTED01", ("20.00", "40.00"), "40.00"),
+    }
+    for name, data in cases.items():
+        (block,) = (await up(owner.client, data, f"{name}.ofx", "")).json()["blocks"]
+        assert block["reconcile_status"] == "needs_review", name
+        assert "sign_unverified" in block["reason"], name

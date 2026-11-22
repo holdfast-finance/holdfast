@@ -45,7 +45,9 @@ export function AccountPicker({
           disabled={disabled}
           aria-describedby={hintId}
           onChange={(e) => {
-            onChange({ ...value, account: e.target.value })
+            const chosen = accounts.find((a) => a.id === e.target.value)
+            // An existing account fixes the kind, and the server checks the two agree.
+            onChange({ account: e.target.value, accountKind: chosen?.type ?? value.accountKind })
           }}
         >
           <option value={NEW_ACCOUNT}>New account</option>

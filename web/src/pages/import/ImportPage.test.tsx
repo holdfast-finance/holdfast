@@ -453,6 +453,34 @@ describe('Import page: uploading', () => {
     expect(body).toMatch(/name="account_kind"\r\n\r\ncard\r\n/)
   })
 
+  it('says how many added rows may already be in the account from another file', async () => {
+    respond(() => {
+      const base = importFile('march.csv', 'ok')
+      const block = base.blocks[0]
+      if (!block) throw new Error('mock has a block')
+      return HttpResponse.json({
+        ...base,
+        blocks: [
+          {
+            ...block,
+            rows_overlap: 2,
+            reconcile_status: 'needs_review',
+            reason: 'possible_overlap',
+          },
+        ],
+      })
+    })
+    open()
+    await upload(new File(['x'], 'march.csv', { type: 'text/csv' }))
+    const res = await result()
+    expect(
+      await within(res).findByText(/2 of the added rows may already be in this account/),
+    ).toBeVisible()
+    expect(
+      within(res).getByText(/^Some rows may already be in this account from another file/),
+    ).toBeVisible()
+  })
+
   it('shows the notice in the result and announces it', async () => {
     respond(() => HttpResponse.json(importFile('march.csv', 'ok')))
     open()

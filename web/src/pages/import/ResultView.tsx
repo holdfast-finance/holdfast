@@ -44,6 +44,11 @@ function Block({
           />
         </>
       )}
+      {block.rows_overlap ? (
+        <p className="text-xs text-warning-text">
+          {`${String(block.rows_overlap)} of the added rows may already be in this account from another file.`}
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         {block.created
           ? `${String(block.rows_inserted)} of ${String(block.rows_parsed)} rows added${
