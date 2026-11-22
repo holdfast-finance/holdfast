@@ -20,6 +20,7 @@ from app.models._common import (
     UUIDPK,
     CreatedAt,
     check_in,
+    child_fk,
 )
 
 # Payloads are IDs only: a flat JSON object of canonical UUID strings, one of which is the row's
@@ -38,6 +39,10 @@ class JobRun(Base):
     ``UNIQUE (household_id, job_name, idempotency_key)`` is the dedupe: enqueueing the same key
     twice finds the existing row and never creates a second side effect. ``household_id`` leads
     that index, so it also serves the FK and RLS lookups (no separate household index).
+
+    ``requested_by`` is the person whose rights enqueue checked the payload against (NULL for a
+    system caller or a worker scheduler). The runner hands it to the handler as
+    ``JobContext.requested_by``; it comes from the authenticated caller, never the payload.
 
     ``last_error`` holds the exception **class name** only. Exception messages can carry tokens
     or account numbers (hard rule 3), so they never reach this table.
@@ -62,6 +67,8 @@ class JobRun(Base):
         CheckConstraint(
             "last_error IS NULL OR length(last_error) <= 200", name="last_error_length"
         ),
+        # The requester is a person of the run's household; deleting them keeps the run.
+        child_fk("requested_by", "person", ondelete="SET NULL"),
     )
 
     id: Mapped[UUIDPK]
@@ -70,6 +77,7 @@ class JobRun(Base):
     job_name: Mapped[str]
     idempotency_key: Mapped[str]
     payload: Mapped[dict[str, Any]]
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(index=True)
     status: Mapped[str] = mapped_column(server_default=text("'queued'"))
     attempts: Mapped[int] = mapped_column(server_default=text("0"))
     max_attempts: Mapped[int]

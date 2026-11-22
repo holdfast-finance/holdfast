@@ -195,7 +195,8 @@ class SyncRun(Base):
         check_error_class(),
         child_fk("bank_connection_id", "bank_connection"),
         CheckConstraint(
-            "rows_added >= 0 AND rows_modified >= 0 AND rows_removed >= 0 AND pages >= 0",
+            "rows_added >= 0 AND rows_modified >= 0 AND rows_removed >= 0 AND pages >= 0"
+            " AND rows_superseded >= 0 AND rows_skipped_covered >= 0 AND rows_held >= 0",
             name="counts_non_negative",
         ),
         CheckConstraint(
@@ -217,6 +218,13 @@ class SyncRun(Base):
     rows_added: Mapped[int] = mapped_column(server_default=text("0"))
     rows_modified: Mapped[int] = mapped_column(server_default=text("0"))
     rows_removed: Mapped[int] = mapped_column(server_default=text("0"))
+    # ADR 0035: import rows this sync superseded, posted rows skipped inside coverage, and
+    # matched pairs held for the owner instead of superseded.
+    rows_superseded: Mapped[int] = mapped_column(server_default=text("0"))
+    rows_skipped_covered: Mapped[int] = mapped_column(server_default=text("0"))
+    rows_held: Mapped[int] = mapped_column(server_default=text("0"))
+    # The connector reported its full history as loaded (Plaid HISTORICAL_UPDATE_COMPLETE).
+    history_complete: Mapped[bool] = mapped_column(server_default=text("false"))
     error_class: Mapped[str | None]
     started_at: Mapped[CreatedAt]
     finished_at: Mapped[datetime | None]

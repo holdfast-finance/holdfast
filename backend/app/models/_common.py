@@ -76,7 +76,9 @@ CONVERSATION_KINDS = ("chat", "monthly_review", "year_end")
 MESSAGE_ROLES = ("system", "user", "assistant", "tool")
 FINDING_STATUSES = ("open", "accepted", "dismissed", "done")
 FINDING_SEVERITIES = ("info", "low", "medium", "high")
-BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected")
+# ``pending_setup``: linked, token sealed, nothing ingested until the owner maps its accounts
+# (ADR 0033). Every scheduled job skips it.
+BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected", "pending_setup")
 LIABILITY_KINDS = ("credit", "student", "mortgage", "auto", "personal", "other")
 FILING_STATUSES = ("single", "mfj", "mfs", "hoh", "qss")
 DOCUMENT_PARSE_STATUSES = ("pending", "parsed", "needs_review", "failed")
@@ -87,6 +89,17 @@ IMPORT_RUN_STATUSES = ("queued", "running", "succeeded", "failed")
 # ``import_run_guard`` trigger; ``accepted`` is never written on insert.
 RECONCILE_STATUSES = ("pending", "reconciled", "needs_review", "accepted")
 SYNC_RUN_STATUSES = ("running", "succeeded", "failed")
+# Connectors (Phase 2, ADRs 0033 and 0034).
+# What happens to one connector account: waiting for the owner, landing in an account, or never.
+CONNECTOR_LINK_STATES = ("pending", "mapped", "ignored")
+# The Plaid slot ledger. Only ``abandoned`` stops counting against the client's 10 Items.
+PLAID_SLOT_STATES = ("reserved", "linked", "abandoned", "unknown")
+# 16 lowercase hex characters of SHA-256 of a Plaid client id: tells clients apart, reveals none.
+CLIENT_FP_PATTERN = "^[0-9a-f]{16}$"
+# A short machine code (a connector status such as ``con.auth``, a ledger flag such as
+# ``second_public_token``), never a message: no spaces or quotes, so free text can't be stored.
+CODE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+CODE_MAX = 64
 # Statement reconciliation tolerance in currency units: |closing - (opening + sum)| <= 0.01.
 RECONCILE_TOLERANCE_SQL = "0.01"
 # An exception class name (optionally dotted), never a message: no spaces, quotes or colons, so
@@ -152,6 +165,14 @@ def check_error_class(column: str = "error_class") -> CheckConstraint:
         f"{column} IS NULL OR (length({column}) <= {ERROR_CLASS_MAX}"
         f" AND {column} ~ '{ERROR_CLASS_PATTERN}')",
         name=f"{column}_is_class_name",
+    )
+
+
+def check_code(column: str) -> CheckConstraint:
+    """The column holds a short machine code or NULL (``CODE_PATTERN``), never free text."""
+    return CheckConstraint(
+        f"{column} IS NULL OR (length({column}) <= {CODE_MAX} AND {column} ~ '{CODE_PATTERN}')",
+        name=f"{column}_is_code",
     )
 
 

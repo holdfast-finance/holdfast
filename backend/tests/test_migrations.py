@@ -27,7 +27,10 @@ def _extensions(database_url: str) -> set[str]:
     try:
         with engine.connect() as conn:
             rows = conn.execute(
-                text("SELECT extname FROM pg_extension WHERE extname IN ('pg_trgm','pgcrypto')")
+                text(
+                    "SELECT extname FROM pg_extension"
+                    " WHERE extname IN ('pg_trgm', 'pgcrypto', 'btree_gist')"
+                )
             )
             return {r[0] for r in rows}
     finally:
@@ -36,7 +39,7 @@ def _extensions(database_url: str) -> set[str]:
 
 def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0010_list_household_ids"]
+    assert script.get_heads() == ["0011_connector_link"]
 
 
 @pytest.mark.services
@@ -46,11 +49,11 @@ def test_upgrade_downgrade_upgrade(migrations_database_url: str) -> None:
     cfg = _config(url)
     command.downgrade(cfg, "base")  # start clean even if a previous run left state
     command.upgrade(cfg, "head")
-    assert _extensions(url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto", "btree_gist"}
     command.downgrade(cfg, "base")
     assert _extensions(url) == set()
     command.upgrade(cfg, "head")
-    assert _extensions(url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto", "btree_gist"}
 
 
 @pytest.mark.services
@@ -252,6 +255,146 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
         command.upgrade(cfg, "head")
         assert total() == (n + 3, n)
         assert own() == [("Mine", True), ("Pay", False), ("Save", False)]
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(text("DELETE FROM household WHERE id = app_household_id()"))
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.services
+def test_connector_link_migration_over_data(migrations_database_url: str) -> None:
+    """0011 over data: every imported account's statement key equals its external key (and no
+    other account gets one), the import key moves to the statement key, and down then up keeps
+    both. Downgrade turns a ``pending_setup`` connection into ``disconnected``, and refuses to run
+    while a production slot still counts or an account is adopted (Bulwark M2, Ledger)."""
+    url = migrations_database_url
+    cfg = _config(url)
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "0010_list_household_ids")
+    engine = create_engine(url)
+
+    def ctx(c: Connection, hid: object) -> None:
+        c.execute(
+            text(
+                "SELECT set_config('app.household_id', :h, true),"
+                " set_config('app.household_wide', 'on', true)"
+            ),
+            {"h": str(hid)},
+        )
+
+    def keys(hid: object) -> dict[str, tuple[str, str | None]]:
+        with engine.begin() as c:
+            ctx(c, hid)
+            rows = c.execute(
+                text("SELECT name, source, statement_key, external_account_id FROM account")
+            ).all()
+        assert all(r[2] == (r[3] if r[1] == "import" else None) for r in rows), rows
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def import_index() -> set[str]:
+        with engine.connect() as c:
+            return set(
+                c.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes WHERE tablename = 'account'"
+                        " AND indexname LIKE 'uq_account_household_id_%'"
+                    )
+                ).scalars()
+            )
+
+    try:
+        with engine.begin() as c:
+            hid = c.execute(
+                text("SELECT create_household('Example Migration Household')")
+            ).scalar_one()
+            ctx(c, hid)
+            conn_id = c.execute(
+                text(
+                    "INSERT INTO bank_connection (household_id, provider, external_id,"
+                    " access_token_enc) VALUES (:h, 'plaid', 'item-example', 'x') RETURNING id"
+                ),
+                {"h": hid},
+            ).scalar_one()
+            for name, source, key, conn in (
+                ("Imported A", "import", "example_bank.checking:0000:aaaa", None),
+                ("Imported B", "import", "example_bank.card:0000:bbbb", None),
+                ("Linked", "plaid", "plaid-account-1", conn_id),
+                ("Cash", "manual", None, None),
+            ):
+                c.execute(
+                    text(
+                        "INSERT INTO account (household_id, bank_connection_id, source,"
+                        " external_account_id, name, type) VALUES"
+                        " (:h, :c, :s, :k, :n, 'depository')"
+                    ),
+                    {"h": hid, "c": conn, "s": source, "k": key, "n": name},
+                )
+
+        command.upgrade(cfg, "0011_connector_link")
+        first = keys(hid)
+        assert first["Imported A"] == ("import", "example_bank.checking:0000:aaaa")
+        assert first["Imported B"] == ("import", "example_bank.card:0000:bbbb")
+        assert first["Linked"] == ("plaid", None)
+        assert first["Cash"] == ("manual", None)
+        assert import_index() == {"uq_account_household_id_statement_key"}
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(
+                text("UPDATE bank_connection SET status = 'pending_setup', env = 'production'")
+            )
+            slot = c.execute(
+                text(
+                    "INSERT INTO plaid_link_slot (household_id, client_fp, env, owner_count,"
+                    " created_by_user_id) VALUES (:h, '0123456789abcdef', 'production', 0,"
+                    " gen_random_uuid()) RETURNING id"
+                ),
+                {"h": hid},
+            ).scalar_one()
+            c.execute(
+                text(
+                    "UPDATE account SET source = 'plaid', bank_connection_id = :c,"
+                    " external_account_id = 'plaid-account-2', adopted_at = now()"
+                    " WHERE name = 'Imported A'"
+                ),
+                {"c": conn_id},
+            )
+
+        # A counted slot blocks the downgrade (the slot guard would reset), then an adoption
+        # does (the statement key would be lost). Nothing changes on a refusal.
+        with pytest.raises(RuntimeError, match="slot ledger counts 1"):
+            command.downgrade(cfg, "0010_list_household_ids")
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(
+                text(
+                    "UPDATE plaid_link_slot SET state = 'abandoned', link_token_enc = NULL,"
+                    " resolved_at = now() WHERE id = :i"
+                ),
+                {"i": slot},
+            )
+        with pytest.raises(RuntimeError, match="1 account"):
+            command.downgrade(cfg, "0010_list_household_ids")
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(
+                text(
+                    "UPDATE account SET source = 'import', bank_connection_id = NULL,"
+                    " adopted_at = NULL, external_account_id = statement_key"
+                    " WHERE name = 'Imported A'"
+                )
+            )
+        assert keys(hid) == first
+
+        command.downgrade(cfg, "0010_list_household_ids")
+        assert import_index() == {"uq_account_household_id_external_account_id_import"}
+        with engine.begin() as c:
+            ctx(c, hid)
+            status = c.execute(text("SELECT status FROM bank_connection")).scalar_one()
+        assert status == "disconnected"
+
+        command.upgrade(cfg, "head")
+        assert keys(hid) == first
         with engine.begin() as c:
             ctx(c, hid)
             c.execute(text("DELETE FROM household WHERE id = app_household_id()"))

@@ -2,14 +2,21 @@
 
 Importing this package registers every table on ``app.db.Base.metadata`` (Alembic relies on it).
 RLS policies, grants, triggers and SQL functions are not expressed here: they live in the
-migrations (``0002_core_schema``, ``0005_import_sync_runs``) and are documented in ADRs 0008 and
-0017.
+migrations (``0002_core_schema``, ``0005_import_sync_runs``, ``0011_connector_link``) and are
+documented in ADRs 0008, 0017, 0033 and 0034.
 """
 
-from app.models.accounts import Account, BalanceSnapshot, BankConnection, Institution
+from app.models.accounts import (
+    Account,
+    AccountCoverage,
+    BalanceSnapshot,
+    BankConnection,
+    Institution,
+)
 from app.models.agent import AgentConversation, AgentFinding, AgentMessage
 from app.models.audit import AuditLog
 from app.models.budgets import Budget, BudgetLine
+from app.models.connectors import ConnectorAccountLink, PlaidLinkSlot
 from app.models.credit import CreditInquiry, CreditReport, CreditScoreEntry, Tradeline
 from app.models.documents import Document, ParsedField
 from app.models.household import Household, HouseholdSetting, Person
@@ -22,6 +29,7 @@ from app.models.transactions import Category, Rule, Transaction, TransactionSpli
 
 __all__ = [
     "Account",
+    "AccountCoverage",
     "AgentConversation",
     "AgentFinding",
     "AgentMessage",
@@ -33,6 +41,7 @@ __all__ = [
     "Budget",
     "BudgetLine",
     "Category",
+    "ConnectorAccountLink",
     "CreditInquiry",
     "CreditReport",
     "CreditScoreEntry",
@@ -48,6 +57,7 @@ __all__ = [
     "Liability",
     "ParsedField",
     "Person",
+    "PlaidLinkSlot",
     "Rule",
     "Security",
     "SyncRun",

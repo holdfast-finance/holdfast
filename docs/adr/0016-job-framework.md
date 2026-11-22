@@ -173,8 +173,14 @@ household context.
   start while the first is running (the same run can't start twice; the orphan age guard covers
   that), and a handler that ignores cancellation past `orphan_after` could still overlap its own
   re-claim. A Redis writer can still deny service (flood deliveries, delete jobs), though never
-  run a forged payload. `job_run` doesn't record `requested_by` (P4a, needs a migration), so a
-  run's requester isn't auditable and the sweeper re-pushes without knowing who asked.
+  run a forged payload.
+- **Built in P4a (0011):** `job_run.requested_by` (FK to the run household's `person`, `SET NULL`)
+  is written by enqueue, read back by `claim` and handed to the handler as
+  `JobContext.requested_by`. Redis and the payload never supply it. The handler's session stays
+  household-wide. A handler that needs the requester's rights opens a person-scoped session
+  itself, and one that chains a job passes `requested_by=ctx.requested_by` on. Reusing a key under
+  another requester raises `IdempotencyConflict`, with the same fixed message as a different
+  payload. The sweeper re-pushes by run id, and `claim` reads the requester from the row.
 - Follow-ups: retention pruning of old `job_run` rows, wiring `arq_pool(app.state.redis)` into the
   API once the first API-triggered job lands (P7), and Bulwark's Redis-auth item. The import-linter
   domain contract also forbids `app.jobs`.

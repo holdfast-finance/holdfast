@@ -1,4 +1,4 @@
-"""Pure transfer matcher (PLAN 8.3). No I/O, no models: the service loads rows and writes pairs.
+"""Pure transfer matcher (PLAN 8.3 and ADR 0027).
 
 A transfer is two legs: an outflow on one account and an inflow of the same absolute amount on
 another account of the same currency, posted 0 to ``MAX_DAYS`` days apart. A credit-card payment
@@ -7,26 +7,23 @@ opposite leg on another account, so they never pair and stay counted as spending
 never summed or compared across currencies.
 
 **Eligibility.** Rows already in a transfer (paired or single-marked) or superseded take no part,
-neither as a leg nor as a competitor. Two legs on one account never pair. Pending rows are
-competitors only (they can make a leg ambiguous) and never become legs.
+neither as a leg nor as a competitor. A leg rejection removes the row from the pool. A pair
+rejection removes just that edge before ranking. Two legs on one account never pair. Pending rows
+are competitors only (they can make a leg ambiguous) and never become review edges.
 
 **Hints.** Each leg earns a hint for transfer wording in its own description, for payment wording
 in its own description when either account is a card or loan, and for naming the other account's
-mask (exactly four digits, matched on digit boundaries). An inflow on a card or loan with no
-payment wording earns nothing: it is a refund candidate, not a payment.
+mask (exactly four digits, matched on digit boundaries).
 
 **Ranking.** An edge (a possible pair) has the key ``(-hints, days apart)``; smaller is better, so
 hints decide before days and a real, hinted partner a few days away beats an unrelated same-day
 row. Ties are never broken by id, amount order or input order.
 
-**Auto-apply vs suggest.** A confirmed edge goes to ``pairs`` only when both legs carry a hint of
-their own, or a mask hint names the other account; a card or loan inflow must also say "payment"
-itself (the checking side saying "payment" does not make a card refund a payment). Otherwise it
-goes to ``suggested`` (``no_hint``, ``one_sided_hint``, ``refund_candidate``): a refund and a
-purchase, or rent and a paycheck, look alike. It
-also goes to ``suggested``, never ``pairs``, when a leg is ``protected`` (the person categorized it
-or split it, so treated it as real spending) or when the two accounts have different owners (no
-single person could undo the pair).
+**Auto-apply vs suggest.** A confirmed edge with evidence on each leg goes to ``pairs`` for
+accounts with the same owner, including two joint accounts, and to ``links`` for different
+owners. A hint naming the other account's mask can also qualify a same-owner pair on its own.
+A card or loan inflow must say "payment" itself to qualify for either. Edges that lack the
+required evidence or contain a ``protected`` leg go to ``suggested`` with a reason.
 
 **Closer alternative.** If either leg of a confirmed edge has another live edge with strictly
 fewer days, the edge is not resolved (neither paired nor suggested): hints outrank days, but never
@@ -35,7 +32,7 @@ so no equal-amount row that lost a contest is absent from every list.
 
 **Resolution (deterministic, input-order independent).** Repeat: each unresolved leg looks at its
 best edges (those sharing its smallest key). An edge whose two legs each have it as their one and
-only best edge, and that touches no pending row, is resolved (pair or suggestion); all of a
+only best edge, and that touches no pending row, is resolved (pair, link or suggestion); all of a
 round's resolutions are taken together, those legs leave the pool, and the next round re-ranks
 what is left. Legs that remain with at least one candidate are returned as ``AmbiguousLeg``
 (candidates sorted best key first, then id): a person decides. Legs with no candidate at all are
@@ -63,8 +60,9 @@ MASK_DIGITS = 4
 REASON_NO_HINT = "no_hint"
 REASON_REFUND = "refund_candidate"
 REASON_PROTECTED = "user_treated_as_spending"
-REASON_OWNERS = "different_owners"
 REASON_ONE_SIDED = "one_sided_hint"
+REASON_AMBIGUOUS = "ambiguous"
+REASON_LIKELY = "likely"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +112,21 @@ class AmbiguousLeg:
 @dataclass(frozen=True, slots=True)
 class MatchResult:
     pairs: tuple[ProposedPair, ...]
+    links: tuple[ProposedPair, ...]
     suggested: tuple[SuggestedPair, ...]
     ambiguous: tuple[AmbiguousLeg, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewEdge:
+    outflow_id: uuid.UUID
+    inflow_id: uuid.UUID
+    reason: str
+    days_apart: int
+    hints: int
+
+
+_EdgeIds = tuple[uuid.UUID, uuid.UUID]
 _Key = tuple[int, int]
 
 
@@ -166,28 +175,36 @@ def _suggest_reason(out: TransferCandidate, inn: TransferCandidate) -> str | Non
     """Why this confirmed edge must not be auto-applied, or ``None`` if it may be."""
     if out.protected or inn.protected:
         return REASON_PROTECTED
-    if (
-        out.owner_person_id is not None
-        and inn.owner_person_id is not None
-        and out.owner_person_id != inn.owner_person_id
-    ):
-        return REASON_OWNERS
     (n_out, mask_out), (n_in, mask_in) = _leg_hints(out, inn), _leg_hints(inn, out)
     if inn.account_type in CARD_TYPES and not _inflow_says_payment(inn):
         return REASON_REFUND  # a card inflow must say "payment" itself, else it is a refund
     if n_out + n_in == 0:
         return REASON_NO_HINT
-    if not ((n_out > 0 and n_in > 0) or mask_out or mask_in):
-        return REASON_ONE_SIDED
-    return None
+    if n_out > 0 and n_in > 0:
+        return None
+    if out.owner_person_id == inn.owner_person_id and (mask_out or mask_in):
+        return None
+    return REASON_ONE_SIDED
 
 
-def match_transfers(candidates: Iterable[TransferCandidate]) -> MatchResult:
-    """Propose transfer pairs, suggestions and ambiguous legs."""
+def _pair_sort_key(edge: ProposedPair | SuggestedPair | ReviewEdge) -> tuple[str, str]:
+    return str(edge.outflow_id), str(edge.inflow_id)
+
+
+def match_transfers(
+    candidates: Iterable[TransferCandidate],
+    *,
+    rejected_pairs: frozenset[_EdgeIds] = frozenset(),
+    rejected_legs: frozenset[uuid.UUID] = frozenset(),
+) -> MatchResult:
+    """Propose pairs, links, suggestions and ambiguous legs from eligible edges."""
     pool = {
         c.transaction_id: c
         for c in candidates
-        if not c.in_transfer and not c.superseded and c.amount != ZERO
+        if not c.in_transfer
+        and not c.superseded
+        and c.amount != ZERO
+        and c.transaction_id not in rejected_legs
     }
     outs = {i: c for i, c in pool.items() if c.amount < ZERO}
     ins = {i: c for i, c in pool.items() if c.amount > ZERO}
@@ -199,12 +216,13 @@ def match_transfers(candidates: Iterable[TransferCandidate]) -> MatchResult:
     edges: dict[uuid.UUID, dict[uuid.UUID, _Key]] = defaultdict(dict)
     for oid, o in outs.items():
         for iid in by_value.get((o.currency, -o.amount), ()):
-            if _can_pair(o, ins[iid]):
+            if (oid, iid) not in rejected_pairs and _can_pair(o, ins[iid]):
                 key = _edge_key(o, ins[iid])
                 edges[oid][iid] = key
                 edges[iid][oid] = key
 
     pairs: list[ProposedPair] = []
+    links: list[ProposedPair] = []
     suggested: list[SuggestedPair] = []
     live = set(edges)
     while True:
@@ -237,11 +255,14 @@ def match_transfers(candidates: Iterable[TransferCandidate]) -> MatchResult:
             )
             if closer:
                 continue  # a nearer equal-amount row exists: leave all of them to a person
-            reason = _suggest_reason(pool[oid], pool[iid])
-            if reason is None:
+            out, inn = pool[oid], pool[iid]
+            reason = _suggest_reason(out, inn)
+            if reason is not None:
+                suggested.append(SuggestedPair(oid, iid, reason))
+            elif out.owner_person_id == inn.owner_person_id:
                 pairs.append(ProposedPair(oid, iid))
             else:
-                suggested.append(SuggestedPair(oid, iid, reason))
+                links.append(ProposedPair(oid, iid))
             live -= {oid, iid}
             resolved += 1
         if not resolved:
@@ -255,7 +276,60 @@ def match_transfers(candidates: Iterable[TransferCandidate]) -> MatchResult:
         if options:
             ordered = sorted(options, key=lambda p: (options[p], str(p)))
             ambiguous.append(AmbiguousLeg(leg, tuple(ordered)))
-    pairs.sort(key=lambda p: (str(p.outflow_id), str(p.inflow_id)))
-    suggested.sort(key=lambda p: (str(p.outflow_id), str(p.inflow_id)))
+    pairs.sort(key=_pair_sort_key)
+    links.sort(key=_pair_sort_key)
+    suggested.sort(key=_pair_sort_key)
     ambiguous.sort(key=lambda a: str(a.transaction_id))
-    return MatchResult(tuple(pairs), tuple(suggested), tuple(ambiguous))
+    return MatchResult(tuple(pairs), tuple(links), tuple(suggested), tuple(ambiguous))
+
+
+def review_edges(
+    candidates: Iterable[TransferCandidate], result: MatchResult
+) -> tuple[ReviewEdge, ...]:
+    """Convert a person's match result into review edges using the same candidate snapshot."""
+    by_id = {c.transaction_id: c for c in candidates}
+    reasons: dict[_EdgeIds, str] = {}
+    for leg in result.ambiguous:
+        row = by_id[leg.transaction_id]
+        for candidate_id in leg.candidate_ids:
+            other = by_id[candidate_id]
+            if other.is_pending:
+                continue
+            out, inn = (row, other) if row.amount < ZERO else (other, row)
+            reasons[out.transaction_id, inn.transaction_id] = REASON_AMBIGUOUS
+    for suggestion in result.suggested:
+        reasons[suggestion.outflow_id, suggestion.inflow_id] = suggestion.reason
+    for match in (*result.pairs, *result.links):
+        reasons[match.outflow_id, match.inflow_id] = REASON_LIKELY
+
+    edges: list[ReviewEdge] = []
+    for (oid, iid), reason in reasons.items():
+        negative_hints, days = _edge_key(by_id[oid], by_id[iid])
+        edges.append(ReviewEdge(oid, iid, reason, days, -negative_hints))
+    return tuple(sorted(edges, key=_pair_sort_key))
+
+
+def group_edges(edges: Iterable[ReviewEdge]) -> tuple[tuple[ReviewEdge, ...], ...]:
+    """Group review edges that share a leg, directly or through other edges."""
+    by_leg: dict[uuid.UUID, list[ReviewEdge]] = defaultdict(list)
+    for edge in edges:
+        for leg in {edge.outflow_id, edge.inflow_id}:
+            by_leg[leg].append(edge)
+
+    groups: list[tuple[ReviewEdge, ...]] = []
+    for start in list(by_leg):
+        if start not in by_leg:
+            continue
+        component: list[ReviewEdge] = []
+        pending = [start]
+        while pending:
+            leg = pending.pop()
+            for edge in by_leg.pop(leg, []):
+                if edge.outflow_id == leg:
+                    component.append(edge)
+                    pending.append(edge.inflow_id)
+                else:
+                    pending.append(edge.outflow_id)
+        component.sort(key=lambda e: (_pair_sort_key(e), e.reason, e.days_apart, e.hints))
+        groups.append(tuple(component))
+    return tuple(sorted(groups, key=lambda group: _pair_sort_key(group[0])))
