@@ -1,12 +1,16 @@
 """Opaque wrapper for credential strings inside application code."""
 
-from typing import NoReturn, SupportsIndex
+from typing import Any, NoReturn, SupportsIndex, final
 
 
+@final
 class SecretToken:
     """Mask incidental rendering and require an explicit credential handoff."""
 
     __slots__ = ("__value",)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("SecretToken cannot be subclassed")
 
     def __init__(self, value: str) -> None:
         if type(value) is not str:
