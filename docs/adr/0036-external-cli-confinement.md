@@ -61,8 +61,8 @@ because a denylist there had already missed entries.
      which today is just `fnm_multishells`, the Node shims the Codex CLI starts through. That
      covers the session bus, the systemd user manager, the accessibility bus, the keyring, the GPG
      and SSH agents, the Wayland, PipeWire and Pulse sockets, the X11 cookie, the Git credential
-     and editor IPC sockets, any per-user container socket, and anything that shows up there
-     later;
+     and editor IPC sockets, and any per-user container socket. The list is computed at launch
+     from what exists then. An entry created after the worker starts isn't hidden from it;
    - the lead's scratch directory, `/tmp/claude-<uid>`.
 
    It also removes `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`,
@@ -86,8 +86,13 @@ because a denylist there had already missed entries.
      before any local run or commit. That means `conftest.py` and every test file, `Makefile`,
      `backend/pyproject.toml`, `uv.lock`, `web/package.json`, `pnpm-lock.yaml` (install and
      lifecycle scripts), `.npmrc`, the vitest and Playwright configs, `.githooks/`, `scripts/`,
-     `backend/migrations/env.py` and every migration, Dockerfiles and compose files. Any import
-     or invocation of a changed module counts too.
+     `backend/migrations/env.py` and every migration, Dockerfiles and compose files. It also
+     means the agent tooling config: `.claude/` (hooks, settings, agents), `.codex/`, `.grok/`
+     and `.agents/`. A hook change runs unsandboxed on Keel's next Edit or Write, with no `make`
+     at all, so that review comes before the diff is even applied to a Keel checkout.
+   - A test run imports every changed module under `backend/app/` and `web/src/`, so any diff
+     there counts as executed code too. The review covers every changed line in those trees
+     before a local run.
    - Keel never runs `make test`, `make test-locked`, `uv sync` or `pnpm install` on a worker
      diff that hasn't had that review. If a diff touches those files and Keel can't review it
      fully in the window, it goes to CI only, as a draft PR. Keel pushes it, the worker doesn't.
@@ -148,16 +153,27 @@ These stay open until the target in point 7 exists:
 - **The whole internet.** The shared network namespace lets a worker send anything in its view
   to any host. The view holds no real data, but it does hold the repo, the worker's own vendor
   session and anything a worker command prints.
-- **Loopback TCP ports.** The worker shares the host's loopback. The dev Redis listens on
-  loopback with no auth, so a worker could read or write the job queue. That damage is bounded:
+- **Loopback TCP ports.** The worker shares the host's loopback. As of 2026-11-22 the dev Redis
+  listens on loopback with no auth. PR #66, still open, adds a password. Until then a worker could
+  read or write the job queue. That damage is bounded:
   the runner treats the Redis payload as untrusted, claims only `job_run` rows that already
   exist, and runs the payload stored in `job_run` (`backend/app/jobs/runner.py`, ADR 0016). So a
   worker could drop, replay or delay jobs, but it couldn't inject one. The dev Postgres is behind
   a password, and that password lives in the hidden main checkout's `.env`, not in the worker's
   worktree.
 - **Abstract Unix sockets.** These live in the network namespace, not the filesystem, so
-  `--hide` can't reach them. The X server is one. Hiding the cookie doesn't help if the server
-  admits the same local user without one, which is a common desktop default.
+  `--hide` can't reach them. The X server is one. Bulwark measured it: without the X cookie, the
+  X server refused a confined client. So today the cookie hide is what closes X. That would no
+  longer hold if the server were set to admit the same local user without a cookie.
+- **Sockets still reachable from the confine, reviewed.** These remain visible and were judged
+  acceptable for now:
+  - `/run/pcscd/pcscd.comm`, which reaches smart cards and a YubiKey;
+  - avahi (mDNS), snapd, Kerberos KCM and gssproxy, cups, systemd's varlink sockets, and
+    `/run/ssh-unix-local/socket`;
+  - libvirt, which is reachable but was tested: polkit refused it.
+
+  Any of them moves to the hide list if a use turns up, and finding a worker using one is the
+  trigger in point 7.
 - **Grok read workers have a shell with permissions bypassed.** Removing its two edit tools
   doesn't stop it writing through the shell. "Read" for Grok is a role, not a capability.
 - **Codex's own sandbox is unverified on loopback and Unix sockets.** We haven't tested what it
@@ -203,7 +219,8 @@ own account works.
   costs Keel a careful read before any local run (point 5).
 - PR #8 is superseded. Its process doc stays useful as the owner steps for the target. Its ADR
   0012 and `external-agent-launch.sh` should not merge as written.
-- Anything that appears in the per-user runtime directory is hidden by default. A new
+- Every entry in the per-user runtime directory at launch is hidden unless it's on the
+  allowlist, so a new desktop service there needs no change. A new
   system-wide socket that a non-root user can write to (under `/run`, `/var/run` or elsewhere)
   still needs its own entry in the wrapper and its test, via a protected-path PR reviewed by
   Bulwark.
