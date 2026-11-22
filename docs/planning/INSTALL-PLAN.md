@@ -1,4 +1,4 @@
-# Install-everywhere plan (revision 2)
+# Install-everywhere plan (revision 3)
 
 Owner: **Harbor** (drafts), **Keel** (schedules). Decision record: `docs/adr/0037-install-on-every-platform.md`
 (Proposed, revision 2; it answers Gadfly's review point by point). Nothing here is built. Sizes: S = 1 run,
@@ -10,7 +10,7 @@ M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each 
 - **The repository is public** (verified 2026-11-22; `v0.0.0-alpha` published 2026-11-21). No gate in this plan waits for
   "going public".
 - **Preemptible, with a pull-forward.** The Q1 finish line is Phase 5 (`ROADMAP.md`). This lane runs when the critical path
-  is blocked, except **IN-S0, IN0, IN1, IN-A1 and IN-B1**, which Keel should pull forward: they decide whether any
+  is blocked, except **IN0, IN1, IN-A1, IN-B1 and the owner-run IN-S0**, which Keel should pull forward: they decide whether any
   installer is safe to ship.
 - **ADR 0021 dependency, resolved by absorbing it.** A stranger on Windows or macOS sees a usable app only with the local
   ingress (PA-D2: `127.0.0.1:47800`, no certificate warning, so passkeys work) and the `holdfast` wrapper (PA-D6). This plan
@@ -40,46 +40,63 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 
 ### E-I0 First usable run, data safety, and the Ubuntu-only assumptions (do first)
 
-- **IN-S0 Owner-hardware spike on the Windows PC** — S — Harbor/sonnet, run by the owner on the personal PC — Bulwark — none —
-  with Docker Desktop installed, the *current* release compose (a throw-away bundle from IN1's draft, or the dev stack) is run
-  once: `docker compose up -d --wait` reaches `/api/health`; uid 10001 can write the documents volume; read-only root works;
-  file sharing does not break the Postgres init script; RAM and disk cost is **measured and recorded** (feeds the preflight);
-  and **a second LAN host cannot reach the published port** (ADR 0021's loopback probe on Docker Desktop for Windows). Also
-  records which Docker Desktop reset/purge actions delete the volumes (B4). Output: a pass/fail table in `docs/ops/`, counts
-  and numbers only. **Never on employer equipment** (PLAN Section 0). Fails if any of those checks is red.
+- **IN-S0 Owner-hardware spike on the Windows PC** — S — Harbor/sonnet, run by the owner on the personal PC — Bulwark — a **draft release
+  compose built in CI and pulled by digest** (a small slice of IN1's work, `IN1-draft`) — shipped as **one `pwsh` script that prints the result
+  table**, and listed in the `docs/STATUS.md` owner queue because the owner runs it by hand. It checks, with Docker Desktop: `docker compose up
+  -d --wait` reaches `/api/health` from the draft bundle; uid 10001 can write the documents volume; read-only root works; file sharing does not
+  break the Postgres init script; RAM and disk cost is **measured** (feeds the preflight); the **CPU architecture is recorded** (on Windows-on-ARM,
+  IN4 comes before this spike); and **a second LAN host cannot reach the published port** (ADR 0021's loopback probe on Docker Desktop for
+  Windows). It does **not** run the Docker Desktop reset or purge drill (that deletes every volume on the machine, including unrelated data):
+  which actions delete volumes is taken from Docker's docs, and the drill runs only on a machine confirmed to hold no other Docker data (IN-W3).
+  The script needs only `pwsh` and Docker on the host, no `python3`, `make` or `git`. Output: a pass/fail table in `docs/ops/`, numbers and counts
+  only. **Never on employer equipment** (PLAN Section 0). **It gates IN10 onward only.** IN0, IN1, IN-A1 and IN-B1 do not wait on owner time.
 - **IN0 Portability audit as a test** — S — Harbor/sonnet — Bulwark — none — `scripts/check-portability.py` fails CI on: a
   `bash` shebang in a script the installer ships, `sha256sum` or `sed -i` without a BSD fallback in shipped scripts, a host-path
   bind mount in the release compose, a `build:` key in the release compose, a port other than the allowed loopback one. Each
   violation is seeded once in a test and must fail.
 - **IN1 Release bundle and release compose** — M — Harbor/sonnet, contract by Lattice — Bulwark, Lattice — IN0 — `make bundle`
-  makes `holdfast-<ver>-bundle.tar.gz` and `.zip` with `compose.yaml` pinned `@sha256`, no `build:`, no dev override, project
-  name pinned to `holdfast`. CI runs `docker compose config`, `scripts/check-compose-ports.py`, and `up -d --wait` to a healthy
-  `/api/health` with `docker-compose.dev.yml` and `./backend` deleted first. A second run from a *different directory* finds the
-  **same named volumes** (a test fails if a second set appears).
-- **IN-A1 Local ingress (ADR 0021 PA-D2, pulled in)** — S — Harbor + Tide/sonnet — Bulwark — IN1; gates U-6 and U-7 — Caddy's local
-  site on `127.0.0.1:47800` (plain HTTP, `Host: localhost:47800` only), setup on the local ingress only, token exchange with
-  `replaceState`, the local rate-limit family, as ADR 0021 specifies. Acceptance: ADR 0021's PA-D2 tests, plus Chrome on the
-  Windows PC creates a passkey at `http://localhost:47800` with no warning. **U-7 (Safari and `Secure` cookies on
-  `http://localhost`) needs a Mac and stays open until Q3b is answered;** Bulwark's fallback options in ADR 0021 apply meanwhile.
+  makes `holdfast-<ver>-bundle.tar.gz` and `.zip` with `compose.yaml` pinned `@sha256`, no `build:`, no dev override, **project name
+  `holdfast-app`** (never `holdfast`: the dev stack and any clone use that name) and every volume labelled
+  `com.holdfastfinance.install=<install-id>`. CI runs `docker compose config`, `scripts/check-compose-ports.py`, and `up -d --wait` to a healthy
+  `/api/health` with `docker-compose.dev.yml` and `./backend` deleted first. A second run from a *different directory* finds the **same labelled
+  volumes** (a test fails if a second set appears). **Coexistence test (R2-B1): a dev stack (project `holdfast`) and a release install run side by
+  side, and `holdfast keys`, `restore` and `--purge` never select, read or delete an unlabelled `holdfast_*` volume.**
+- **IN-A1 Local ingress (ADR 0021 PA-D2, pulled in, plus the setup-token rate limit from PA1)** — S — Harbor + Tide/sonnet — Bulwark — IN1 —
+  Caddy's local site on `127.0.0.1:47800` (plain HTTP, `Host: localhost:47800` only), setup on the local ingress only, token exchange with
+  `replaceState`, the local rate-limit family, **and the setup-token rate-limit scope that ADR 0021 puts in PA1 (a scope keyed on the setup
+  token, Tide with Bulwark)**, since "setup on the local ingress only" depends on it. **ADR 0021 status it needs:** none beyond this PR's
+  amendment. ADR 0021 stays Proposed. Its §12 now says U-6 and U-7 gate the per-browser support *claim*, not PA-D2's merge, so IN-A1 merges on
+  Bulwark's verdict and Keel's merge. Acceptance: ADR 0021's PA-D2 tests, plus Chrome (and Firefox, U-6, and Edge) on the Windows PC and Linux
+  creates a passkey at `http://localhost:47800` with no warning. **The Safari half of U-7 needs a Mac (Q3b) and gates only the macOS channel's
+  browser-support claim**; until it closes, the macOS docs say "use Chrome or Firefox", one of Bulwark's two ADR 0021 fallbacks.
 - **IN-B1 State directory, local backup and restore** — M — Harbor + Tide/sonnet; contract by Lattice — Bulwark — IN1 —
-  (a) state directory per OS separate from code (ADR 0037 §2) holding `.env`, `install.json`, `backups/`; (b) `holdfast backup`
-  and `holdfast restore` write and read a dump plus documents on the **host filesystem**; (c) scheduled backup on by default on
-  Windows (Task Scheduler) and macOS (launchd), offered on Linux; **every archive is encrypted with a passphrase the user sets at first run and
-  never stored with the backup, and the key ring is included (N2)**; unattended runs use envelope encryption (public half in state, private half
-  wrapped by the passphrase), a design Lattice and Bulwark settle and the chosen primitive gets the maintenance and AGPL-compatibility check; (d) a backup runs before the first import. Acceptance: a backup restored with the wrong passphrase fails and with the right one reproduces the data; grepping the archive and the state
-  directory finds no passphrase and no plaintext `FERNET_KEY` in the archive (test); the
-  backup directory is a host path, never a volume (test); restore into a scratch container reproduces row counts and the
-  documents' hashes; scheduled task exists after install and is gone after `--purge`. This overlaps Phase 9 (offsite restic),
-  which layers on top; Lattice writes the contract so Phase 9 does not redo it.
+  (a) state directory per OS, separate from code, with the permissions of ADR 0037 §2 (Linux `0700`/`0600`; macOS created by the user's own
+  `holdfast open`, never in `.pkg` postinstall, excluded from Time Machine; Windows ACL on the whole directory) **re-checked at every start**,
+  holding `.env`, `install.json` (install id, versions, backup folder, last-backup status) and the recovery receipt; (b) **backups live outside
+  state** (`~/Documents/Holdfast Backups` or the OS equivalent) and `pg_dump` and documents are **streamed to the host through stdout**, never
+  written by a container into a bind mount; (c) scheduled backup on by default on Windows (Task Scheduler) and macOS (launchd), offered on Linux,
+  each run writing a **status file** (`ok`, `skipped: runtime stopped`, `failed`) that `holdfast open` and an **in-app banner** show as the age of the
+  last good backup (amber 2 days, red 7); (d) a read-only **backup receipt** reaches `api`, and the **first import is refused** without a receipt
+  from the last 24 hours; (e) **the archive holds the whole secret set: every secret key in `.env.example` including `IMPORT_ID_KEY`**, encrypted
+  by envelope encryption; the **passphrase-wrapped private key lives in every archive's header and in state, never only one**; `holdfast backup
+  rekey`; a **periodic passphrase check** in `holdfast open`; the recovery step recommends a generated recovery code; (f) a backup **holds a lock that
+  blocks `rotate-keys`**, captures the ring **after the dump with all kids kept**; restore runs ADR 0015's residual scan and **refuses if a kid is
+  missing**, and swaps `.env` atomically keeping `.env.prev`. The chosen primitive gets the maintenance and AGPL-compatibility check. Acceptance
+  tests (each can fail): wrong passphrase fails, right one reproduces the data; **delete state, restore from an archive and the passphrase alone**;
+  the archive's secret set equals `.env.example`'s secret keys; the archive and state contain no passphrase and no plaintext `FERNET_KEY`; the backup
+  folder is a host path, never a volume; **rotate in the middle of a backup, then restore**; scheduled task exists after install and is gone after
+  `--purge`; a stopped runtime produces `skipped` and an aged banner, not silence. This overlaps Phase 9 (offsite restic), which layers on top;
+  Lattice writes the contract so Phase 9 does not redo it.
 - **IN2 Named documents volume (no host chown)** — S — Harbor + Tide/sonnet — Bulwark — IN1 — the stack stores and reads a synthetic
   document as uid 10001 on a fresh volume with no `chown` helper and no bind mount; a restart keeps it. (Fallback if Bulwark objects:
   bind mount with `:z` and `:U`; spike IN-L-S2.)
-- **IN3 `holdfast keys` with a host shim** — S — Harbor/sonnet — Bulwark — IN1, IN-B1 — the api image's generator writes to
-  **stdout**; the host shim creates `.env`: POSIX `umask 077`, Windows an ACL for the current user only (`icacls`, asserted in
-  Pester). **Refuses to write when state holds `.env` or the `pgdata` volume exists.** All five secrets filled, a canary test greps
-  the job log for the generated values, and the **recovery-kit step** has the user set the backup passphrase and confirm they stored it, and says plainly that a lost passphrase makes backups
-  unrecoverable. `make keys` and
-  `dev.ps1 keys` call the same command (parity test).
+- **IN3 `holdfast keys` with a host shim** — S — Harbor/sonnet — Bulwark — IN1, IN-B1 — the api image's generator writes to **stdout**; the host
+  shim creates state's `.env` with the permissions of ADR 0037 §2 (POSIX `umask 077`, Windows an ACL on the directory via `icacls`, asserted in
+  Pester). **Refuses to write when state holds `.env` or when volumes carrying this install's label exist.** It fills **every secret key in
+  `.env.example`** (a test derives the list from the file, not a hard-coded count; today that includes `IMPORT_ID_KEY`). A canary test greps the job
+  log for the generated values. The **recovery step** has the user set the backup passphrase (or accept a generated recovery code) and confirm they
+  stored it, and says plainly that a lost one makes backups unrecoverable. `make keys` and `dev.ps1 keys` keep writing the repo-root `.env` for
+  contributors; a parity test asserts they and `holdfast keys` **share the generator**, not the destination.
 - **IN4 Multi-arch images** — M — Harbor/sonnet — Bulwark (`release.yml` is protected) — IN1 — the images job builds
   `linux/amd64,linux/arm64`; `docker buildx imagetools inspect` lists both; the arm64 image starts the stack on `ubuntu-24.04-arm`
   (free on the public repo now).
@@ -99,10 +116,16 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 
 ### E-I1 Release integrity (before any channel opens)
 
-- **IN-T1 Tag control and release guard (S2)** — S — Harbor/sonnet — Bulwark — none — a tag ruleset limits `v*` creation to Keel's
-  identity (Keel decision N5); `release.yml` refuses unless the tagged commit is reachable from `main` and its PR head had a green
-  `ci-required`; signing runs in a protected environment with a required reviewer. Test: a tag on an unmerged branch commit fails the
-  `verify` job.
+- **IN-T1 Tag control and release guard (S2, R2-S4)** — S — Harbor/sonnet — Bulwark — none — `release.yml` refuses unless the tagged commit is
+  reachable from `main` and its PR head had a green `ci-required`; signing runs in a protected environment. **Tag control is a process rule today
+  (Keel decision N5: only Keel creates `v*` tags):** every agent acts as the owner's GitHub account, so a tag ruleset has no distinct identity to
+  allow, and a required reviewer is either the owner (a gate on every release) or the same account approving itself. The ruleset and "prevent
+  self-review" become enforceable when the **separate agent identity from ADR 0036** exists; this slice records that dependency and adds the ruleset
+  then. Test: a tag on an unmerged branch commit fails the `verify` job (this works today).
+- **IN-CG Channel gate (R2-S5)** — S — Harbor/sonnet — Bulwark — IN15, IN-T1 — `release.yml` gets a `channel-gate` job and every channel job (stub,
+  `.exe`, `.pkg`, formula bump, `get.` deploy) `needs` it. It fails unless the IN15 upgrade-path test job **passed on the release commit**.
+  Test: a release candidate with a red or missing IN15 result publishes no channel artifact (the job log shows the refusal), and the README is not
+  consulted.
 - **IN-T2 Signed `CHANNEL` and minimum version (S3)** — S — Harbor/sonnet — Bulwark — IN-T1 — `release.yml` signs `SHA256SUMS` and a
   one-line `CHANNEL` with Sigstore; the stub embeds a minimum version. Test: a stale but validly signed old release is refused by
   a fresh install (freeze test); a `latest.json` that names a version `CHANNEL` does not is refused.
@@ -195,10 +218,11 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 ### E-I6 Update, uninstall, phone access, docs
 
 - **IN15 `update`, `restore`, `uninstall` safety** — L split into M + M — Harbor + Tide/sonnet — Bulwark, Ledger (money data) — IN-A2, IN-B1, IN7, IN-T2 —
-  (a) update from N to N+1 on a synthetic household: backup first, **verified by a scratch restore**, refuses to continue if the backup
-  fails (test breaks the backup and sees the refusal); stops `api` and `worker` before migrating; keeps N-1 bundle and digests;
+  (a) update from N to N+1 on a synthetic household: backup first, **prompting for the passphrase and verified by a scratch restore with it**, refuses to
+  continue if the backup or the verification fails (test breaks the backup and sees the refusal; scheduled backups are reported "written, not verified"); stops `api` and `worker` before migrating; keeps N-1 bundle and digests;
   (b) **a migration fails halfway, `holdfast restore` runs on N-1, and the data is byte-identical** (hash of dump before and after);
-  (c) Postgres 16 to 17 goes through dump and restore with a test; (d) downgrade and below-minimum refused; (e) **uninstall keeps state
+  (c) Postgres 16 to 17 goes through dump and restore with a test; (d) downgrade and below-minimum refused; (e) **`--purge` never deletes the backup folder without a second typed `--purge-backups`; a purge with a dev stack on the machine touches nothing unlabelled;
+  delete state and restore from an archive plus the passphrase alone;** **uninstall keeps state
   and volumes; install, create data, uninstall, reinstall, and an old encrypted row still decrypts and the old Postgres password still
   works**; `--purge` needs the typed household name; neither touches Docker or Tailscale.
 - **IN16 Phone access per platform** — S — Harbor/sonnet — Bulwark — IN-A2, IN-W3, IN-M3 — the sidecar overlay starts on Linux and Docker
@@ -253,16 +277,17 @@ runners and should be amended by Keel or Harbor.
 
 ## Slice order (revised)
 
-1. **IN-S0** the owner-hardware spike on the Windows PC. First, cheap, and it tells us whether the stack even runs on Docker Desktop.
-2. **IN0, IN1**, then in parallel **IN-A1** (local ingress), **IN-B1** (state and backup), **IN3**, **IN5**, then **IN2**, **IN4**, **IN6**.
+1. **IN0, IN1** (and `IN1-draft`, the CI-built draft bundle). **IN-S0**, the owner-hardware spike on the Windows PC, runs as soon as the draft bundle
+   exists, in parallel with step 2. It gates **IN10 onward only**, so nothing in steps 1 to 3 waits on owner time.
+2. In parallel **IN-A1** (local ingress), **IN-B1** (state and backup), **IN3**, **IN5**, then **IN2**, **IN4**, **IN6**.
    After this a Windows user can reach a usable app and cannot lose data silently.
-3. **IN-A2** (wrapper) and **IN-O1** (launcher), then **IN-T1 and IN-T2** (tag control, `CHANNEL`).
+3. **IN-A2** (wrapper) and **IN-O1** (launcher), then **IN-T1 and IN-T2** (release guard, `CHANNEL`).
 4. **IN10, IN11, IN-W1, IN-W2** (Windows stub, `.exe`, reboot path plus the rule 10 amendment, SignPath), then **IN-W3** acceptance on the personal PC.
 5. **IN7, IN8, IN9** (Linux script, distros, acceptance). Cheap, so it may run in parallel with step 4 when a window is free. **Podman (IN-L-S1)
    comes after the first usable run, and Raspberry Pi (arm64 acceptance) after Podman** (Q10).
 6. **IN12, IN13, IN14** (macOS script, tap, unsigned `.pkg`), CI-only.
-7. **IN15** (backup-first update, restore, reinstall-decrypts), then **IN-E1/E2** (endpoints), then **IN17** (docs). **No installer channel is published
-   before IN15 passes (N1 default).**
+7. **IN15** (backup-first update, restore, reinstall-decrypts), then **IN-CG** (the CI channel gate), then **IN-E1/E2** (endpoints), then **IN17** (docs).
+   **No installer channel is published unless IN15 passed on the release commit: a CI check, not a README word (N1).**
 8. After that: IN16, IN-W4, IN-L-S1, IN-L-S2, IN-W-S1, IN-M-S1 (spikes and extras), **IN-M3** when a Mac exists, IN-M4 and IN-M5 on request.
 
 ## Owner questions
@@ -280,10 +305,10 @@ hardware is a personal Windows PC and no Mac.
 | Q9 | Docker Desktop is the default on Windows and macOS (the installer's licence line says it is free for personal use); Colima documented for macOS | IN10, IN12, IN17 |
 | Q10 | Podman after the first usable run; Raspberry Pi (arm64) after Podman | IN-L-S1, slice order |
 | Q11 | Keel creates the tap repo in the org when the Homebrew slice is built; winget later | IN13, IN-W4 |
-| N1 | No channel (stub, `.exe`, `.pkg`, tap) before an upgrade path exists | slice order, IN15 |
-| N2 | Key ring in the per-OS state directory; host backups include it, encrypted with a passphrase set at first run and never stored with the backup | IN3, IN-B1 |
+| N1 | No channel (stub, `.exe`, `.pkg`, tap) before an upgrade path exists, enforced by a `channel-gate` CI job tied to the IN15 test on the release commit | IN-CG, IN15 |
+| N2 | Key ring in the per-OS state directory; host backups include the whole secret set (including `IMPORT_ID_KEY`), encrypted with a passphrase set at first run (a printed recovery code recommended) and never stored with the backup; the wrapped key sits in every archive and in state | IN3, IN-B1, IN15 |
 | N4 | GitHub Issues with templates (redaction warning) | IN17 |
-| N5 | Only Keel creates `v*` tags, enforced by a tag ruleset | IN-T1 |
+| N5 | Only Keel creates `v*` tags: a **process rule today**, enforceable by ruleset once ADR 0036's separate agent identity exists (all agents share the owner's GitHub account now) | IN-T1 |
 
 **Still open, owner-only:**
 

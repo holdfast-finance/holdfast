@@ -167,3 +167,130 @@ or offer the shell rc line with consent.
 - **N4.** Support channel: install failures from strangers will land as public issues with logs. That needs issue
   templates and a redaction warning before launch.
 - **N5.** Who may create `v*` tags (S2)?
+
+## Round 2 (b5aec38)
+
+Verdict: **REWORK-small.** Every fix below is a text change, but three of them block. B1, B4's text and B6 are closed.
+B2, B3 and B5 are only partly closed, and the new backup design has holes.
+
+### Status of the round-1 blockers
+
+| Item | Status | Why |
+|---|---|---|
+| B1 | Closed | |
+| B2 | **Open, see R2-B1** | The state directory is right. The pinned project name collides with an existing stack. |
+| B3 | **Open, see R2-B3** | The backup is mandatory now, but the verification step cannot run as written, and `--purge` deletes the backups. |
+| B4 | Closed in text | See R2-S1: the scheduled backups miss silently. |
+| B5 | **Open, see R2-B2** | IN-A1 is still gated by ADR 0021's owner rows, and U-7 needs the Mac the owner doesn't have. |
+| B6 | Closed | |
+
+### Blockers
+
+**R2-B1. Project name `holdfast` is already taken by the dev stack (ADR 0037 §2, IN1, IN3, IN15).** Running
+`docker volume ls` on this laptop shows `holdfast_pgdata`, `holdfast_redisdata` and `holdfast_caddy_*`: the dev
+clone's directory name is the project name. This laptop is the owner's long-term host. A release install pinned to
+`holdfast` would attach to those dev volumes, and three things would follow:
+- `holdfast keys` refuses, because `pgdata` exists.
+- The state `.env` passwords don't match the volume's roles.
+- `holdfast uninstall --purge` deletes the dev database, which may be the owner's local instance.
+
+Any contributor who also installs is hit the same way. Change:
+- Give the release a project name that no checkout can produce, for example `holdfast-app`.
+- At first `up`, label every volume with an install id stored in `install.json`
+  (`com.holdfastfinance.install=<uuid>`).
+- `keys`, `restore` and `--purge` match on that label, never on the name, and refuse to touch an unlabelled
+  `holdfast_*` volume.
+- Leave the dev name alone. Renaming it would orphan existing dev volumes.
+- Test: a dev stack and a release install coexist, and `--purge` leaves the dev volumes intact.
+
+**R2-B2. The first usable run still waits on deferred work and on a Mac (plan "Where this sits", IN-A1; ADR 0021 §12).**
+- ADR 0021 is still **Proposed (revision 4)**.
+- Its acceptance rule says "U-6 and U-7 gate PA-D2". IN-A1 is PA-D2, and U-7 is the Safari check that needs Q3b's
+  Mac. As written, Windows users wait for a Mac.
+- ADR 0021 line 180 puts the **setup-token rate-limit scope in PA1**, which this plan does not pull in. IN-A1's
+  "setup on the local ingress only" needs that scope.
+
+Change:
+- Amend ADR 0021 §12 in this PR: U-6 and U-7 gate the per-browser support claim (Safari, Firefox), not IN-A1's merge.
+- Pull PA1's setup-scope piece into IN-A1 by name.
+- State which ADR 0021 status IN-A1 needs before it can merge.
+
+**R2-B3. The passphrase-encrypted backup design, as specified, can lose data (§11 N2, IN-B1, IN15).**
+1. **Where the wrapped private key lives is unspecified.** If it is only in state, a dead disk takes the key with it,
+   and every backup becomes useless *with* the passphrase. Each archive must carry its own passphrase-wrapped private
+   key in its header. Test: delete state, then restore from the archive and the passphrase alone.
+2. **The verification step can't run as written.** "Verify by restoring into a scratch container" needs the private
+   key, so it needs the passphrase. Either `update` prompts for the passphrase, which is fine because update is
+   user-initiated and it doubles as the only time the passphrase is exercised, or verification runs before
+   encryption, which leaves the encrypted artifact unverified. Pick one and write it down. Scheduled backups are
+   **unverifiable** by design, so stop calling them verified.
+3. **A forgotten passphrase is the expected case, not the edge case.** Unattended backups never ask for it, so after
+   first run the user won't type it again until the disaster. Change:
+   - prefer a generated, printed high-entropy recovery code over a user-chosen passphrase;
+   - add `holdfast backup rekey`, which uses the live state plus local presence to make a new key pair, takes a fresh
+     backup at once, and says old archives stay locked to the old secret;
+   - prompt for the passphrase at every `update`, so it gets exercised.
+4. **"Key ring" is too narrow.** The archive needs the whole `.env` secret set:
+   - `FERNET_KEY` ring;
+   - `SESSION_SECRET`;
+   - the Postgres role passwords;
+   - **`IMPORT_ID_KEY`**, added on main and "never rotate" per `.env.example`. Losing it makes every re-import look new,
+     which breaks hard rule 6 idempotency.
+
+   IN3's "all five secrets" is now six. Put a test on it: the archive's secret set equals `.env.example`'s secret keys.
+5. **The ring and the dump can drift apart.** If `rotate-keys` (ADR 0015) runs during a scheduled backup, the dump can
+   hold rows under a kid that the ring snapshot predates. Change:
+   - take the ring snapshot *after* the dump;
+   - hold a lock that excludes `rotate-keys`;
+   - on restore, run ADR 0015's residual scan and refuse when a row's kid is missing from the restored ring;
+   - restore replaces state `.env` atomically, keeping `.env.prev`, so a live, rotated ring is never mixed with an
+     old dump.
+
+   Test: rotate in the middle of a backup, then restore.
+6. **`--purge` deletes `backups/`, because it sits inside state.** That destroys the only copy in the same command
+   that "shows the location of the last verified backup". Change: `--purge` keeps `backups/` unless
+   `--purge-backups` is typed separately, or the default backup directory moves outside state.
+
+### Should-fix
+
+**R2-S1. Scheduled backups silently miss (§2, IN-B1).** On Windows and macOS, Docker Desktop is a user-session app,
+Colima needs `brew services`, and a Task Scheduler task without a stored password runs only while the user is logged
+on. A backup that finds no engine just doesn't happen. Change:
+- the task records a "skipped: runtime stopped" status;
+- the launcher and an in-app banner show the age of the last good backup.
+
+"A backup runs before the first import" has no mechanism, since the api container can't run host commands. Add a
+backup receipt the api can read, either a db row written by the wrapper or a read-only status file, and have imports
+check it.
+
+**R2-S2. State directory permissions (§2).**
+- Linux: create the directory with mode 0700, not just `.env` 0600, because it also holds `install.json` and backups.
+- macOS: the `.pkg` postinstall runs as root, so create state as the user at first `holdfast open`, never in
+  postinstall.
+- Stream `pg_dump` and documents to the host through stdout (`exec -T`), the same pattern as `keys`. A bind-mounted
+  backup directory writes files as uid 10001, which the user can't delete on Linux.
+- macOS: `~/Library/Application Support` is in Time Machine, so a plaintext `.env` lands on the backup drive. Decide
+  whether to exclude it, and write the decision down.
+- Windows: set the ACL on the whole directory, not only `.env`.
+- Say where `make keys` and `dev.ps1 keys` write: the repo `.env` or state. IN3's parity test makes this ambiguous.
+
+**R2-S3. IN-S0 is not runnable as written.**
+- It says it depends on "none" but uses "IN1's draft". The dev-stack fallback tests neither the release compose nor
+  the named volume, and on Windows it needs `python3` until IN6. Make IN-S0 depend on an IN1 draft built in CI and
+  pulled by digest.
+- Ship the spike as one `pwsh` script that prints the table, and put it in the STATUS owner queue, since the owner
+  runs it by hand.
+- Don't let it gate IN0, IN1, IN-A1 or IN-B1. Gate only IN10 onward, or the whole lane waits on owner time.
+- The reset/purge drill deletes **every** Docker volume on the owner's personal PC. Confirm there is no other Docker
+  data on it first, or cite the docs instead of running the drill.
+- Record the PC's CPU architecture. On Windows-on-ARM, IN4 must come before IN-S0.
+
+**R2-S4. N5 can't be enforced as written (IN-T1).** `gh api user` returns `GrayManSam`: every agent acts as the
+owner's account, so no distinct "Keel's identity" exists for a ruleset to allow. A required reviewer on the protected
+environment is either the owner, which puts the owner back as a gate on every release and contradicts full autonomy,
+or that same account approving itself. Change: use a GitHub App or machine identity for tagging and signing, with
+"prevent self-review" set, or state honestly that tag control equals control of the owner's account.
+
+**R2-S5. N1 is gated on a word in the README (§11).** The gate is "README says no upgrade path before beta". Tie it to
+IN15 passing on the release commit instead. Also add legacy→`hf1` (F5c, PR #31, still unmerged) to the one-way list:
+the first channel release either already contains it or its first `update` carries it.

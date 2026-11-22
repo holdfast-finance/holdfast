@@ -1,12 +1,19 @@
 # 0037. Install on every platform: one verified path per OS, short endpoints on our own domain
 
-- Status: **Proposed (revision 2)**
+- Status: **Proposed (revision 3)**
 - Date: 2026-11-22
 - Deciders: Harbor (DevOps) drafts; Lattice and Bulwark review; Keel decides. The owner asked for it
   (quoted: "right now we only have ubuntu support we need to ensure other distros, a windows exe and a
   pwsh command and macos dmg or package and then terminal command").
 - Reviews: Gadfly on revision 1, `docs/phases/reviews/INSTALL-PLAN-gadfly.md` (REWORK-large). The
   "Gadfly response" section at the end answers every item (B1 to B6, S1 to S12, N1 to N5).
+- **Revision 3 (Gadfly round 2, `docs/phases/reviews/INSTALL-PLAN-gadfly.md`, REWORK-small):** the release project name is
+  `holdfast-app` and volumes are matched by an install-id label (R2-B1, §2); ADR 0021 §12 is amended so the Safari check gates
+  only the macOS channel, and the setup-token rate limit moves into IN-A1 (R2-B2); the backup design is fixed: the wrapped key
+  lives in every archive and in state, the passphrase is required at the pre-update restore, the archive holds the whole secret
+  set including `IMPORT_ID_KEY`, backups take a lock against `rotate-keys`, and `--purge` never deletes backups (R2-B3, §11);
+  plus missed-backup status and banner, per-OS state permissions, an honest note on tag control, and a CI channel gate
+  (R2-S1 to S5).
 - Owner answers received 2026-11-22: (1) macOS ships an **unsigned `.pkg` plus the Homebrew and terminal route
   first**, with no Apple enrolment yet; (2) Windows signing uses **SignPath's free open-source tier**; (3) test
   machines: a personal Windows PC, **no Mac**.
@@ -127,27 +134,44 @@ Images are multi-arch (`linux/amd64,linux/arm64`) from the first installer relea
 **Code and state are separate** (Gadfly B2). Code is replaceable; state is the only copy of the household's ability
 to read its own data.
 
-| | Code (replaced by update, removed by uninstall) | State (kept by uninstall, removed only by `--purge`) |
-|---|---|---|
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/holdfast/` (current bundle plus the previous one) | `${XDG_STATE_HOME:-~/.local/state}/holdfast/` |
-| macOS | brew Cellar/prefix, or `/usr/local/lib/holdfast` for the `.pkg` | `~/Library/Application Support/Holdfast/` |
-| Windows | `%LOCALAPPDATA%\Programs\Holdfast` (the Inno `{app}`) | `%LOCALAPPDATA%\Holdfast` (never under `Programs\`, never in `[UninstallDelete]`) |
+| | Code (replaced by update, removed by uninstall) | State (kept by uninstall, removed only by `--purge`) | Default backup folder (outside state) |
+|---|---|---|---|
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/holdfast/` (current bundle plus the previous one) | `${XDG_STATE_HOME:-~/.local/state}/holdfast/` | `~/Documents/Holdfast Backups` (or `$XDG_DOCUMENTS_DIR`) |
+| macOS | brew Cellar/prefix, or `/usr/local/lib/holdfast` for the `.pkg` | `~/Library/Application Support/Holdfast/` | `~/Documents/Holdfast Backups` |
+| Windows | `%LOCALAPPDATA%\Programs\Holdfast` (the Inno `{app}`) | `%LOCALAPPDATA%\Holdfast` (never under `Programs\`, never in `[UninstallDelete]`) | `%USERPROFILE%\Documents\Holdfast Backups` |
 
-State holds: `.env` (the `FERNET_KEY` key ring and the Postgres role passwords), `install.json` (installed version,
-previous version), `backups/`, and the recovery-kit receipt. Rules:
-- Compose is always run as project `holdfast` with `--env-file <state>/.env`, so a reinstall to another folder finds
-  the *same* named volumes (`pgdata`, `redisdata`, `docs`, `caddy_*`).
-- `holdfast keys` **refuses to write if state already holds a `.env` or the project's volumes exist** (it detects an
-  existing `pgdata` volume by name), and says so. Only `--purge` ends that state.
-- State is not placed under the brew Cellar or prefix, and Inno's `[UninstallDelete]` has no state path.
-- **Test (plan IN15):** install, create a household and an encrypted row, uninstall, reinstall, and the old row still
+State holds: `.env` (every secret in `.env.example`, §11), `install.json` (install id, installed and previous version, backup
+folder, last-backup status), and the receipt of the first-run recovery step. **Backups live outside state** (R2-B3.6), so
+removing state cannot remove the only copy. Rules:
+- **The compose project name is `holdfast-app`, not `holdfast` (R2-B1).** The owner's dev stack, and any contributor's
+  clone, already use the directory name as the project name (`holdfast_pgdata`, `holdfast_redisdata` and so on exist on the
+  owner's laptop today), so a release pinned to `holdfast` would attach to a developer's volumes, fail `keys`, mismatch the
+  passwords, and let `--purge` delete a dev database. The dev name is left alone, because renaming it would orphan dev
+  volumes. `holdfast-app` is a name no checkout produces, but the label rule below does not depend on that.
+- **Volumes are matched by label, never by name.** The bundle's compose file puts `com.holdfastfinance.install=<install-id>`
+  on every volume, from the install id stored in `install.json` (a UUID made at first run). `keys`, `restore` and `--purge`
+  select volumes by that label and **refuse to touch any unlabelled volume**, including any `holdfast_*` dev volume.
+- `holdfast keys` refuses to write if state already holds a `.env`, or if volumes carrying this install's label exist, and
+  says so. Only `--purge` ends that state.
+- State is not placed under the brew Cellar or prefix, and Inno's `[UninstallDelete]` has no state or backup path.
+- **Tests (plan IN1, IN15):** (a) a dev stack and a release install coexist on one machine, and `--purge` leaves every
+  unlabelled volume intact; (b) install, create a household and an encrypted row, uninstall, reinstall, and the old row still
   decrypts and the old Postgres passwords still work.
+
+**State directory permissions, per OS, checked at every start (R2-S2).** Linux: create the directory mode `0700` (it holds
+`install.json` and the wrapped keys as well as `.env`), files `0600`. macOS: the `.pkg` postinstall runs as root, so it creates
+**nothing** under the user's home; state is created by the user's own `holdfast open` at first run, mode `0700`; the state
+directory is **excluded from Time Machine** (`tmutil addexclusion`; decision: a plaintext `.env` must not land on a backup
+drive, and the encrypted archives in `Holdfast Backups` are what Time Machine may carry). Windows: an ACL for the current user
+only on the **whole directory** (`icacls`, inheritance removed), asserted in Pester. At start, `holdfast` re-checks the mode or
+ACL and refuses to run `up` if the state directory is readable by others, naming the fix.
+`make keys` and `dev.ps1 keys` keep writing the repo-root `.env` for contributors (the dev stack); only `holdfast keys` writes
+state. IN3's parity test asserts the *generator* is shared, not the destination.
 
 **Secrets generation (S7).** `holdfast keys` runs the generator inside the api image and writes **to stdout**. The host
 shim creates the file, because a container writing through a bind mount creates it as uid 10001 and "mode 0600" means
-nothing on NTFS. POSIX: `umask 077` then redirect. Windows: create the file, then set an ACL for the current user only
-with `icacls`, and assert it in Pester. The shim never prints a value. After writing, it runs the **recovery-kit step**
-(§11): the key ring is shown once for the user to store, with a confirmation that they did.
+nothing on NTFS. POSIX: `umask 077` then redirect. Windows: create the file, then set the ACL above, and assert it in Pester.
+The shim never prints a value. After writing, it runs the **recovery step** (§11).
 
 **Documents** become a named volume initialised by a one-off container, so no host `chown`, `:z` label or NTFS
 ownership assumption is needed. Cost: a document is read on the host with `holdfast export` or `docker cp`. (Fallback:
@@ -156,11 +180,21 @@ keep the bind mount with `:z`/`:U`; spike IN-L-S2.)
 **Backups are on by default on Windows and macOS** (Gadfly B4). Docker Desktop and Colima keep named volumes in a VM
 disk the user does not know exists. Docker Desktop "Clean / Purge data", "Reset to factory defaults", uninstalling
 Docker Desktop, `wsl --unregister docker-desktop` and `colima delete` each delete every volume, with no Holdfast code
-involved (Gadfly's list; the exact menu names are UNVERIFIED here and are checked in IN-S0). So:
-- A scheduled `holdfast backup` writes a dump plus the documents to the **host filesystem** (`<state>/backups/` by
-  default, a user-chosen folder recommended) from first run and **before the first import**. Windows uses a Task Scheduler
-  task, macOS a launchd agent, Linux a systemd user timer (offered, on by default only if the user agrees).
-- A test asserts the backup directory is a host path and not a volume.
+involved (Gadfly's list; the exact menu names are UNVERIFIED here and are confirmed from Docker's docs in IN-S0, not by running
+the destructive drill on a machine that holds other Docker data). So:
+- A scheduled `holdfast backup` writes a dump plus the documents to the **host filesystem** (the backup folder above, a
+  user-chosen folder recommended) from first run. `pg_dump` and the documents are **streamed to the host through stdout**
+  (`exec -T`, the same pattern as `keys`), never written by a container into a bind mount, because a bind mount creates files
+  as uid 10001 that the user cannot delete on Linux. Windows uses a Task Scheduler task, macOS a launchd agent, Linux a
+  systemd user timer (offered, on by default only if the user agrees).
+- **Scheduled backups can silently miss** (R2-S1): Docker Desktop is a user-session app, Colima needs `brew services`, and a
+  Task Scheduler task without a stored password runs only while the user is logged on. So every run writes a **status file**
+  (`ok`, `skipped: runtime stopped`, or `failed: <reason>`) to state. `holdfast open` and an **in-app banner** show the age
+  of the last good backup, amber after 2 days and red after 7 (numbers set by Tide with Bulwark).
+- **"A backup runs before the first import" needs a mechanism**, since the api container cannot run host commands. The wrapper
+  writes a **backup receipt** (the status file, mounted **read-only** into `api` through a small named volume), and the import
+  endpoint refuses to start the first import without a receipt from the last 24 hours.
+- A test asserts the backup folder is a host path and not a volume.
 - The first-run page and `holdfast uninstall` state where the data physically lives and how to get it out.
 - Off-host copies (restic, Phase 9) layer on top later. The local backup and restore are part of this plan (IN-B1)
   because without them the installer endangers data.
@@ -367,7 +401,7 @@ itself creates no Cloudflare resource.**
     test what runs without Docker: script logic with a fake `docker` shim, `pkgbuild` and `productbuild`, the Homebrew
     formula audit, and the no-quarantine check. They have **no Docker** (Keel's finding; the runner image README lists
     none), and Apple Silicon runners cannot nest virtualization (UNVERIFIED), so they cannot run the stack.
-  - **The Docker Desktop path** (and ADR 0021's U-7, the Safari `http://localhost` cookie check, which needs Safari)
+  - **The Docker Desktop path** (and ADR 0021's U-7 Safari check, which **gates only the macOS channel's browser-support claim, not IN-A1**, see the amended ADR 0021 §12)
     waits for a **rented Apple-silicon host or a borrowed Mac** (owner question Q3b, cost UNVERIFIED). Until then macOS is
     "script- and package-tested, stack unverified", and the docs say so.
 - **Uninstall:** `holdfast uninstall` (the `.pkg` has no uninstaller), which also runs `pkgutil --forget`. State stays.
@@ -426,7 +460,13 @@ The one-liner is `stub | sh`. The stub runs nothing unverified beyond itself:
   the first beta"). Sigstore's public-good service is already named under rule 9 by ADR 0018.
 - **Who may create `v*` tags, and what the workflow refuses (S2).** With full autonomy any session with push rights could
   tag a commit that changes `release.yml`, and Fulcio would certify it. So: a **tag ruleset** limits `v*` creation to Keel's
-  identity (**Keel decision N5, 2026-11-22**: only Keel creates `v*` tags, enforced by this ruleset); `release.yml` **refuses** unless the tagged commit is reachable from `main` and has a green
+  identity (**Keel decision N5, 2026-11-22**: only Keel creates `v*` tags). **Said plainly (R2-S4): today this is a process rule, not an
+  enforced one.** Every agent acts as the owner's GitHub account (`gh api user` returns the owner's login), so there is no
+  distinct "Keel identity" for a ruleset to allow, and a protected-environment required reviewer is either the owner (a gate
+  on every release, against full autonomy) or the same account approving itself. The ruleset becomes enforceable **when the
+  separate agent identity from ADR 0036 exists** (a GitHub App or machine user for tagging and signing, with "prevent
+  self-review" on the environment). Until then, tag control equals control of the owner's account, and the CI guards below
+  (reachable from `main`, green `ci-required`, the channel gate in §11) are the controls that actually bite; `release.yml` **refuses** unless the tagged commit is reachable from `main` and has a green
   `ci-required` on its PR head; the signing job runs in a **protected environment** with a required reviewer. Residual
   risk: a compromised Keel identity or GitHub org owner can still mint a validly signed release. That is the root of trust
   we are choosing, and it is the same root as the GHCR images.
@@ -459,43 +499,66 @@ The one-liner is `stub | sh`. The stub runs nothing unverified beyond itself:
 
 At run time nothing contacts these except `holdfast update --check`, which is user-initiated (ADR 0018 item 5).
 
-### 11. Update, rollback, uninstall and the recovery kit
+### 11. Update, rollback, uninstall and the recovery step
+
+**What a backup archive is (N2, R2-B3).** One archive holds the `pg_dump`, the documents, and **the whole secret set**, meaning
+**every secret key in `.env.example`**, not only the `FERNET_KEY` ring: the ring (all kids), `SESSION_SECRET`, the Postgres
+role passwords, and **`IMPORT_ID_KEY`**, which is "never rotate" and whose loss makes every re-import look new (hard rule 6).
+A test asserts the archive's secret set equals `.env.example`'s secret keys, so a new secret cannot be forgotten. The archive is
+encrypted (below), so it is safe to copy off the machine and unreadable without the passphrase.
+
+**The passphrase and the wrapped key (Keel N2 decision, 2026-11-22, owner may veto; shape from Gadfly R2-B3).**
+- At first run the user sets a **backup passphrase**. The recovery step *recommends* a generated, printed, high-entropy
+  recovery code instead of a chosen passphrase (a person forgets a chosen one; a printed one survives). Either is "the
+  passphrase" below, and neither is ever stored with a backup or beside it.
+- Envelope encryption: a backup key pair is generated at first run. The **public half** stays in state so unattended backups
+  encrypt without the passphrase. The **private half is wrapped by the passphrase** and kept in **two places, never one**:
+  **inside the header of every archive** and **in the state directory**. A dead disk (state gone) still restores from any
+  archive plus the passphrase alone, and test IN15 deletes state and restores from an archive and the passphrase alone.
+- `holdfast backup rekey` makes a new key pair from live state with the user present, takes a fresh backup at once, and says
+  that **older archives stay locked to the old secret**.
+- The primitive (for example `age`) needs the maintenance and AGPL-compatibility check, and adds no external service.
+- **Forgetting is the expected case.** Unattended backups never ask for the passphrase, so (a) `holdfast update` **prompts for
+  it every time**, which is the only time it is normally exercised and which the pre-update restore needs anyway; (b) `holdfast
+  open` runs a **periodic passphrase check** (about every 30 days, a local test against the wrapped key held in state) and
+  re-prompts until the user passes or chooses `rekey`. The installer says before the user confirms that a lost passphrase
+  makes backups unrecoverable by design.
+
+**Consistency (R2-B3.5).** A backup takes a **lock that blocks `rotate-keys`** (ADR 0015). The ring is captured **after the
+dump** with **all kids kept**, so no row in the dump carries a kid the archive's ring lacks. On restore, ADR 0015's residual
+scan runs and the restore **refuses** if any row's kid is missing from the restored ring. Restore replaces the state `.env`
+atomically and keeps `.env.prev`, so a live, rotated ring is never mixed with an old dump. Test: rotate in the middle of a
+backup, then restore.
 
 **Update is backup-first and fails closed (B3).** `holdfast update`:
 1. Runs the Docker-floor check and the signature verification of §8, and refuses a downgrade or a version below the minimum.
-2. **Always takes a backup first**: `pg_dump`, the documents, and the key ring, **encrypted with the user's backup passphrase** (see below), written to a **host** path. **It verifies the backup** by restoring it into a scratch container and checking
-   row counts, and **refuses to continue if the backup or the verification fails.** There is no "if a backup is configured".
+2. **Always takes a backup first** to a host path and **prompts for the passphrase**. It then **verifies** that backup by
+   restoring it into a scratch container with that passphrase and checking row counts, and **refuses to continue if the
+   backup or the verification fails.** There is no "if a backup is configured". **Scheduled backups are not verified** (the
+   passphrase is absent): they are reported as "written, not verified", and the first verified backup is the next update's.
 3. Stops `api` and `worker`, then runs the one-off `migrate` service as the owner role (hard rule 8).
 4. Keeps the previous bundle and image digests on disk (N-1).
 5. **Rollback is defined as `holdfast restore <pre-update backup>` onto the N-1 digests. It is never an image downgrade.**
 
-**Which changes are one-way** (so rollback must be a restore): Alembic migrations that rewrite data; secret-envelope
-rewrites (`hf1` to `hf2`, ADR 0015, PR #73), after which an older image cannot read the rows; and a **Postgres major bump**
-(`postgres:16-alpine` is pinned at `docker-compose.yml:91`, and a 16 to 17 image cannot start on an old `pgdata`). Major
-bumps are done by dump and restore inside `update`, with a test. Each release's notes list which of these it contains.
+**Which changes are one-way** (so rollback must be a restore): Alembic migrations that rewrite data; secret-envelope rewrites
+(legacy to `hf1` (F5c) if the release baseline predates it, and `hf1` to `hf2`, ADR 0015, PR #73), after which an older image
+cannot read the rows; and a **Postgres major bump** (`postgres:16-alpine` is pinned at `docker-compose.yml:91`, and a 16 to 17
+image cannot start on an old `pgdata`). Major bumps are done by dump and restore inside `update`, with a test. Each release's
+notes list which of these it contains. The first channel release either already contains the envelope rewrites or its first
+`update` carries them.
 
-**No channel opens before there is an upgrade path (N1).** **Keel decision (2026-11-22, owner may veto): no installer channel (stub, `.exe`, `.pkg`,
-tap) is published while README says "no upgrade path before beta".** The alpha stays on the clone path. The first channel
-release is the first one with a tested `update`, `backup` and `restore` (IN15). The owner may veto.
+**No channel opens before there is an upgrade path (N1; Keel decision 2026-11-22, owner may veto; mechanism R2-S5).** The gate
+is **a CI check, not a word in the README**: `release.yml` has a `channel-gate` job, and every channel job needs it. It **refuses
+to publish or deploy any channel artifact** (stub, `.exe`, `.pkg`, the Homebrew formula bump, the `get.` deploy) unless the IN15
+upgrade-path test job (backup-first update, restore as rollback, reinstall-decrypts, delete-state restore) **passed on the
+release commit**. Until then the alpha stays on the clone path.
 
-**The key ring and backups (N2, Keel decision 2026-11-22, owner may veto).** The `FERNET_KEY` ring lives in the per-OS
-**state directory** (§2). **Host backups include it**, and every backup archive is **encrypted with a passphrase the user sets
-at first run, which is never stored with the backup** (nor in state beside it). So a backup is safe to copy off the machine
-and useless without the passphrase, and the passphrase plus the backup is enough to recover on a new machine. The first-run
-**recovery-kit step** shows the passphrase requirement and has the user confirm they stored it (password manager or print).
-Design points for Lattice and Bulwark in IN-B1, not settled here:
-- Scheduled, unattended backups must encrypt **without** the passphrase present. The intended shape is envelope encryption: a
-  backup key pair is generated at first run, the public half stays in state for unattended encryption, and the private half is
-  wrapped by the passphrase. A restore needs the passphrase. The primitive and its dependency (for example `age`) need a
-  maintenance and AGPL-compatibility check (security rule), and add no external service.
-- A lost passphrase makes backups unrecoverable by design, and the installer says so before the user confirms.
-- The pre-update local snapshot (§11 step 2) is encrypted the same way.
-
-**Uninstall (B2):** `holdfast uninstall` stops the stack and removes **code only**. It keeps state (`.env`, key ring,
-`install.json`, `backups/`) and the Docker volumes, and prints where they are. `--purge` removes the volumes **and then
-state last**, only after typing the household name and showing the location of the last verified backup. It never
-uninstalls Docker, WSL, Colima or Tailscale. The Windows Apps entry and macOS `holdfast uninstall` both call this.
-Acceptance: reinstall after uninstall decrypts existing data (§2).
+**Uninstall (B2):** `holdfast uninstall` stops the stack and removes **code only**. It keeps state and the Docker volumes and prints
+where they are, and it never touches backups. `--purge` removes this install's **labelled** volumes, **then state last**, only
+after typing the household name and showing the location of the newest backup. **`--purge` never deletes the backup folder**:
+that needs a second, separately typed `--purge-backups`. It never uninstalls Docker, WSL, Colima or Tailscale and never touches an
+unlabelled volume. The Windows Apps entry and macOS `holdfast uninstall` both call this. Acceptance: reinstall after uninstall
+decrypts existing data (§2).
 
 ### 12. Phone access (ADR 0021) per platform
 
@@ -555,6 +618,19 @@ moderation, Podman and Colima licences, rootless Podman below port 1024, `!overr
 `irm`, quarantine and `curl`, macOS 15's removed bypass, Apple Silicon runner nesting, Intel macOS runner retirement date
 (the `macos-15-intel` and `macos-26-intel` labels exist today; macOS 14 images retired 2026-11-02 per the runner-images
 README), Colima's Docker version, a Pi's memory floor, and whether SignPath accepts an alpha pre-release.
+
+## Gadfly response, round 2 (b5aec38)
+
+| Item | Disposition |
+|---|---|
+| R2-B1 project name collides with the dev stack | **Accepted.** Project `holdfast-app`; volumes labelled `com.holdfastfinance.install=<id>`; `keys`, `restore`, `--purge` match the label only; coexistence test (§2, IN1, IN15). |
+| R2-B2 first run waits on a Mac | **Accepted.** ADR 0021 §12 amended in this PR: U-6 and U-7 gate the per-browser claim, not PA-D2's merge; the Safari part gates the macOS channel only. The setup-token rate-limit scope is pulled into IN-A1. IN-A1 needs no ADR 0021 status change beyond that amendment (plan IN-A1). |
+| R2-B3 backup design can lose data | **Accepted.** All six sub-points: wrapped key in every archive and in state; passphrase at the pre-update restore, scheduled backups called "written, not verified"; recovery code recommended, `rekey`, `update` prompt and a periodic check; whole secret set including `IMPORT_ID_KEY`; `rotate-keys` lock, ring after the dump, residual scan on restore, atomic `.env` swap; `--purge` keeps backups (§11). |
+| R2-S1 silent misses | **Accepted.** Status file, banner and launcher age display, read-only receipt that gates the first import (§2, IN-B1). |
+| R2-S2 state permissions | **Accepted.** Per-OS modes and ACLs checked at start, Time Machine exclusion, stdout streaming, `make keys` destination stated (§2, IN3). |
+| R2-S3 IN-S0 not runnable | **Accepted.** Independent of IN1 (CI-built draft pulled by digest, or the dev stack with the Windows host prerequisites listed), one `pwsh` script, in the STATUS owner queue, gates IN10 onward only, no destructive drill, CPU architecture recorded (plan IN-S0). |
+| R2-S4 N5 unenforceable | **Accepted.** Stated as a process rule today; enforceable with ADR 0036's separate agent identity (§9, IN-T1). |
+| R2-S5 README word gate | **Accepted.** A `channel-gate` CI job tied to the IN15 test on the release commit; legacy to `hf1` added to the one-way list (§11). |
 
 ## Gadfly response (revision 1, PR #75)
 
