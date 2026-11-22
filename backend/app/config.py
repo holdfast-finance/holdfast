@@ -7,6 +7,7 @@ Anything secret is a ``SecretStr`` so it cannot leak through ``repr()`` or logs.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -31,6 +32,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         extra="ignore",
+        # A rejected secret must never be echoed into the startup error (and docker logs).
+        hide_input_in_errors=True,
         case_sensitive=False,
     )
 
@@ -65,6 +68,8 @@ class Settings(BaseSettings):
     postgres_app_password: SecretStr | None = None
     postgres_owner_password: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
+    # Fill the password into REDIS_URL when the URL carries none.
+    redis_password: SecretStr | None = None
     document_store: Path = Path("/data/documents")
 
     # Auth (PLAN 12). WebAuthn RP id is APP_HOST; the expected origin is https://{APP_HOST}
@@ -131,6 +136,15 @@ class Settings(BaseSettings):
     # Edge
     web_upstream: str = "web:80"
 
+    @field_validator("redis_password")
+    @classmethod
+    def _redis_password_charset(cls, value: SecretStr | None) -> SecretStr | None:
+        # arq's RedisSettings.from_dsn never URL-decodes, so reserved characters would reach the
+        # worker still encoded. gen-keys only produces this alphabet.
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value.get_secret_value()):
+            raise ValueError("REDIS_PASSWORD may only contain A-Z a-z 0-9 _ - (run make keys)")
+        return value
+
     @field_validator("plaid_products", "plaid_country_codes", "trusted_proxies", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
@@ -159,6 +173,19 @@ class Settings(BaseSettings):
         if self.migrations_database_url is None:
             return self.sqlalchemy_url
         return _with_password(self.migrations_database_url, self.postgres_owner_password)
+
+    @property
+    def redis_dsn(self) -> str:
+        """REDIS_URL with the password filled from REDIS_PASSWORD when the URL carries none.
+        Never log it."""
+        url = make_url(self.redis_url.get_secret_value())
+        if url.password is None and self.redis_password is not None:
+            # An empty username renders as `redis://:password@host`, which redis-py reads as
+            # "default user".
+            url = url.set(
+                username=url.username or "", password=self.redis_password.get_secret_value()
+            )
+        return url.render_as_string(hide_password=False)
 
 
 def _with_password(dsn: SecretStr, password: SecretStr | None) -> URL:

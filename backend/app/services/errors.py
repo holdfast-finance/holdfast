@@ -18,6 +18,7 @@ STATUS: dict[str, int] = {
     "passkey_verification_failed": 400,
     "last_credential": 409,
     "conflict": 409,
+    "busy": 409,
     "not_found": 404,
     "rate_limited": 429,
     "validation_error": 422,
