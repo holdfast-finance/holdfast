@@ -20,6 +20,7 @@ from app.db_context import scoped_session
 from app.integrations.plaid.client import PlaidClient, PlaidCredentials
 from app.models import AuditLog, BankConnection
 from app.security import crypto
+from app.security.secret_token import SecretToken
 from app.services import plaid_setup
 from tests.api.conftest import Owner, make_client, seed_household
 from tests.api.test_imports import member_client
@@ -327,7 +328,7 @@ async def add_items(app: FastAPI, hid: uuid.UUID, n: int, env: str = "production
                     household_id=hid,
                     provider="plaid",
                     external_id=f"item-{env}-{uuid.uuid4().hex}-{i}",
-                    access_token_enc=crypto.encrypt("access-sandbox-synthetic").encode(),
+                    access_token_enc=crypto.seal(SecretToken("access-sandbox-synthetic")),
                     env=env,
                 )
             )

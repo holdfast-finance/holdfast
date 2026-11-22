@@ -22,6 +22,7 @@ from app.config import Settings
 # Every env var from the Phase 0 contract, cleared for tests that check defaults.
 CONTRACT_ENV_VARS = (
     "APP_ENV",
+    "APP_DEPLOYMENT",
     "APP_BASE_URL",
     "APP_HOST",
     "CADDY_BIND",
