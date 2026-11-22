@@ -11,11 +11,12 @@ import base64
 import binascii
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import Select, case, func, select, tuple_
 from sqlalchemy.dialects.postgresql import distinct_on
@@ -23,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db_context import scoped_session
+from app.domain.ledger_rules import LedgerRuleError
+from app.domain.merchant import merchant_key
 from app.models import (
     Account,
     BalanceSnapshot,
@@ -30,10 +33,12 @@ from app.models import (
     ImportRun,
     Institution,
     Transaction,
+    TransactionSplit,
 )
 from app.schemas.ledger import (
     AccountList,
     AccountOut,
+    CategorySource,
     CurrencyTotals,
     Direction,
     TransactionOut,
@@ -42,6 +47,13 @@ from app.schemas.ledger import (
 )
 from app.services.context import RequestContext
 from app.services.errors import ApiError
+from app.services.ledger_service import (
+    CategoryNotFoundError,
+    LedgerNotFoundError,
+    LedgerRetryableError,
+    LedgerWriter,
+    SupersededTransactionError,
+)
 from app.services.sessions import Principal
 
 DEFAULT_LIMIT = 50
@@ -67,6 +79,10 @@ class TransactionFilters:
     min_amount: Decimal | None = None
     max_amount: Decimal | None = None
     exclude_transfers: bool = False
+    category_ids: list[uuid.UUID] = field(default_factory=list)
+    uncategorized: bool = False
+    category_source: CategorySource | None = None
+    transfer: Literal["only", "exclude"] | None = None
 
 
 def _escape_like(value: str) -> str:
@@ -109,6 +125,16 @@ def _conditions(f: TransactionFilters) -> list[ColumnElement[bool]]:
         conds.append(Transaction.amount <= f.max_amount)
     if f.exclude_transfers:
         conds.append(Transaction.is_transfer.is_(False))
+    if f.transfer == "only":
+        conds.append(Transaction.is_transfer.is_(True))
+    elif f.transfer == "exclude":
+        conds.append(Transaction.is_transfer.is_(False))
+    if f.category_ids:
+        conds.append(Transaction.category_id.in_(f.category_ids))
+    if f.uncategorized:
+        conds.append(Transaction.category_id.is_(None))
+    if f.category_source is not None:
+        conds.append(Transaction.category_source == f.category_source)
     return conds
 
 
@@ -117,6 +143,14 @@ def validate_filters(f: TransactionFilters) -> None:
         raise ApiError("validation_error", "Too many accounts selected.")
     if f.q is not None and len(f.q) > MAX_QUERY_LENGTH:
         raise ApiError("validation_error", "Keep the search to 200 characters or fewer.")
+    if len(f.category_ids) > MAX_ACCOUNT_FILTERS:
+        raise ApiError("validation_error", "Too many categories selected.")
+    if f.uncategorized and (f.category_ids or f.category_source is not None):
+        raise ApiError(
+            "validation_error", "Needs-category can't be combined with a category or a source."
+        )
+    if f.transfer == "only" and f.exclude_transfers:
+        raise ApiError("validation_error", "Transfers can't be both only and excluded.")
     if f.date_from and f.date_to and f.date_from > f.date_to:
         raise ApiError("validation_error", "The start date is after the end date.")
     if f.min_amount is not None and f.max_amount is not None and f.min_amount > f.max_amount:
@@ -200,25 +234,62 @@ class LedgerService:
             .join(Account, Account.id == Transaction.account_id)
         )
 
+    def _row_stmt(self) -> Select[Any]:
+        has_splits = (
+            select(TransactionSplit.id)
+            .where(TransactionSplit.transaction_id == Transaction.id)
+            .exists()
+        )
+        return self._base(
+            Transaction.id,
+            Transaction.account_id,
+            Transaction.posted_date,
+            Transaction.description_raw,
+            Transaction.amount,
+            Account.currency,
+            Transaction.is_pending,
+            Transaction.is_transfer,
+            ImportRun.reconcile_status,
+            Transaction.merchant_name,
+            Transaction.category_id,
+            Transaction.category_source,
+            has_splits,
+            Account.owner_person_id,
+        ).outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
+
+    def _can_edit(self, owner_person_id: uuid.UUID | None) -> bool:
+        # The exact predicate of the C6a brief: no owner, or the reader is the owner. Never reads
+        # `visibility`. A principal with no person can't edit. C3b swaps this for
+        # app_account_writable() and adds an equivalence test.
+        person = self.principal.person_id
+        return person is not None and (owner_person_id is None or owner_person_id == person)
+
+    def _out(self, r: Any) -> TransactionOut:
+        return TransactionOut.model_validate(
+            {
+                "id": r[0],
+                "account_id": r[1],
+                "posted_date": r[2],
+                "description": r[3],
+                "amount": r[4],
+                "currency": r[5],
+                "is_pending": r[6],
+                "is_transfer": r[7],
+                "import_reconcile_status": r[8],
+                "needs_review": r[8] == "needs_review",
+                "merchant_key": merchant_key(r[9], r[3]),
+                "category_id": r[10],
+                "category_source": r[11],
+                "has_splits": bool(r[12]),
+                "can_edit": self._can_edit(r[13]),
+            }
+        )
+
     async def transactions(
         self, f: TransactionFilters, *, limit: int, cursor: str | None
     ) -> TransactionPage:
         validate_filters(f)
-        stmt = (
-            self._base(
-                Transaction.id,
-                Transaction.account_id,
-                Transaction.posted_date,
-                Transaction.description_raw,
-                Transaction.amount,
-                Account.currency,
-                Transaction.is_pending,
-                Transaction.is_transfer,
-                ImportRun.reconcile_status,
-            )
-            .outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
-            .where(*_conditions(f))
-        )
+        stmt = self._row_stmt().where(*_conditions(f))
         if cursor:
             stmt = stmt.where(
                 tuple_(Transaction.posted_date, Transaction.id) < tuple_(*decode_cursor(cursor))
@@ -227,27 +298,68 @@ class LedgerService:
         async with self._session() as s:
             rows = (await s.execute(stmt)).all()
         page = rows[:limit]
-        items = [
-            TransactionOut.model_validate(
-                {
-                    "id": r[0],
-                    "account_id": r[1],
-                    "posted_date": r[2],
-                    "description": r[3],
-                    "amount": r[4],
-                    "currency": r[5],
-                    "is_pending": r[6],
-                    "is_transfer": r[7],
-                    "import_reconcile_status": r[8],
-                    "needs_review": r[8] == "needs_review",
-                }
-            )
-            for r in page
-        ]
+        items = [self._out(r) for r in page]
         next_cursor = (
             encode_cursor(page[-1][2], page[-1][0]) if len(rows) > limit and page else None
         )
         return TransactionPage(items=items, next_cursor=next_cursor)
+
+    async def _one(self, s: AsyncSession, transaction_id: uuid.UUID) -> TransactionOut:
+        row = (
+            await s.execute(self._row_stmt().where(Transaction.id == transaction_id))
+        ).one_or_none()
+        if row is None:
+            raise ApiError("not_found", "That transaction wasn't found.")
+        return self._out(row)
+
+    async def get(self, transaction_id: uuid.UUID) -> TransactionOut:
+        """One live row the reader can see; a superseded row is history and reads as missing."""
+        stmt = self._row_stmt().where(
+            Transaction.id == transaction_id, Transaction.superseded_by_id.is_(None)
+        )
+        async with self._session() as s:
+            row = (await s.execute(stmt)).one_or_none()
+        if row is None:
+            raise ApiError("not_found", "That transaction wasn't found.")
+        return self._out(row)
+
+    async def set_category(
+        self, transaction_id: uuid.UUID, category_id: uuid.UUID | None
+    ) -> TransactionOut:
+        return await self._edit(
+            transaction_id, lambda w: w.set_category(transaction_id, category_id)
+        )
+
+    async def release_category(self, transaction_id: uuid.UUID) -> TransactionOut:
+        return await self._edit(transaction_id, lambda w: w.release_category(transaction_id))
+
+    async def _edit(
+        self, transaction_id: uuid.UUID, op: Callable[[LedgerWriter], Awaitable[None]]
+    ) -> TransactionOut:
+        """Run one LedgerWriter edit in the reader's own person-scoped session (never wide).
+
+        A row that is missing, invisible or not writable is one 404 (RLS decides). Money and
+        category fields are written only by LedgerWriter (ADR 0011).
+        """
+        failure: ApiError | None = None
+        try:
+            async with self._session() as s:
+                writer = LedgerWriter(
+                    s, self.principal.household_id, user_id=self.principal.user_id, ip=self.ctx.ip
+                )
+                await op(writer)
+                return await self._one(s, transaction_id)
+        except SupersededTransactionError:
+            failure = ApiError("conflict", "That transaction was replaced and can't be changed.")
+        except CategoryNotFoundError:
+            failure = ApiError("not_found", "That category wasn't found.")
+        except LedgerNotFoundError:
+            failure = ApiError("not_found", "That transaction wasn't found.")
+        except LedgerRetryableError:
+            failure = ApiError("conflict", "That transaction changed. Try again.")
+        except LedgerRuleError:
+            failure = ApiError("conflict", "That change isn't allowed on this transaction.")
+        raise failure
 
     async def summary(self, f: TransactionFilters) -> TransactionSummary:
         validate_filters(f)
