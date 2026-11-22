@@ -46,10 +46,10 @@ CENT = Decimal("0.01")
 def _check_amount(amount: Decimal) -> None:
     if not amount.is_finite():
         raise RuleValidationError("Amount conditions require finite Decimal values.")
+    if abs(amount) >= MAX_AMOUNT:  # before quantize, which raises on 30-digit values
+        raise RuleValidationError("Amount is out of range.")
     if amount != amount.quantize(CENT):
         raise RuleValidationError("Amounts allow at most 2 decimal places.")
-    if abs(amount) >= MAX_AMOUNT:
-        raise RuleValidationError("Amount is out of range.")
 
 
 def _amount_text(amount: Decimal) -> str:
@@ -214,8 +214,9 @@ class RuleTransaction:
     category_id: UUID | None = None
     category_source: str | None = None
     transfer_candidate: bool = False
-    account_owner_person_id: UUID | None = None
-    is_split: bool = False
+    # Required, no default: a loader that forgets the owner must fail, not look "joint".
+    account_owner_person_id: UUID | None = field(kw_only=True)
+    is_split: bool = field(kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +337,10 @@ def preview_for(
 
 
 def preview_token(target: Rule, changes: Sequence[RuleMatch]) -> str:
-    """SHA-256 of the rule's content (not its id) and the sorted changed ids."""
+    """SHA-256 of the rule's content (not its id) and the sorted changed ids.
+
+    An unkeyed content hash: never authorisation by itself.
+    """
     payload = {
         "v": TOKEN_VERSION,
         "conditions": conditions_to_json(target.conditions),

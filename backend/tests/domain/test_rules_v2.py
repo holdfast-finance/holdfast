@@ -66,6 +66,7 @@ def txn(n: int, owner: UUID | None = None, **kw: object) -> RuleTransaction:
         "posted_on": date(2026, 11, 1),
         "merchant_key": "MOONFERN",
         "account_owner_person_id": owner,
+        "is_split": False,
     }
     base.update(kw)
     return RuleTransaction(**base)  # type: ignore[arg-type]

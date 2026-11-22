@@ -25,6 +25,8 @@ TXN = RuleTransaction(
     account_id=UUID(int=2),
     posted_on=date(2026, 11, 21),
     merchant_key="MOONFERN",
+    account_owner_person_id=None,
+    is_split=False,
 )
 CATEGORY = UUID(int=3)
 AUTHOR = UUID(int=40)

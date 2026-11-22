@@ -86,7 +86,14 @@ def test_merchant_key_folds_compatibility_forms() -> None:
 def test_match_ignores_split_rows_like_preview() -> None:
     r = _rule(RuleConditions(merchant_key="MOONFERN"))
     base = RuleTransaction(
-        UUID(int=9), "x", Decimal("-1.00"), UUID(int=8), T0.date(), merchant_key="MOONFERN"
+        UUID(int=9),
+        "x",
+        Decimal("-1.00"),
+        UUID(int=8),
+        T0.date(),
+        merchant_key="MOONFERN",
+        account_owner_person_id=None,
+        is_split=False,
     )
     assert match([r], base) is not None
     assert match([r], replace(base, is_split=True)) is None
@@ -95,3 +102,21 @@ def test_match_ignores_split_rows_like_preview() -> None:
 def test_ingest_budget_is_integer_microseconds() -> None:
     assert rule_regex.INGEST_REGEX_US_PER_ROW == 500
     assert not hasattr(rule_regex, "INGEST_REGEX_MS_PER_ROW")
+
+
+def test_owner_and_split_flag_are_required() -> None:
+    args = (UUID(int=9), "x", Decimal("-1.00"), UUID(int=8), T0.date())
+    with pytest.raises(TypeError):
+        RuleTransaction(*args, is_split=False)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        RuleTransaction(*args, account_owner_person_id=None)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        RuleTransaction(*args)  # type: ignore[call-arg]
+
+
+def test_huge_amounts_are_a_validation_error_not_invalid_operation() -> None:
+    huge = "1" + "0" * 29 + ".00"
+    with pytest.raises(RuleValidationError):
+        conditions_from_json({"v": 1, "amount_min": huge})
+    with pytest.raises(RuleValidationError):
+        RuleConditions(amount_min=Decimal(huge))
