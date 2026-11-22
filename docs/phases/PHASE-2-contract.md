@@ -43,9 +43,9 @@ is P10.
 | Piece | State | Where |
 |---|---|---|
 | F2 jobs | merged | ADR 0016 |
-| F2b job hardening (`enqueue(requested_by=)`) | **PR #32 open**: Bulwark BLOCK, 24 commits behind, conflicts with #31 on `worker/main.py` | `fix/F2b-job-hardening` |
+| F2b job hardening (`enqueue(requested_by=)`) | **PR #32**: APPROVE-WITH-NOTES at `82cff55`, including the `FOR KEY SHARE` fix; about to land | `fix/F2b-job-hardening` |
 | F5a `SecretToken` | merged | — |
-| F5c resolver, `hf1`, rotation, `resolve_outbound`, `0010_list_household_ids` | **PR #31 open**, no review | `feat/F5c-secret-resolver-rotation` |
+| F5c resolver, `hf1`, rotation (`rotation.TARGETS`), `resolve_outbound`, `0010_list_household_ids` | **merged** (#31, `afdc55b`). #63 (P3b, the client's low findings) also merged | `feat/F5c-secret-resolver-rotation` |
 | `hf2` (ciphertext bound to its row, ADR 0015 §6) | **not started** (F5d) | — |
 | F6 runs and `superseded_by_id` | merged | ADR 0017 |
 | Household-wide context guard | merged (#61) | — |
@@ -240,9 +240,9 @@ un-adopt. No API route calls them.
 *Trigger effects* (Phase 4 M3/M4, `transaction_supersede_repoint`, household-wide):
 - **NULL → value:** move `transfer_rejection`, `transfer_link` and `recurring_member` references
   from `old` to `new` (`INSERT … ON CONFLICT DO NOTHING`, then `DELETE`), and delete
-  `transfer_suggestion` rows that reference `old`.
+  `transfer_suggestion` and `transfer_leg_offer` rows (Phase 4 tables) that reference `old`.
 - **value → NULL:** move the same references from `OLD.superseded_by_id` back onto the row's id,
-  and delete suggestions that reference either id.
+  and delete `transfer_suggestion` and `transfer_leg_offer` rows that reference either id.
 
 *`unsupersede_transaction(old)`.* `old` must be superseded by a live `W`. Lock `old`, `W` and `W`'s
 group legs, in id order. Then:
@@ -337,7 +337,10 @@ the token frees, the following slice may take it once. Keel notes the skip in SP
    - add `adopted_at timestamptz NULL`
    - add the adoption trigger (ADR 0033 §6)
 5. `account_coverage(household_id, account_id, start_date, end_date, source_import_run_id)`:
-   forced RLS, the standard policy, written only household-wide or by the account's writer
+   forced RLS: `household_isolation`, plus the restrictive person policies of the account detail
+   tables. Read requires that the reader can see the account's details. Insert, update and delete
+   require that the reader can write the account, or a household-wide session. So a person can
+   neither read another person's coverage nor add coverage that hides their connector rows
    (ADR 0035 §1).
 6. `sync_run`: add `rows_superseded`, `rows_skipped_covered`, `rows_held` and `history_complete`.
 7. `job_run.requested_by uuid NULL` (FK to `person`, `ON DELETE SET NULL`), written by `enqueue`
@@ -437,13 +440,13 @@ review once. No more merging `main` into open PRs.
 
 | # | ID | Scope | Owner | Reviewers | Token | Depends | Acceptance evidence |
 |---|---|---|---|---|---|---|---|
-| 1 | **L1** | Land #31. Rebase once. Fix ADR 0015's stale `list_household_ids` paragraph | Harbor | **Bulwark** (full), Ledger | yes (0010) | — | SHA-bound verdicts. ADR 0015 tests. Up/down/up |
+| 1 | **L1** | **Done:** #31 merged as `afdc55b`, ADR 0015 paragraph fixed. Land #31. Rebase once. Fix ADR 0015's stale `list_household_ids` paragraph | Harbor | **Bulwark** (full), Ledger | yes (0010) | — | SHA-bound verdicts. ADR 0015 tests. Up/down/up |
 | 2 | **P1** | §3.1, §3.2 | Tide | Ledger, Bulwark | no | — | Contract suite. No `float` |
 | 3 | **F5d** | `hf2` envelope (ADR 0015 §6). `seal(value, ctx)` and `open(blob, ctx)` take `ctx = household_id\|table\|column\|<row key or setting name>`, authenticated as associated data under a key derived from the primary ring key. `get_secret` passes `(household_id, 'household_setting', 'value_enc', name)` and fails closed on a mismatch. The rotator opens and re-seals every row with its own context, refuses a mismatch, and upgrades `hf1` rows in the two gated columns to `hf2` | Harbor | **Bulwark** (full, protected paths) | no | L1 | For each gated column, a value copied to another household, row, column or setting name fails to open. Legacy and `hf1` values still open. The rotator tests pass with `hf2` |
-| 4 | **L2** | Land #32. Rebase once after L1, resolving `worker/main.py` | Lattice | **Bulwark** | no | L1 | Verdict at head. Confused-deputy and timeout tests. And the fix for Bulwark's #32 BLOCK: `_check_references` locks each `Ref` row `FOR KEY SHARE`, so Postgres applies the write policy. A test shows a person can't enqueue a job on another person's shared or summary_only account. |
-| 5 | **P4a** | §4 migration and resolver | Tide | **Bulwark** (RLS), Ledger | **yes, right after 0010** | L1 | RLS lint. No DELETE on `plaid_link_slot`. Two households, one client, one `reserved`. Trigger matrix including a sandbox connection refused. Backfill equality. Re-import after adoption lands on the same account. Up/down/up |
-| 6 | **H2** | `holdfast-instance` (real: bind mounts in a 0700 directory outside the repo, its own env file, no published DB or Redis port) and `holdfast-sandbox` (throwaway: fresh synthetic keys, `PLAID_ENV` forced to sandbox, another loopback port). `make` targets for both. A `.claude/hooks` guard that blocks `docker … prune` with volumes and `docker volume rm` | Harbor | **Bulwark** (compose, `.claude/`) | no | L1 | `check-compose-ports.py` extended. The sandbox api refuses `PLAID_ENV=production`. **`make down -v` in the main checkout leaves `holdfast-instance` intact.** The hook blocks the prune commands |
-| 7 | **P4-link** | Link plan, guard, idempotent exchange, `/link/token/get` resolve with a sealed `link_token_enc`, abandon, §5.1, `client_fp` check at use time, the coexistence rule (ADR 0033 §7) for links **and** for statement and CSV uploads (one check in `ImportService`; M1 adds it for manual accounts), `GET /connections`, the setup-check additions | Tide | **Bulwark**, Ledger | no | **F5d**, L2, P1, P4a | Guard at 7/8/9/10 and with an owner count above the ledger. An off-allowlist product gives `409`. Exchange retried after a crash makes no second connection. A second `public_token` is counted and flagged. `onExit` alone never abandons. Sandbox and real data refused both ways. Token and `link_token_enc` canaries. `link_token_enc` NULL after resolution |
+| 4 | **L2** | #32 has APPROVE-WITH-NOTES at `82cff55`, including the `FOR KEY SHARE` fix; landing next. Land #32. Rebase once after L1, resolving `worker/main.py` | Lattice | **Bulwark** | no | L1 | Verdict at head. Confused-deputy and timeout tests. And the fix for Bulwark's #32 BLOCK: `_check_references` locks each `Ref` row `FOR KEY SHARE`, so Postgres applies the write policy. A test shows a person can't enqueue a job on another person's shared or summary_only account. |
+| 5 | **P4a** | §4 migration and resolver | Tide | **Bulwark** (RLS), Ledger | **yes, right after 0010** | L1 | RLS lint. No DELETE on `plaid_link_slot`. Two households, one client, one `reserved`. Trigger matrix including a sandbox connection refused. Backfill equality. Re-import after adoption lands on the same account. Up/down/up. A person can't read or insert coverage on another person's private or shared account. |
+| 6 | **H2** | `holdfast-instance` (real: bind mounts in a 0700 directory outside the repo, its own env file, no published DB or Redis port) and `holdfast-sandbox` (throwaway: fresh synthetic keys, `PLAID_ENV` forced to sandbox, another loopback port). `make` targets for both. A `.claude/hooks` guard that blocks `docker … prune` with volumes and `docker volume rm`. The prune hook binds only Claude sessions, so it also blocks `rm` under the instance directory, and `instance-up` refuses to start unless that directory is mode 0700. The real-data instance's container socket and the session bus are on the hide list in `scripts/fc-hides.sh` (PR #64), and no Codex or Grok worker runs without it | Harbor | **Bulwark** (compose, `.claude/`) | no | L1 | `check-compose-ports.py` extended. The sandbox api refuses `PLAID_ENV=production`. **`make down -v` in the main checkout leaves `holdfast-instance` intact.** The hook blocks the prune commands |
+| 7 | **P4-link** | Link plan, guard, idempotent exchange, `/link/token/get` resolve with a sealed `link_token_enc`, abandon, §5.1, `client_fp` check at use time, the coexistence rule (ADR 0033 §7) for links **and** for statement and CSV uploads (one check in `ImportService`; M1 adds it for manual accounts), `GET /connections`, the setup-check additions. Adds `plaid_link_slot.link_token_enc` to `rotation.TARGETS` (context `household_id\|plaid_link_slot\|link_token_enc\|id`, NULL skipped) and to ADR 0015 §2's column list. | Tide | **Bulwark**, Ledger | no | **F5d**, L2, P1, P4a | Guard at 7/8/9/10 and with an owner count above the ledger. An off-allowlist product gives `409`. Exchange retried after a crash makes no second connection. A second `public_token` is counted and flagged. `onExit` alone never abandons. Sandbox and real data refused both ways. Token and `link_token_enc` canaries. `link_token_enc` NULL after resolution. The rotator re-seals a live `link_token_enc`, and the residual scan counts it. A sandbox token minted on an empty household is refused at exchange once an import exists. |
 | 8 | **P9b-link** | From P9a `d973679`: checklist, link-plan dialog (products, days, owner count with its named source, existing connections, slot phrase), Plaid Link button, reservation resolve, minimal connection list | Prism | Prism, Sounding, **Bulwark** | no | P4-link (mocks first) | 375 px. vitest: the phrase is required and the 11th is blocked |
 | 9 | **H1** | Runbook `docs/ops/backup.md`: `pg_dump` and document-store commands, key handling (ADR 0034 §5), the owner-only real-restore option. **One verified restore of a synthetic dump with a synthetic key in `holdfast-sandbox`** | Harbor | Bulwark | no | H2 | The restored synthetic instance opens a sealed canary with its key and refuses with another key. Evidence in the PR |
 | — | **M-link** | **Owner:** backup, enter the slot count, link one institution from the desktop on `holdfast-instance`. The Item is held in `pending_setup` | owner | Keel | — | 1–9, owner actions §12 | Slot ledger: one `linked` row. The owner confirms their count. Nothing ingested |
@@ -456,7 +459,7 @@ review once. No more merging `main` into open PRs.
 | 15 | **P2b** | §3.4, plus the matcher call in statement import | Tide | **Ledger**, Bulwark | no | P2a, P2m, P4a | Interleaving properties. **Sanitized trans≠post fixture: zero live duplicates.** Replay twice = zero writes |
 | 16 | **P4-map** | Decisions, `close`, un-adopt (ADR 0033 §5), `confirm_held` | Tide | **Bulwark**, Ledger | no | P2a, P2b, P4-preview | Adopt refused without preview, history or a reconciled run. Un-adopt then re-adopt then sync restores the same live multiset and balances. Cursor reset. Snapshots deleted. Unwritable account gives `404` |
 | 17 | **P5b** | `plaid.sync_item` job: apply in one transaction, cursor, `sync_run` counts, balance snapshots, deferral until history is complete, `ledger.refresh` enqueue, `client_changed` | Tide | **Ledger**, Bulwark | no | P2b, P5a, P4-map | Kill between pages, then resume: no duplicates. Cursor only on commit. `error_class` only |
-| 18 | **V1** | `connector_audit` as a one-off `audit` compose service with DB-only env (the app role, household-wide, read-only transaction, no Plaid keys). Counts only, opaque indexes | Tide | Sounding, **Bulwark** | no | P5b, H2 | Runs on synthetic data. The output schema has no names, masks, merchants or amounts. The container env has no `PLAID_*` |
+| 18 | **V1** | `connector_audit` as a one-off `audit` compose service with DB-only env (the app role, household-wide, read-only transaction, no Plaid keys). Counts only, opaque indexes. It runs `SET TRANSACTION READ ONLY` and publishes no port | Tide | Sounding, **Bulwark** | no | P5b, H2 | Runs on synthetic data. The output schema has no names, masks, merchants or amounts. The container env has no `PLAID_*` |
 | 19 | **RPL** | R1 recording replay in `holdfast-sandbox` (Sounding). The owner records once with sandbox keys. **No owner sandbox smoke** | Sounding | Keel | no | P5b, H2 | Replay ingests with zero duplicates. A second sync makes zero writes. `sandbox-destroy` afterwards |
 | — | **M-live** | **Owner** decides the mapping and syncs. Sounding runs V1 before, after the first sync, and after a second sync at least 6 hours later | owner, Sounding | Keel | — | 14–19 | §6.4 |
 
@@ -525,7 +528,7 @@ un-adopt (ADR 0033 §5), a fix, then another preview. No new Item is needed.
 | P2a | `backend/app/services/ledger_service.py`, `backend/app/domain/ledger_rules.py`, `backend/tests/ledger/test_ledger_sync_verbs.py`, `backend/tests/ledger/test_supersede_verbs.py`, `backend/tests/test_ledger_single_writer.py` |
 | P2b | `backend/app/services/ingest.py`, `backend/app/services/statement_import.py` (matcher call), `backend/tests/services/test_ingest*.py` |
 | P4a | `backend/migrations/versions/<n>_connector_link.py`, `backend/app/models/{accounts,connectors,imports,jobs}.py`, `backend/app/models/{__init__,_common}.py`, `backend/app/services/statement_accounts.py`, `backend/app/services/statement_import.py` (`_account`), `backend/tests/models/test_connector_link*.py`, `backend/tests/test_migrations.py` |
-| P4-link | `backend/app/integrations/plaid/{client,link}.py`, `backend/app/services/{plaid_link,plaid_slots,connections}.py`, `backend/app/services/plaid_setup.py`, `backend/app/services/imports.py` (coexistence check only), `backend/app/api/routes_connections.py`, `backend/app/schemas/connections.py`, `backend/app/config.py`, `.env.example`, tests, `web/src/api/schema.d.ts` |
+| P4-link | `backend/app/security/rotation.py` (the `TARGETS` entry only), `docs/adr/0015-*.md` (§2 column list), `backend/app/integrations/plaid/{client,link}.py`, `backend/app/services/{plaid_link,plaid_slots,connections}.py`, `backend/app/services/plaid_setup.py`, `backend/app/services/imports.py` (coexistence check only), `backend/app/api/routes_connections.py`, `backend/app/schemas/connections.py`, `backend/app/config.py`, `.env.example`, tests, `web/src/api/schema.d.ts` |
 | P5a | `backend/app/integrations/plaid/{sync,mapping}.py`, `scripts/record_plaid_sandbox.py`, `backend/tests/integrations/plaid/**`, `backend/tests/fixtures/plaid/**` |
 | P4-preview | `backend/app/services/connection_preview.py`, `backend/app/jobs/handlers/connection_preview.py`, `backend/app/jobs/{registry,runner}.py`, `backend/app/api/routes_connections.py` (preview routes), tests |
 | P4-map | `backend/app/services/{connection_decisions,unadopt}.py`, `backend/app/api/routes_connections.py` (decision routes), tests |
@@ -538,6 +541,25 @@ un-adopt (ADR 0033 §5), a fix, then another preview. No new Item is needed.
 C3e.
 
 ### 6.6 Brief notes per slice (Bulwark)
+- **F5d:** the API must accept a context that is not a table, for the Redis preview rows, and the
+  context still includes `household_id`. For example:
+  `household_id|redis|connection_preview|<connection_id>:<requested_by>`.
+- **P4a and P4-link:**
+  - Add `CHECK (state = 'reserved' OR link_token_enc IS NULL)`.
+  - A worker cron walks households with `list_household_ids()` and moves stale `reserved` rows to
+    `unknown`. `link-plan` and `link-token` do the same lazily for the caller's household.
+- **P4-map:**
+  - Un-adopt deletes only connector-sourced snapshots dated on or after `adopted_at`. M1 refuses
+    manual balances on adopted accounts.
+  - Bulwark rules in that review on assigning another person as owner of a `new` account.
+- **P5b and P7:** every scheduled job skips `pending_setup` connections. The M-link Item stays
+  untouched until its mapping is decided.
+- **H2:**
+  - The prune hook binds only Claude sessions, so H2 also blocks `rm` under the instance directory.
+  - `instance-up` refuses to start unless the directory is mode 0700.
+  - The real-data instance's container socket and the session bus are on the hide list in
+    `scripts/fc-hides.sh` (PR #64). No Codex or Grok worker runs without it.
+- **V1:** `SET TRANSACTION READ ONLY`, no published port.
 - **P4-link:**
   - Bind the `public_token` to its reservation: same household, `created_by_user_id` is the
     caller, state `reserved`.
@@ -589,11 +611,11 @@ C3e.
 ## 7. Open PRs and branches, in order
 1. **#56: merged** (`6fea745`). P4-link owns its follow-ups: `optional_products`, the slot count,
    product warnings and the `.env.example` default.
-2. **#31: land first** (L1). Full Bulwark review, rebase once, fix the stale ADR 0015 paragraph. It
+2. **#31: merged** (`afdc55b`, L1 done). It
    must merge before F5d, and F5d before P4, so the first access token is sealed as `hf2`, bound to
    its `bank_connection` row (ADR 0015 §6 gate).
-3. **#32: land after #31** (L2). Rebase once, resolve `worker/main.py`, and fix Bulwark's BLOCK
-   (`FOR KEY SHARE` in `_check_references`).
+3. **#32: lands next** (L2). APPROVE-WITH-NOTES at `82cff55`, which includes the `FOR KEY SHARE`
+   fix in `_check_references`.
 4. **`feat/P9a-plaid-setup-page`:**
    - Cherry-pick `d973679` into P9b-link and drop `6b8af28`.
    - The preview and decision views follow in P9b-map.

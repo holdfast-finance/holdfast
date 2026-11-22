@@ -109,8 +109,10 @@ uses too.
      Phase 4's `transaction_dissolve_orphan` raise `42501`. Un-adopt is then refused with
      `409 unadopt_blocked` and nothing changes.
    - ADR 0027 pairs only same-owner accounts, so this is rare.
-2. deletes `balance_snapshot` rows on the account with `as_of_date >= adopted_at`. Statement
-   import writes none.
+2. deletes only the connector-sourced `balance_snapshot` rows on the account dated on or after
+   `adopted_at`. `balance_snapshot` has no source column. Statement import writes none, and M1
+   refuses manual balances on an adopted account, so every snapshot dated on or after
+   `adopted_at` is connector-sourced.
 3. deletes `account_coverage` for the account.
 4. sets `source = 'import'`, `external_account_id = statement_key`, and NULL for
    `bank_connection_id` and `adopted_at`.
@@ -135,6 +137,10 @@ enforced in services, with a test for each direction:
 - A production Link token, a statement or CSV import, and a manual account are refused on a
   household with any sandbox connection (`409 sandbox_connection_present`). The fix is to remove
   the sandbox connection, which deletes its accounts and rows.
+
+Each check runs in the writing transaction, under one `pg_advisory_xact_lock` on the household
+shared by link-token, exchange, `ImportService` and M1. The exchange repeats the link-token check.
+Accounts and rows that belong to a sandbox connection are not real data.
 
 So a fresh real instance can't keep fake data after its first real import or link, and
 `PLAID_ENV` keeps its `sandbox` default (hard rule 4).

@@ -31,6 +31,11 @@ account_id, start_date, end_date, source_import_run_id)` rows in the adoption un
   a twin has rows for must therefore stay import-authoritative.
 - Overlapping intervals are merged. Coverage is fixed at adoption. Un-adopt deletes it, and
   re-adopt recomputes it.
+- **Policy:** forced RLS: `household_isolation`, plus the restrictive person policies of the
+  account detail tables. Read requires that the reader can see the account's details. Insert,
+  update and delete require that the reader can write the account, or a household-wide session.
+  So a person can neither read another person's coverage nor add coverage that hides their
+  connector rows.
 
 A **posted** connector row whose `posted_date` falls inside coverage (inclusive) is not inserted or
 updated. It is counted as `skipped_covered`, and a `removed` entry for it is a no-op. Rows in gaps,
