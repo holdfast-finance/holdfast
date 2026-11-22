@@ -10,7 +10,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check', 'dist')]
+        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'keys-add-missing', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check', 'dist')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -46,6 +46,7 @@ $Help = [ordered]@{
     'rotate-keys-prod' = 'rotate-keys against the prod stack (use this on a prod host)'
     'seed'    = 'Seed Plaid Sandbox data (placeholder until Phase 2)'
     'keys'    = 'Create .env from .env.example with fresh secrets (refuses to overwrite)'
+    'keys-add-missing' = 'Existing .env: add the generated values it lacks; never FERNET_KEY or the Postgres passwords'
     'check'   = 'lint + test'
     'health'  = 'GET /api/health through Caddy'
     'ports'   = 'Assert no compose service publishes beyond the rules'
@@ -59,6 +60,9 @@ $Help = [ordered]@{
 function Assert-Env {
     if (-not (Test-Path '.env')) {
         Write-Error "error: .env not found. Run './scripts/dev.ps1 keys' to create it from .env.example."
+    }
+    if ((Get-EnvValue 'REDIS_PASSWORD') -notmatch '^[A-Za-z0-9_-]+$') {
+        Write-Error "error: REDIS_PASSWORD is missing (or has characters outside A-Za-z0-9_-) in .env. Run './scripts/dev.ps1 keys-add-missing' (adds it, changes nothing else)."
     }
 }
 
@@ -111,7 +115,7 @@ function Invoke-Test {
                 $set += 'TEST_MIGRATIONS_DATABASE_URL'
             }
             if (-not $env:TEST_REDIS_URL) {
-                $env:TEST_REDIS_URL = 'redis://127.0.0.1:56379/15'
+                $env:TEST_REDIS_URL = "redis://:$(Get-EnvValue 'REDIS_PASSWORD')@127.0.0.1:56379/15"
                 $set += 'TEST_REDIS_URL'
             }
         }
@@ -166,6 +170,7 @@ switch ($Target) {
     'rotate-keys-prod' { Assert-Env; docker @ComposeProd run --rm --no-deps rotate-keys }
     'seed' { & $Python scripts/seed_sandbox.py }
     'keys' { & $Python scripts/gen-keys.py --write }
+    'keys-add-missing' { & $Python scripts/gen-keys.py --add-missing }
     'check' { Invoke-Lint; Invoke-Test }
     'health' { curl -fsSk https://localhost/api/health; Write-Host '' }
     'ports' {

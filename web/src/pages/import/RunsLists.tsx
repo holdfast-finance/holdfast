@@ -191,7 +191,7 @@ export function RunsSections({ onAccepted }: { onAccepted: (runId: string) => vo
         </h2>
         {all.length === 0 ? (
           <p className="rounded-card border border-border bg-card p-4 text-sm text-muted-foreground">
-            No imports yet. Choose a statement PDF above.
+            No imports yet. Choose a statement file above.
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-card border border-border bg-card">

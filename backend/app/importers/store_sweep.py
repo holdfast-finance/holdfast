@@ -75,7 +75,8 @@ async def sweep_store(
                 temps += 1
         candidates = {
             f"{STORE_SUBDIR}/{directory.name}/{p.name}": p
-            for p in directory.glob("*.pdf")
+            for ext in ("pdf", "csv", "ofx")
+            for p in directory.glob(f"*.{ext}")
             if not p.name.startswith(".") and p.is_file() and _old(p, cutoff)
         }
         if not candidates:

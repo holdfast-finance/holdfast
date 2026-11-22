@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Generate Holdfast secrets.
 
-    python3 scripts/gen-keys.py            # print FERNET_KEY / SESSION_SECRET / POSTGRES_*PASSWORD
+    python3 scripts/gen-keys.py            # print FERNET_KEY / SESSION_SECRET / POSTGRES_*PASSWORD / REDIS_PASSWORD
     python3 scripts/gen-keys.py --write    # create .env from .env.example with secrets filled in
     python3 scripts/gen-keys.py --write --force   # replace an existing .env
+    python3 scripts/gen-keys.py --add-missing     # existing .env: add only the generated values
+                                                  # it lacks (e.g. REDIS_PASSWORD); nothing else changes
 
 Stdlib only (uses `cryptography` for the Fernet key when it is installed; the fallback produces
 the identical format: urlsafe base64 of 32 random bytes). With --write nothing secret is printed.
@@ -36,11 +38,21 @@ def generate() -> dict[str, str]:
     return {
         "FERNET_KEY": fernet_key(),
         "SESSION_SECRET": secrets.token_urlsafe(48),
+        "IMPORT_ID_KEY": secrets.token_urlsafe(48),
         # urlsafe alphabet needs no escaping inside the database URLs.
         "POSTGRES_PASSWORD": secrets.token_urlsafe(32),
         "POSTGRES_OWNER_PASSWORD": secrets.token_urlsafe(32),
         "POSTGRES_APP_PASSWORD": secrets.token_urlsafe(32),
+        "REDIS_PASSWORD": secrets.token_urlsafe(32),
     }
+
+
+# Allowlist of generated keys safe to mint for an existing .env. A new generate() key is NOT added
+# automatically: a test forces a decision. Never FERNET_KEY or the Postgres passwords (they must
+# match stored ciphertext and the pgdata volume). IMPORT_ID_KEY is safe only because it is minted
+# only when absent: without it OFX uploads are refused, so no stored token depends on it.
+ADDABLE = ("REDIS_PASSWORD", "SESSION_SECRET", "IMPORT_ID_KEY")
+NEVER_ADDABLE = ("FERNET_KEY", "POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD", "POSTGRES_APP_PASSWORD")
 
 
 # URL key -> the password variable whose value replaces its CHANGE_ME placeholder.
@@ -50,7 +62,7 @@ URL_PASSWORDS = {
 }
 
 
-LINE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
+LINE = re.compile(r"^(?P<indent>\s*)(?:export\s+)?(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 
 
 def render(template: str, values: dict[str, str]) -> str:
@@ -99,16 +111,70 @@ def write_env(example: Path, target: Path, force: bool) -> int:
     return 0
 
 
+def add_missing(target: Path) -> int:
+    """Fill ADDABLE keys that are absent (or empty) in an existing .env. Other lines are kept
+    as they are, and no value is printed."""
+    if not target.is_file():
+        print(f"error: {target} not found; run 'make keys' to create it", file=sys.stderr)
+        return 1
+    lines = target.read_text(encoding="utf-8").splitlines()
+    present: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        m = LINE.match(line)
+        if m:
+            present[m["key"]] = i
+    values = generate()
+    added: list[str] = []
+    for key in ADDABLE:
+        if key not in values:
+            continue
+        if key in present:
+            current = LINE.match(lines[present[key]])
+            if current is not None and current["value"].strip() != "":
+                continue
+            stripped = lines[present[key]].lstrip()
+            indent = lines[present[key]][: len(lines[present[key]]) - len(stripped)]
+            prefix = "export " if stripped.startswith("export") else ""
+            lines[present[key]] = f"{indent}{prefix}{key}={values[key]}"
+        else:
+            lines.append(f"{key}={values[key]}")
+        added.append(key)
+    if not added:
+        print("nothing to add; .env already has every generated value")
+        return 0
+    fd, tmp = tempfile.mkstemp(prefix=".env.", dir=target.parent)
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    os.chmod(target, 0o600)
+    print(f"added to {target.name}: {', '.join(added)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--write", action="store_true", help="create .env from .env.example")
     p.add_argument("--force", action="store_true", help="with --write: overwrite an existing .env")
+    p.add_argument(
+        "--add-missing",
+        action="store_true",
+        help="append generated values an existing .env lacks (REDIS_PASSWORD); change nothing else",
+    )
     p.add_argument("--example", type=Path, default=ROOT / ".env.example", help=argparse.SUPPRESS)
     p.add_argument("--output", type=Path, default=ROOT / ".env", help=argparse.SUPPRESS)
     args = p.parse_args(argv)
 
+    if args.add_missing:
+        if args.write or args.force:
+            p.error("--add-missing can't be combined with --write or --force")
+        return add_missing(args.output)
     if args.write:
         return write_env(args.example, args.output, args.force)
     if args.force:
