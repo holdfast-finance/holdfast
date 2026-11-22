@@ -29,14 +29,16 @@ from app.integrations.plaid.client import (
     PlaidUnavailable,
     credentials_well_formed,
 )
-from app.models import BankConnection
+from app.models import BankConnection, PlaidLinkSlot
 from app.schemas.plaid import PlaidSetupOut
+from app.security import crypto
 from app.security.ratelimit import RateLimiter
 from app.security.secret_token import SecretToken
 from app.services import audit
 from app.services.context import RequestContext
 from app.services.errors import ApiError
 from app.services.household import require_owner
+from app.services.plaid_slots import client_fp, slot_count
 from app.services.sessions import Principal
 
 OAUTH_RETURN_PATH = "/plaid/oauth-return"
@@ -97,18 +99,42 @@ class PlaidSetupService:
             self.ctx.factory, self.principal.household_id, self.principal.person_id
         )
 
-    async def _production_items(self) -> int:
+    async def _ledger(self) -> tuple[int, int, int]:
+        """(slots used, tokens unreadable, ledger orphans) for this household and client."""
+        client_id, _secret = _plaid_keys(self.ctx.settings)
+        hid = self.principal.household_id
         async with self._session() as s:
-            count = await s.scalar(
-                select(func.count())
-                .select_from(BankConnection)
-                .where(BankConnection.provider == "plaid", BankConnection.env == "production")
+            used = (
+                await slot_count(s, client_fp(client_id), "production")
+                if client_id and self.ctx.settings.plaid_env == "production"
+                else 0
             )
-        return int(count or 0)
+            unreadable = 0
+            for conn in (
+                await s.execute(select(BankConnection).where(BankConnection.provider == "plaid"))
+            ).scalars():
+                try:
+                    # Opened without reveal(): only whether it opens matters.
+                    crypto.open(
+                        conn.access_token_enc,
+                        crypto.make_context(
+                            hid, "bank_connection", "access_token_enc", str(conn.id)
+                        ),
+                        key=self.ctx.settings.fernet_key,
+                    )
+                except crypto.CryptoError:
+                    unreadable += 1
+            orphans = await s.scalar(
+                select(func.count())
+                .select_from(PlaidLinkSlot)
+                .where(PlaidLinkSlot.state == "linked", PlaidLinkSlot.bank_connection_id.is_(None))
+            )
+        return used, unreadable, int(orphans or 0)
 
     async def _facts(self) -> pf.PreflightFacts:
         settings = self.ctx.settings
         client_id, secret = _plaid_keys(settings)
+        used, unreadable, orphans = await self._ledger()
         return pf.PreflightFacts(
             env=settings.plaid_env,
             has_client_id=bool(client_id),
@@ -116,7 +142,10 @@ class PlaidSetupService:
             products=tuple(settings.plaid_products),
             redirect_uri=settings.plaid_redirect_uri or None,
             suggested_redirect_uri=settings.app_base_url.rstrip("/") + OAUTH_RETURN_PATH,
-            production_items_used=await self._production_items(),
+            production_items_used=used,
+            tokens_unreadable=unreadable,
+            ledger_orphans=orphans,
+            webhook_url_set=bool(settings.plaid_webhook_url),
         )
 
     async def status(self) -> PlaidSetupOut:
@@ -258,6 +287,9 @@ def _with(
         redirect_uri=facts.redirect_uri,
         suggested_redirect_uri=facts.suggested_redirect_uri,
         production_items_used=facts.production_items_used,
+        tokens_unreadable=facts.tokens_unreadable,
+        ledger_orphans=facts.ledger_orphans,
+        webhook_url_set=facts.webhook_url_set,
         keys=keys,
         product_probes=product_probes or {},
         redirect=redirect,
@@ -282,5 +314,8 @@ def _out(result: pf.Preflight) -> PlaidSetupOut:
             "suggested_redirect_uri": result.suggested_redirect_uri,
             "item_slots_used": result.item_slots_used,
             "item_slots_total": result.item_slots_total,
+            "tokens_unreadable": result.tokens_unreadable,
+            "ledger_orphans": result.ledger_orphans,
+            "warnings": list(result.warnings),
         }
     )

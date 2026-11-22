@@ -11,7 +11,7 @@ import ast
 from pathlib import Path
 
 APP = Path(__file__).resolve().parents[1] / "app"
-ALLOWED = {"services/plaid_setup.py"}
+ALLOWED = {"services/plaid_setup.py", "services/plaid_link.py"}
 DEFINED_IN = "integrations/plaid/client.py"
 
 

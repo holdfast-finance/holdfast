@@ -37,9 +37,9 @@ The allowlist is the whole set of names, in that module: `plaid_client_id`, `pla
 
 Both modes return a `SecretToken`. The resolver does not call `reveal()`.
 
-### 2. Rotation of exactly three columns
+### 2. Rotation of exactly four columns
 
-`make rotate-keys` runs a one-off command (not an API route, not an arq job). It re-encrypts exactly these columns: `household_setting.value_enc`, `bank_connection.access_token_enc`, and `app_user.totp_secret_enc`. It does not filter on `household_setting.key`. It does not touch `password_hash`, WebAuthn columns, session hashes, or recovery-code hashes. A later ADR adds any new ciphertext column; until then the rotator list is these three.
+`make rotate-keys` runs a one-off command (not an API route, not an arq job). It re-encrypts exactly these columns: `household_setting.value_enc`, `bank_connection.access_token_enc`, `plaid_link_slot.link_token_enc` (added by P4-link under ADR 0034 §3: `hf2`, bound to `household_id|plaid_link_slot|link_token_enc|id`, NULL skipped because the token exists only while a reservation is open), and `app_user.totp_secret_enc`. It does not filter on `household_setting.key`. It does not touch `password_hash`, WebAuthn columns, session hashes, or recovery-code hashes. A later ADR adds any new ciphertext column; until then the rotator list is these four.
 
 `FERNET_KEY` is unchanged in shape. The command does not edit `.env` and does not drop old keys. Duplicate keys, or two keys with the same kid, in the ring fail startup of the api, the worker and the command (`DuplicateKeyError`).
 

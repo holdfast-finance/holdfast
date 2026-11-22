@@ -604,3 +604,59 @@ async def test_hf2_in_the_totp_column_fails_and_totp_stays_hf1(
     write(app_engine, world, "app_user", blob)
     counts = await run(factory, world)
     assert counts.failed == 1 and read(app_engine, world, "app_user") == blob
+
+
+async def test_live_link_token_is_resealed_and_counted_by_the_residual_scan(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    """``plaid_link_slot.link_token_enc`` is a rotator target (ADR 0015 section 2)."""
+    slot_id = uuid.uuid4()
+    ctx = crypto.make_context(world.household_id, "plaid_link_slot", "link_token_enc", str(slot_id))
+    canary = f"link-sandbox-{secrets.token_hex(8)}"
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        c.execute(
+            text(
+                "INSERT INTO plaid_link_slot (id, household_id, client_fp, env, state,"
+                " link_token_enc, created_by_user_id) VALUES (:i,:h,:f,'sandbox','reserved',:v,:u)"
+            ),
+            {
+                "i": slot_id,
+                "h": world.household_id,
+                "f": "0123456789abcdef",
+                "v": bound(canary, world.old, ctx),
+                "u": world.user_id,
+            },
+        )
+        # A resolved row has no token: NULL is skipped, never an error.
+        c.execute(
+            text(
+                "INSERT INTO plaid_link_slot (household_id, client_fp, env, state, resolved_at,"
+                " created_by_user_id) VALUES (:h,:f,'sandbox','abandoned',now(),:u)"
+            ),
+            {"h": world.household_id, "f": "0123456789abcdef", "u": world.user_id},
+        )
+    counts = await run(factory, world)
+    assert (counts.rotated, counts.failed, counts.residual) == (4, 0, 0)
+    assert counts.skipped_null >= 1
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        blob = bytes(
+            c.execute(
+                text("SELECT link_token_enc FROM plaid_link_slot WHERE id = :i"), {"i": slot_id}
+            ).scalar_one()
+        )
+    assert blob.startswith(f"hf2.{crypto.key_id(world.new)}.".encode())
+    assert crypto.open_with(blob, world.ring, ctx).reveal() == canary
+    # A token sealed for another row fails the row and shows up as residual.
+    other = crypto.make_context(world.household_id, "plaid_link_slot", "link_token_enc", "x")
+    with pytest.raises(crypto.CryptoError):
+        crypto.open_with(blob, world.ring, other)
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        c.execute(
+            text("UPDATE plaid_link_slot SET link_token_enc = :v WHERE id = :i"),
+            {"v": bound(canary, world.old, other), "i": slot_id},
+        )
+    broken = await run(factory, world)
+    assert broken.failed >= 1 and broken.residual >= 1 and not broken.clean
