@@ -1,66 +1,60 @@
 # Phase 2: connector-lane contract (every source into the owner's own instance)
 
-Spec: PLAN 3, 7, 13 Phase 2 and 3, and 20 (Section 20 wins). ROADMAP E2 (P1 to P10), S1, E3 (I1
-to I6) and 10a. ADRs 0007, 0008, 0011, 0015, 0016, 0017, 0019, 0021, 0022 and 0023 (PR #56), plus
-the new ADRs **0030** (SimpleFIN), **0032** (in-app key entry), **0033** (linked accounts adopt
-imported history) and **0034** (Plaid slot ledger). 0031 is taken by `docs/status-refresh-2026-11-21`.
-0023 and 0025 belong to the Plaid lane, and 0024 and 0026 to 0029 to PR #59.
+- Revision 2 (2026-11-21): the rework after Gadfly's REWORK-large
+  (`docs/phases/reviews/PHASE-2-contract-gadfly.md`, against revision 1 at `77aafbe`). Keel's
+  rulings on B1–B8 are applied. §14 answers every blocker and should-fix.
+- Spec: PLAN 3, 7, 13 Phase 2 and 3, and 20 (Section 20 wins). ROADMAP E2 (P1–P10), S1, E3 (I1–I6),
+  10a.
+- ADRs: 0007, 0008, 0011, 0015, 0016, 0017, 0019, 0021, 0022, 0023, and this lane's **0030**
+  (SimpleFIN, Proposed), **0032** (in-app key entry, Proposed), **0033** (adoption after a
+  dry-run preview), **0034** (per-client slot ledger) and **0035** (overlap matching and statement
+  horizon).
+- ADR numbers: 0031 is on main (#60). 0024 and 0026–0029 belong to PR #59. 0025 stays reserved for
+  the Plaid lane.
 
 This file is binding for every connector-lane story. A builder who must deviate says so in the PR
 body and asks Lattice for an amendment, which lands here before the code merges.
 
 **Goal (owner, 2026-11-21):** "hook up every connector with our data" and view it on the phone.
 
-**Milestone M-live:** the owner links one real institution through Plaid on their own instance and
-sees its transactions and balances. M-live is reached on the PC. The phone needs the ADR 0021 lane
-(section 10). PLAN 13 Phase 2 acceptance, which covers sandbox Items, relink and cursor restart, is
-still P10's job.
+**Milestone M-live:** the owner links one real institution through Plaid on their **dedicated
+instance**. Measured counts (§6.4) show the link created zero duplicates and that balances agree.
+M-live is reached on the PC. The phone needs the ADR 0021 lane (§11). PLAN 13 Phase 2 acceptance
+remains P10's job.
 
 ---
 
-## 0. What exists (checked on `origin/main` at `733132e`, and on every branch)
+## 0. What exists (`origin/main` at `6fea745`, and every branch)
 
 | Piece | State | Where |
 |---|---|---|
 | F2 jobs (registry, IDs-only payloads, per-household lock, `job_run`) | merged | `app/jobs/`, ADR 0016 |
-| F2b job hardening: confused deputy and stuck `running` ("must land before any API route enqueues jobs") | **PR #32, open** | `fix/F2b-job-hardening` |
+| F2b job hardening: confused deputy, stuck `running`, `enqueue(requested_by=)` | **PR #32 open**. 24 commits behind main, and conflicts with #31 on `backend/app/worker/main.py` | `fix/F2b-job-hardening` |
 | F5a `SecretToken` | merged | `app/security/secret_token.py` |
-| F5c resolver `get_secret`, `hf1` envelope, `rotate-keys`, outbound SSRF validator, migration `0010_list_household_ids` | **PR #31, open**, CI green, **no review yet** | `feat/F5c-secret-resolver-rotation` |
-| F6 `import_run`, `sync_run`, `superseded_by_id` | merged | `models/imports.py`, ADR 0017 |
-| `bank_connection`, `account`, `balance_snapshot`, holdings, investment txns, liabilities | merged (schema only) | `models/accounts.py`, `models/investments.py` |
-| Statement PDF import: upload API (21 MiB), reconcile, review reasons, wizard, review queue, Transactions screen | merged | `services/{imports,statement_import}.py`, `web/src/pages/{import,transactions}` |
-| PDF bank profiles | merged: 6 layouts, 2 institutions | `app/importers/profiles/` |
-| CSV/OFX parsers (pure) | merged (I2a) | `domain/{csv_parse,ofx_parse}.py` |
-| CSV/OFX import into the ledger | **I2b in progress** (branch, no commits yet) | `feat/I2b-csv-ofx-import` |
-| `LedgerWriter`, the one writer of money fields (insert with `skip_duplicates` only) | merged (C1) | `services/ledger_service.py` |
-| Category tree and Plaid PFC mapping | merged (C2) | ADR 0022 |
-| `app/integrations/plaid/` | **empty stub** on main | — |
-| P3 Plaid client (`httpx`, `parse_float=Decimal`, `request_id`, no `error_message`), setup checklist API, ADR 0023, `docs/setup/plaid.md` | **PR #56, open**. Bulwark APPROVE at `88dda90`; the head is now merge commit `cba7f7b`, so the sign-off is stale | `feat/P3-plaid-client-preflight` |
-| P9a Settings, Connections page (checklist UI) | **local branch only**, one commit `d973679`, stacked on P3's *first* commit `6b8af28`. Its own message says "not pushed yet" because the copy assumes `.env` keys | `feat/P9a-plaid-setup-page` |
-| **P1** `BankConnector`, registry, `FakeConnector` | **does not exist** on any branch | — |
-| **P2** `IngestService` | **does not exist** on any branch | — |
-| Cross-source supersession (Plaid wins) | **not built**. No code writes `superseded_by_id` | — |
-| SimpleFIN | not started. `Settings.simplefin_access_url` and the allowlist name exist | — |
-| Crypto Track (watch-only BTC and EVM, ChainSource, schema) | **local branch only**, 7 commits, base `1ddbd8e`. Its ADR is numbered 0020 and its migration 0007, and **both collide** with main | `feat/E10a-crypto-track` |
-| Manual accounts | schema allows `source = 'manual'`. No API, no UI | — |
-| Competitor exports, credit reports, tax documents | not started | — |
-| Phone access (ADR 0021 PA1, PA-D*) | design only (ADR 0021 Proposed) | — |
+| F5c `get_secret`, `hf1` envelope, `rotate-keys`, `resolve_outbound`, migration `0010_list_household_ids` | **PR #31 open**, CI green, no review | `feat/F5c-secret-resolver-rotation` |
+| F6 `import_run`, `sync_run`, `superseded_by_id` | merged | ADR 0017 |
+| Household-wide context guard (no `household_wide=True` from `app/api/`) | merged (#61) | `tests/test_household_wide_guard.py` |
+| Connector and investment schema (`bank_connection`, `account`, `balance_snapshot`, holdings, liabilities) | merged, schema only | `models/accounts.py`, `models/investments.py` |
+| Statement PDF import, wizard, review queue, Transactions screen | merged | `services/{imports,statement_import}.py` |
+| PDF profiles | merged: 6 layouts, 2 institutions. The card layout stores the **first** of two printed dates and drops the second. Interest and fee rows take the period end | `app/importers/profiles/` |
+| CSV/OFX parsers | merged (I2a). The import into the ledger (I2b) is in progress | `feat/I2b-csv-ofx-import` |
+| `LedgerWriter` (insert only; `_require_live` refuses edits to superseded rows) | merged (C1) | `services/ledger_service.py` |
+| Category tree and PFC mapping | merged (C2) | ADR 0022 |
+| **P3 Plaid client and setup checklist** | **merged (#56, `6fea745`)**. `link_token_create(products, transactions_days_requested, ...)` has **no `optional_products`**. The setup check reads `PLAID_PRODUCTS` and `PLAID_TX_DAYS_REQUESTED` | `integrations/plaid/client.py`, `services/plaid_setup.py`, ADR 0023 |
+| P9a Connections page | local branch, one commit `d973679` on top of P3's old first commit | `feat/P9a-plaid-setup-page` |
+| P1 `BankConnector`, P2 `IngestService`, supersession | **do not exist** on any branch | — |
+| Compose and env | `.env.example` ships `PLAID_PRODUCTS=transactions,auth,balance,investments,liabilities,statements` and `PLAID_TX_DAYS_REQUESTED=730`. Compose passes both through. Ports are fixed (`127.0.0.1:443`, 5432, 56379), so there is no second-instance support | `docker-compose*.yml` |
+| Backups | `scripts/backup.sh` exits 1, "not implemented yet (Phase 9)" | `scripts/` |
+| Crypto Track | local branch, 7 commits. ADR 0020 and migration 0007 collide with main | `feat/E10a-crypto-track` |
+| Manual accounts, competitor exports, credit, tax documents | not started | — |
+| Phone access | ADR 0021 Proposed, no code | — |
 
-**What skipping P1 and P2 costs.** The Plaid lane went straight from the client to the setup check.
-That was harmless so far, because nothing ingests yet. Building sync without P1 and P2 would cost
-three things:
-1. Upsert, pending-to-posted, `removed` and Plaid-wins logic would be written inside the Plaid sync
-   job and then again for SimpleFIN. That duplicates the money paths the carry-over rules exist to
-   keep single.
-2. There would be no cross-source dedupe. The owner has imported statements (ADR 0019) and will
-   link the same banks, so every overlap month would show twice.
-3. There would be no fake connector, so P5's job tests would need recorded Plaid traffic for every
-   case.
+**What skipping P1 and P2 costs.** Without them:
+- Plaid-wins dedupe, pending-to-posted and `removed` would live inside each connector.
+- The owner's imported history and the linked bank would be separate accounts, so every overlap
+  month would show twice.
 
-**Ruling: P1 and P2 are built before the first live sync, not after.** P1 is S and runs in
-parallel with the review-only PR landings. P2 is split into P2a (Ledger) and P2b (Tide) so neither
-is L. Statement import is not rewritten onto `IngestService`. It keeps its fingerprint path and only
-gains the reverse supersession call (P2b).
+**Ruling:** P1 and P2 are built before the first live sync.
 
 ---
 
@@ -70,19 +64,19 @@ Cost markers: **$** costs the owner money. **!** has an irreversible external ef
 
 | Source | State | Depends on | Owner must supply |
 |---|---|---|---|
-| **Plaid Transactions** | client and setup check in PR #56. Sync not started (P5) | L1, L2, L3, P1, P2a, P2b, P4a, P4, P5, P9b | Plaid account with **Trial approved** for production (free). Production client id and secret, entered in-app after K1 or kept in `.env` until then. The 10-slot plan (PLAN 3.2). **! Each production Item uses one of 10 lifetime slots. Deleting it does not return the slot.** Clicking Link and signing in to the bank (MFA) |
-| **Plaid Balances** | not started. From the `/transactions/sync` account block in P5; daily `/accounts/balance/get` in P6 | P5 | nothing beyond the Item |
-| **Plaid Investments** (401(k), HSA, brokerage) | not started (P6) | P5 | which login holds the 401(k) and which custodian holds the HSA (PLAN 3.1). **!** one slot per institution login |
-| **Plaid Liabilities** (cards, loans) | not started (P6) | P5 | nothing beyond the Item. The product must be on the Trial bundle (ADR 0023 lists it) |
-| **SimpleFIN** | not started (S1, ADR 0030) | P1, P2a, P2b, P5 | **$** a SimpleFIN Bridge subscription ($1.50/month or $15/year plus tax, up to 25 institutions). A setup token pasted in-app |
-| **Statement PDF** | **merged** (6 layouts, 2 institutions). Other layouts need a profile (`bank-profile` skill) | — | the PDFs, kept outside the repo (ADR 0019). Upload them through the Import wizard |
-| **CSV / OFX / QFX** | parsers merged. Import in progress (I2b) | I2b | bank-site downloads |
-| **Competitor exports** (Mint, YNAB, Monarch, Copilot) | not started (I3) | I2b | the export files, if any exist |
-| **Credit-report PDF** | not started (Phase 6, Q2) | Phase 6 | three AnnualCreditReport.com PDFs (free) |
-| **Crypto, watch-only**: xpub, descriptor, address | local branch `feat/E10a-crypto-track`, not a PR | X1 rebase, Cipher and Bulwark gates | public xpubs or descriptors exported from the hardware wallet, and addresses. An Electrum server (electrs or Fulcrum) and/or an EVM JSON-RPC endpoint the owner runs. Public endpoints are deferred and need the owner's opt-in to a privacy cost. **Never a seed or private key** |
-| **Crypto, read-only exchange key** (CCXT) | not started | X1, then X2 | a **read-only** API key per exchange. Keys with trade or withdraw rights are refused |
-| **Manual accounts** (balance entry) | not started (M1) | — | account names and balances, typed in. A cheap way to cover low-activity accounts without spending a Plaid slot |
-| **Tax documents** (W-2, 1099s, 1098, 5498-SA) | not started (Phase 7, `FEATURE_TAX`) | Phase 7 | the forms, kept outside the repo. Last year's return for validation |
+| **Plaid Transactions** | client merged. Sync not started (P5) | §6.1 path | Trial approved for production (free). Production keys in the **dedicated instance's** `.env` (in-app after K1). The slot plan (PLAN 3.2). **!** one of 10 lifetime slots per Item, not returned on delete. Dashboard Item count at each link. Bank sign-in and MFA |
+| **Plaid Balances** | not started. From the sync response in P5; daily `/accounts/balance/get` in P6 | P5 | — |
+| **Plaid Investments** (401(k), HSA, brokerage) | not started (P6) | P5 (path A) or before M-live (path B, §6.3) | which login holds the 401(k), the HSA custodian. **!** one slot per login |
+| **Plaid Liabilities** | not started (P6) | P5 | — |
+| **SimpleFIN** | not started. ADR 0030 is **Proposed** until the owner answers | M-live, P6, P7, M1 | **$** Bridge subscription ($1.50/month or $15/year plus tax). Worth it only if the slot plan exceeds 10 logins or an institution is missing from Plaid |
+| **Statement PDF** | merged (6 layouts) | — | PDFs from the private directory (ADR 0019) |
+| **CSV/OFX/QFX** | parsers merged. I2b in progress | I2b, which must use P4a's resolver (S3) | bank downloads |
+| **Competitor exports** | not started (I3) | I2b | export files, if any |
+| **Credit-report PDF** | Phase 6 (Q2) | — | three free reports |
+| **Crypto watch-only** (xpub, descriptor, address) | local branch (X1) | X1, Cipher and Bulwark | public xpubs or descriptors and addresses. An Electrum server and/or an EVM RPC endpoint you run. **Never a seed or private key** |
+| **Crypto exchange key** | not started (X2) | X1 | **read-only** keys |
+| **Manual accounts** | not started (M1) | — | names and balances. Free cover for low-activity accounts |
+| **Tax documents** | Phase 7, `FEATURE_TAX` | — | forms, last year's return |
 
 ---
 
@@ -90,18 +84,21 @@ Cost markers: **$** costs the owner money. **!** has an irreversible external ef
 
 | # | Question | Decision | Record |
 |---|---|---|---|
-| D1 | P1 and P2 before or after the first live sync | Before. P2 is split into P2a (writer verbs) and P2b (ingest) | §0 |
-| D2 | How Plaid keys get in | In-app entry. Exactly one source per key: env only, row only, or **conflict** when both exist. `PLAID_ENV` stays in `.env` | ADR 0032 |
-| D3 | Imported history versus linked accounts | At link time the person maps each connector account to an imported account or to "new". Adoption keeps the row. `account.statement_key` keeps statement import pointed at it | ADR 0033 |
-| D4 | Slot guard | `plaid_link_slot` ledger. Reserve at Link-token time. No DELETE. Unknown counts as used | ADR 0034 |
-| D5 | Plaid products requested at link | `products = ["transactions"]` for bank and card logins, `["investments"]` for retirement and HSA logins. `liabilities` and `investments` go through `optional_products` where the Trial allows it (**VERIFY** in P4 with the setup check's probe). **`auth` and `statements` are dropped from the defaults**: `auth` returns full account and routing numbers (data minimization), and statements are not needed for M-live | here |
-| D6 | History depth | `transactions.days_requested = 730` on every new Item. Plaid fixes it when the Item is created, so it is **irreversible**. A test pins it | here |
-| D7 | Cross-source dedupe for M-live | Exact multiset match on `(account_id, posted_date, amount)` between live connector rows and live import rows in the same account. Plaid wins. The fuzzy ±3-day match is I4, later | carry-over rule 1 |
-| D8 | Sync shape | One job run = one full `/transactions/sync` pagination loop held in memory, applied in **one** DB transaction together with `tx_cursor` and the `sync_run` success | ADR 0017, carry-over rule 4 |
-| D9 | Initial history without webhooks | P5 re-enqueues itself with backoff until `transactions_update_status = HISTORICAL_UPDATE_COMPLETE` (**VERIFY** the field against recorded sandbox output) | PLAN 7.4 (a) |
-| D10 | SimpleFIN credential | Access URL in `bank_connection.access_token_enc`. It is not a `get_secret` name. Setup token transient. Posted-only | ADR 0030 |
-| D11 | Link from the phone | Not for M-live. Link from the desktop browser (OAuth runs in a pop-up, so no redirect URI is needed). Phone Link needs an HTTPS redirect URI on the tailnet name, registered by the owner in Plaid's dashboard | ADR 0023, PLAN 7.3 |
-| D12 | Who may link | The household owner role, with a step-up re-auth within 5 minutes, for new Items, relinks, SimpleFIN claims and key entry | `.claude/rules/security.md` |
+| D1 | P1 and P2 before the first live sync | Yes. P2 is split into P2a (writer verbs) and P2b (ingest) | §0 |
+| D2 | Plaid key entry | In-app, with exactly one source per **key group**; both sources means conflict. Built **after** M-live (K1). `PLAID_ENV` stays in `.env` | ADR 0032 |
+| D3 | Imported history versus linked accounts | Dry-run preview with ranked candidates and evidence. Explicit adopt, new or ignore. Un-adopt in P4. Never automatic. A sandbox connection can never adopt | ADR 0033 |
+| D4 | Slot guard | Per-client ledger, reserved at token time, no DELETE. Every production link is confirmed against the dashboard count. `/link/token/get` resolves reservations | ADR 0034 |
+| D5 | Products | Built in code from `login_kind`. `bank_card`: `products = ["transactions"]`, `optional_products = ["liabilities"]`. `retirement_hsa`: `["investments"]`. `brokerage`: `["investments"]`. `auth` and `statements` are **refused**. **VERIFY** `optional_products` on Trial in P4 | §5.1 |
+| D6 | History depth | 730 days. Plaid fixes it per Item at creation (**irreversible**) | §5.1 |
+| D7 | Env overrides | When `PLAID_PRODUCTS` or `PLAID_TX_DAYS_REQUESTED` differ from D5 and D6, the link is blocked until the owner types the longer phrase naming the effective values (ADR 0034 §2). The setup check flags it. Owner action: delete both lines | §5.1 |
+| D8 | Overlap dedupe | Statement horizon, plus amount equality with a 3-day window against `posted_date` or `authorized_date`, plus a deterministic greedy tie-break | ADR 0035 |
+| D9 | Supersede | Carries category, splits, transfer membership, tax fields, receipt and notes. Phase 4 adds rejections and recurring members | §3.3 |
+| D10 | Sync shape | One full pagination run in memory, applied in **one** transaction together with `tx_cursor` and `sync_run` | ADR 0017 |
+| D11 | Initial history without webhooks | P5 re-enqueues with backoff until `transactions_update_status = HISTORICAL_UPDATE_COMPLETE`. **VERIFY** with R1's recording | PLAN 7.4 (a) |
+| D12 | Where sandbox runs | Only in a throwaway compose project (`holdfast-sandbox`). Code refuses a sandbox Link token on any household with an import run or a production connection | §6.1 H2, P4 |
+| D13 | Real data instance | A dedicated compose project with its own volumes and env file. The only place `PLAID_ENV=production` exists | §6.1 H2 |
+| D14 | Link from the phone | Not for M-live. Desktop only (OAuth pop-up). Phone Link needs a registered HTTPS redirect URI | ADR 0023 |
+| D15 | Who may link | The owner role, with step-up, for new Items, relinks, adoption, un-adopt, SimpleFIN claims and key entry | security rule |
 
 ---
 
@@ -114,10 +111,11 @@ class ConnectorAccount:
     external_account_id: str
     name: str
     official_name: str | None
-    mask: str | None                  # at most 4 digits; anything longer is cut to the last 4
-    type: AccountType                 # depository | credit | loan | investment | other
+    mask: str | None                  # at most 4 digits
+    type: AccountType
     subtype: str | None
     currency: str | None              # ISO 4217; None = unsupported, never stored
+    institution_name: str | None
 
 @dataclass(frozen=True)
 class ConnectorBalance:
@@ -151,357 +149,524 @@ class SyncBatch:
     next_cursor: str | None
     history_complete: bool
 ```
-Constructors refuse `float`, refuse amounts with more than 2 decimal places, and refuse a pending row
-that carries `pending_external_id`.
+Constructors refuse `float`, amounts with more than 2 decimal places, and a pending row that
+carries `pending_external_id`.
 
-### 3.2 Protocol and registry (P1): `backend/app/integrations/base.py`, `registry.py`, `fake.py`
+### 3.2 Protocol and registry (P1): `integrations/{base,registry,fake}.py`
 ```python
 class BankConnector(Protocol):
-    provider: ClassVar[str]                                   # "plaid" | "simplefin"
-    async def begin_link(self, ctx: LinkContext) -> LinkStart # Plaid: link token; SimpleFIN: create URL
+    provider: ClassVar[str]
+    async def begin_link(self, ctx: LinkContext) -> LinkStart
     async def complete_link(self, ctx: LinkContext, proof: SecretToken) -> LinkedConnection
     async def begin_relink(self, ctx: LinkContext, conn: ConnectionRef) -> LinkStart
     async def fetch(self, conn: ConnectionRef, credential: SecretToken,
                     cursor: str | None) -> SyncBatch          # one complete pagination run
-    def health(self, state: ConnectionState, now: datetime) -> ConnectorHealth   # pure, no I/O
+    def health(self, state: ConnectionState, now: datetime) -> ConnectorHealth   # pure
 ```
-- `LinkedConnection` carries `external_id`, `credential: SecretToken` (the access token or access
-  URL), `accounts`, `institution_name` and `client_fp`.
-- Errors are a single `ConnectorError(kind, code, request_id)` with these kinds: `needs_relink`,
-  `retryable`, `rate_limited`, `payment_required`, `revoked`, `client_changed` and `fatal`. It
-  carries no provider message text.
-- `registry.get(provider)` returns the connector. `registry.override(provider, impl)` exists for
-  tests only and is a context manager.
-- `FakeConnector` replays a scripted sequence of `SyncBatch` values and errors, including
-  mutation-during-pagination.
-- Routes and jobs depend on the protocol. Only `integrations/plaid/` and `integrations/simplefin/`
-  know a provider's wire format.
+- **Errors:** `ConnectorError(kind, code, request_id)`, where `kind` is one of `needs_relink`,
+  `retryable`, `rate_limited`, `payment_required`, `revoked`, `client_changed`, `fatal`. No
+  provider message text.
+- **Registry:** `registry.get(provider)` returns the connector. `registry.override` is a context
+  manager for tests only.
+- **`FakeConnector`:** replays scripted batches and errors, including mutation-during-pagination.
 
-### 3.3 Ledger writer sync verbs (P2a): `services/ledger_service.py`, Ledger's lane
+### 3.3 Ledger writer sync verbs (P2a): `services/ledger_service.py`
 ```python
 async def upsert_external(self, new: NewTransaction) -> UpsertOutcome   # inserted | updated | unchanged
 async def remove_external(self, account_id: UUID, external_id: str) -> bool
 async def post_pending(self, pending_external_id: str, posted: NewTransaction) -> UUID
 async def supersede(self, loser_id: UUID, winner_id: UUID) -> None
 ```
-- **`upsert_external`** matches on `(account_id, external_id)`. An update may change `amount`
-  (through `validate_amount`), the dates, the description, the merchant, the PFC fields and
-  `is_pending`. It never changes a category whose source is `user` or `rule`. When the amount
-  changes and splits exist, the splits are cleared and the outcome reports `splits_cleared`.
-- **`post_pending`** inserts the posted row and deletes the pending row in one unit of work. It
-  carries over the pending row's category (when the source outranks the posted row's), `notes` and
-  splits (only when the amount is unchanged).
-- **`supersede`** requires the same account, a live winner, a winner with a connector source and a
-  loser with `source = 'import'`. The winner takes the loser's category when the loser's source
-  outranks it, plus the loser's notes when the winner has none. The ADR 0017 triggers still guard
-  one-to-one and no chains.
-- None of these verbs is audited per row. The `sync_run` is the record (C1 docstring).
-- **File conflict:** Phase 4's C3b and C4c also edit `ledger_service.py`. Keel serializes P2a with
-  them, and whichever lands second rebases.
 
-### 3.4 IngestService (P2b): `backend/app/services/ingest.py`
-`IngestService(session).apply(connection_id, batch, sync_run_id) -> IngestCounts` runs in the job's
-household-wide session, inside the caller's single transaction. Steps:
-1. **Accounts.** Resolve each `ConnectorAccount` by `(bank_connection_id, external_account_id)`. A
-   new account is created only when the connection has a confirmed mapping (ADR 0033). An unmapped
-   account is skipped and counted. `currency is None` is skipped and counted as
-   `unsupported_currency`.
-2. **Balances.** Upsert `balance_snapshot` on `(account_id, as_of_date)`. Never sum.
-3. **`removed`** goes to `remove_external`.
-4. **`modified`, then `added`** go to `upsert_external`. A posted row with `pending_external_id`
-   that matches a live pending row goes to `post_pending` instead.
-5. **Categories.** Plaid rows get the ADR 0022 mapping as `category_source = 'plaid'`. When C3e has
-   merged, rules run inline first (ADR 0029 §1).
-6. **Supersession.** Pure `app/domain/supersede.py`, `match(connector_rows, import_rows) ->
-   list[(loser, winner)]`. For every `(account_id, posted_date, amount)` key it pairs the k-th
-   unmatched live import row with the k-th unmatched live posted connector row. Import rows are
-   ordered by `(import_fingerprint, id)` and connector rows by `(external_id)`. Pending rows never
-   take part. Each pair goes to `supersede`.
+**`upsert_external`**
+- Matches on `(account_id, external_id)`.
+- An update may change the amount (through `validate_amount`), dates, description, merchant, PFC
+  and `is_pending`.
+- It never replaces a `user` or `rule` category.
+- A changed amount clears splits and reports `splits_cleared`.
 
-`statement_import._import_block` calls the same matcher after inserting a block, so a statement
-imported after a sync is superseded by the connector rows already there. P2b owns that one call.
+**`post_pending`**
+- Inserts the posted row and deletes the pending row in one unit of work.
+- It carries the category (when it outranks), the notes, and the splits (only when the amount is
+  unchanged).
+
+**`supersede(loser, winner)`: the clause.** Keel passes the same text to the Phase 4 contract; it is
+recorded in `~/.local/state/holdfast-keel/supersede-clause.md`.
+
+*Preconditions.* If any fails, nothing is written and the result is `LedgerRuleError` or
+`SupersedeConflict`:
+- Same account.
+- The loser has `source = 'import'`.
+- The winner has a connector source and its connection has `env = 'production'`.
+- Both rows are live and not pending.
+- Exactly equal amounts.
+- When both are transfer legs, the same group. Otherwise `SupersedeConflict`, which is counted, and
+  both rows stay live.
+
+*Lock.* Lock the loser, the winner and every other leg of their groups, in id order.
+
+*Effects.* One unit of work, in this order. All of them happen before `superseded_by_id` is set,
+because `_require_live` refuses edits to a superseded row.
+1. **Category.** The winner takes the loser's `category_id` and `category_source` when the loser's
+   source outranks the winner's (user > rule > plaid > ml). From C3b on it also takes
+   `category_rule_id`, which **C3b adds**.
+2. **Splits.**
+   - The loser has splits and the winner has none: the loser's split rows move to the winner. The
+     sums hold because the amounts are equal.
+   - Both have splits: each keeps its own. Counted as `splits_kept_on_loser`.
+3. **Transfers.** No rejection row is written.
+   - The loser is paired in group `G` and the winner is in no transfer: the winner joins `G`
+     (`is_transfer`, `transfer_group_id = G`) and the loser leaves (`false`, `NULL`).
+   - The loser is single-marked: the winner becomes single-marked, and the loser is cleared.
+   - The winner is already in `G`: nothing changes.
+4. **Tax.** `winner.is_tax_relevant = winner OR loser`. `tax_tag` keeps the winner's value when it
+   has one; otherwise it takes the loser's.
+5. **Receipt.** `receipt_document_id` keeps the winner's value when it has one; otherwise it takes
+   the loser's.
+6. **Notes.** The winner's notes when non-empty, otherwise the loser's.
+7. **`transfer_rejection`.** Rows naming the loser are rewritten to the winner. A duplicate is
+   deleted. **C4c adds this.**
+8. **`recurring_member`.** The loser's rows move to the winner, or are deleted when the winner is
+   already in that series. Series state is unchanged. **C5b adds this.**
+9. **Transfer suggestions.** Rows naming the loser are deleted. **C4d adds this.**
+10. **Mark.** `loser.superseded_by_id = winner`. The loser keeps its fingerprint and run id, so a
+    re-import inserts nothing.
+
+*Reverse.* `remove_external` of a winner, and un-adopt:
+1. Clear the loser's `superseded_by_id` first.
+2. Move back from the winner to the loser:
+   - splits, when the loser has none
+   - transfer membership
+   - tax, receipt and notes, only where the loser's value is empty
+   - category, when the winner's source outranks the loser's
+   - rejections and members, through the C4c and C5b steps
+3. Delete the winner.
+
+Removing a transfer leg with no loser leaves its partner unpaired. No rejection row is written.
+
+None of these verbs is audited per row. `sync_run.rows_superseded` (P4a) counts them.
+
+### 3.4 IngestService (P2b): `services/ingest.py`
+`apply(connection_id, batch, sync_run_id) -> IngestCounts` runs in the job's household-wide
+session, inside the caller's one transaction:
+1. **Accounts.** Resolve each account through `connector_account_link` (ADR 0033 §1).
+   - `mapped`: ingest into the account.
+   - `ignored`: skip.
+   - unseen: insert a `pending` row and skip.
+   - `currency is None`: skip, counted as `unsupported_currency`.
+2. **Balances.** Upsert per `(account_id, as_of_date)`. Never summed.
+3. **Horizon.** Posted rows with `posted_date < account.connector_since` are dropped from `added`
+   and `modified`, counted as `skipped_before_horizon` (ADR 0035 §1).
+4. **Removals.** `removed` goes to `remove_external`. Then `modified` and `added` go to
+   `upsert_external`. A posted row whose `pending_external_id` names a live pending row goes to
+   `post_pending` instead.
+5. **Categories.** Plaid rows get the ADR 0022 mapping (`category_source = 'plaid'`). Inline rules
+   are added by **C3e** (it lands after P2b), with a test.
+6. **Matching.** `domain/supersede.py` runs ADR 0035 §2 to §4 for every touched account, and each
+   accepted edge goes to `supersede`. `statement_import` calls the same matcher after each block
+   insert; that call ships in **P4a's** PR (S2).
 
 **Invariants (property tests):**
-- Applying the same batch twice changes nothing.
-- 100 random interleavings of import blocks and sync batches over one synthetic month reach the
-  same end state. That means the same live row multiset per account and no live duplicate on
-  `(account_id, posted_date, amount)` beyond the true multiplicity.
-- No row is both superseded and a winner.
+- Replaying a batch twice makes zero writes.
+- 100 random interleavings of statement blocks and sync batches reach the same end state.
+- No row is both a loser and a winner.
+- The result doesn't depend on input order.
+- **Fixture gate:** sanitized real-layout card rows (`make sanitize`, ADR 0019) against synthetic
+  connector rows posted 0 to 3 days later, with `authorized_date` equal to the statement date, must
+  produce zero live duplicates before P2b merges.
 
 ---
 
-## 4. Schema: one migration in this lane before M-live
+## 4. Schema (one migration in this lane before M-live)
 
-The builder holding the token numbers it from the head at build time (Phase 4 contract §3 rule).
-The order is: PR #31's `0010_list_household_ids` (already numbered), then **P4a
-`<n>_connector_link`**. Phase 4's M1 to M4 may land between them. That changes numbers, not
-content. Conventions follow the Phase 1 contract and the migrations rule. Up/down/up as
-`holdfast_owner`, and the RLS lint applies.
+**Fixed migration-token order, shared with Phase 4.** Keel passes it on with the note.
+1. `0010_list_household_ids` (#31)
+2. M1 `<n>_rules` (C3b)
+3. **`<n>_connector_link` (P4a)**
+4. M2 `<n>_import_run_reason_final` (I1d)
+5. M3 `<n>_transfer_corrections` (C4c)
+6. M4 `<n>_recurring_series` (C5b)
+
+A builder may write the migration before holding the token, but numbers it from the head and
+rebases only once they hold it. If the next holder has no open PR one window after the token
+frees, the following slice may take it once. Keel notes the skip in SPRINTS.
+
+**Other shared files:**
+- `ledger_service.py`: P2a → C3b → C4c → C5b.
+- `statement_import.py`: P4a → C3e.
+- I2b uses P4a's resolver. If I2b lands first, P4a switches its call.
 
 **P4a `<n>_connector_link`:**
-1. `plaid_link_slot`, exactly as ADR 0034 §1: forced RLS, `household_isolation`, grants
-   SELECT/INSERT/UPDATE to `holdfast_app` with no DELETE, a transition trigger, a partial unique
-   index on one `reserved` row per `(household_id, client_fp, env)`, and an index on `household_id`.
-2. `bank_connection.client_fp text NULL` (16 lowercase hex characters, CHECK).
-   `bank_connection.status` gains `pending_setup`.
-3. `account.statement_key text NULL`, backfilled from `external_account_id` for
-   `source = 'import'`. `UNIQUE (household_id, statement_key) WHERE statement_key IS NOT NULL`
-   replaces `uq_account_household_id_external_account_id_import`. Downgrade restores the old index
-   from `statement_key`.
-4. The adoption trigger (ADR 0033 §4): `source` changes only `import` to `plaid`/`simplefin`, only
-   with a non-null `bank_connection_id` set in the same UPDATE, and never back.
-5. Same PR: `statement_import._account()` switches to `statement_key`, and its tests change.
-
-No other slice before M-live needs the token. P6 uses the existing `security`, `holding`,
-`investment_txn` and `liability` tables. If the P6 builder finds a missing unique key, that is a
-separate token request.
+1. `plaid_link_slot`, exactly as ADR 0034 §1:
+   - per-client unique `reserved` row
+   - no DELETE grant
+   - transition trigger
+   - `plaid_slot_count(client_fp, env)` `SECURITY DEFINER`, returning a count only, built on #31's
+     `list_household_ids` pattern
+2. `connector_account_link`, as ADR 0033 §1.
+3. `bank_connection`: add `client_fp text NULL` (16 lowercase hex, CHECK). `status` gains
+   `pending_setup`.
+4. `account`:
+   - Add `statement_key text NULL`, backfilled for `source = 'import'`. The new
+     `UNIQUE (household_id, statement_key) WHERE statement_key IS NOT NULL` replaces
+     `uq_account_household_id_external_account_id_import`. Downgrade restores the old index.
+   - Add `connector_since date NULL`.
+   - Add the adoption trigger, as ADR 0033 §6. That includes "the connection's `env` is
+     `production`".
+5. `sync_run`: add `rows_superseded`, `rows_skipped_horizon` and `history_complete`, all
+   non-negative and defaulting to 0 or false.
+6. In the same PR:
+   - `app/services/statement_accounts.py`, the one resolver, used by `statement_import._account()`
+     (and by I2b)
+   - the reverse matcher call in statement import
 
 ---
 
-## 5. API (all under `/api`, JSON, CSRF header, errors `{"error": {"code", "message"}}`)
+## 5. API and Plaid parameters
 
-| Method and path | Who | Body to response | Slice |
+### 5.1 Link parameters (P4)
+`login_kind` is required on every link plan.
+
+| `login_kind` | `products` | `optional_products` | `days_requested` |
 |---|---|---|---|
-| GET `/settings/secrets` | owner | `{items: [{name, state: not_set\|set_in_app\|set_in_env\|conflict}]}` | K1 |
-| PUT, DELETE `/settings/secrets/{name}` | owner + step-up | `{value}` → 204. `409 managed_in_env` | K1 |
-| GET `/plaid/setup` · POST `/plaid/setup/check` | owner | ADR 0023 checklist. `item_slots` switches to the ADR 0034 count in P4 | #56, P4 |
-| POST `/connections/plaid/link-token` | owner + step-up | `{mode: new\|update, connection_id?, confirm_phrase?}` → `{link_token, expiration, reservation_id?, slots: {used, limit: 10}}`. `409 confirm_required\|no_slots_left` | P4 |
-| POST `/connections/plaid/exchange` | owner | `{public_token, reservation_id}` → `{connection, accounts: [{external_account_id, name, mask, type, candidates: [{account_id, name, mask}]}]}`. Status `pending_setup` | P4 |
-| POST `/connections/plaid/reservations/{id}/exit` · `/abandon` | owner (abandon: step-up + phrase) | → 204 | P4 |
-| POST `/connections/{id}/accounts` | owner | `{mappings: [{external_account_id, adopt_account_id\|null, owner_person_id\|null, visibility}]}` → connection `active` and the initial sync enqueued | P4 |
-| GET `/connections` | member | `[{id, provider, institution_name, status, error_code, last_success_at, stale, accounts: [...]}]` plus `plaid_slots` | P4 (P8 extends) |
-| POST `/connections/{id}/sync` | owner | → `202 {job_run_id}`. Idempotency bucket of 15 minutes. SimpleFIN quota applies | P5 |
-| POST `/connections/simplefin/claim` | owner + step-up | `{setup_token}` → first `{host}` (a preview, nothing claimed), then a second call `{setup_token, confirm: true}` → exchange-shaped response | S1 |
-| GET `/sync-health` | member | per account: `status`, `last_success_at`, `stale` (> 48h), `error_code`, duplicate-cleanup counts. Amounts as strings | P8 |
+| `bank_card` | `transactions` | `liabilities` | 730 |
+| `retirement_hsa` | `investments` | — | — |
+| `brokerage` | `investments` | — | — |
 
-`public_token`, `setup_token`, access tokens and access URLs never appear in a response, a log
-line, an audit row, `job_run.payload` or a Redis key. A test greps captured logs for canaries of
-each.
+- `PLAID_PRODUCTS` is still read by the setup probe. For Link it is an **override**: when it differs
+  from the table, or `PLAID_TX_DAYS_REQUESTED` differs from 730, the link plan lists the deviation
+  and the token needs the longer phrase (ADR 0034 §2). The phrase shows a lower day count as
+  permanent.
+- `auth` and `statements` are refused for Link even if listed: `409 product_not_allowed`.
+  - `auth` would consent full account and routing numbers (data minimization).
+  - `statements` has no slice yet.
+- The setup check reports the env list as `products: warn` when it contains either.
+- P4 adds `optional_products` to `PlaidClient.link_token_create` and owns `client.py` for that
+  change.
+- **VERIFY** in P4 with the setup check's probe that `optional_products` is accepted on Trial. If
+  it isn't, `bank_card` drops to `["transactions"]`. P6 then adds liabilities in a later slice by
+  re-consent, and needs no new Item.
+
+### 5.2 Endpoints
+| Method and path | Who | Body and response | Slice |
+|---|---|---|---|
+| GET `/plaid/setup` · POST `/plaid/setup/check` | owner | ADR 0023 checklist. P4 switches `item_slots` to `plaid_slot_count` and adds `products: warn`, `tokens_unreadable` and `ledger_orphans` | merged, P4 |
+| POST `/connections/plaid/link-plan` | owner | `{login_kind, mode: new\|update, connection_id?}` → `{products, optional_products, days_requested, deviations, ledger_count, existing_connections, phrase_template}`. No Plaid call | P4 |
+| POST `/connections/plaid/link-token` | owner + step-up | `{login_kind, mode, connection_id?, dashboard_count, not_a_duplicate, confirm_phrase}` → `{link_token, expiration, reservation_id}`. `409 confirm_required\|no_slots_left\|product_not_allowed\|sandbox_on_real_data` | P4 |
+| POST `/connections/plaid/exchange` | owner | `{public_token, reservation_id}` → `{connection}` (status `pending_setup`). Idempotent on `reservation_id` | P4 |
+| POST `/connections/plaid/reservations/{id}/resolve` | owner | → the slot state after the `/link/token/get` check | P4 |
+| POST `/connections/plaid/reservations/{id}/abandon` | owner + step-up + phrase | → 204 (`unknown` → `abandoned`) | P4 |
+| POST `/connections/{id}/preview` · GET `/connections/{id}/preview` | owner | → `202 {job_run_id}` · → ADR 0033 §2 evidence (counts and dates) | P4 |
+| POST `/connections/{id}/accounts` | owner + step-up | `{decisions: [{external_account_id, action: adopt\|new\|ignore, account_id?, owner_person_id?, visibility?}], close?: [account_id]}` → connection `active`, initial sync enqueued. `409 preview_required\|account_has_other_connection` | P4 |
+| POST `/connections/{id}/accounts/{external_account_id}/unadopt` | owner + step-up | → 204 | P4 |
+| GET `/connections` | member | `[{id, provider, institution_name, env, status, error_code, last_success_at, pending_accounts, accounts}]` plus `plaid_slots` | P4 |
+| POST `/connections/{id}/sync` | owner | → `202`. 15-minute idempotency bucket | P5 |
+| GET, PUT, DELETE `/settings/secrets[/{name}]` | owner (+ step-up for writes) | ADR 0032 | K1 |
+| POST `/connections/simplefin/claim` | owner + step-up | preview `{host}`, then confirm | S1 |
+| GET `/sync-health` | member | per-account status, stale > 48h, error codes, cleanup counts | P8 |
+
+**Never in a response, a log, an audit row, a job payload or a Redis key:** `public_token`, setup
+tokens, access tokens, access URLs, or the client id in plaintext. A canary test covers each.
 
 ---
 
-## 6. Slices, in dependency order (one PR each)
+## 6. Slices (one PR each)
 
-Kinds: **land** (an existing PR), **pure**, **db** (needs Postgres), **web**. Bulwark gates every
-slice that touches auth, tokens, Plaid, `app/security/` or a migration. Ledger gates money paths,
-Prism gates `web/`, and Sounding gates acceptance.
+Kinds: **land** (an existing PR), **pure**, **db**, **web**, **ops**. Bulwark gates anything
+touching auth, tokens, Plaid, `app/security/`, compose or a migration. Ledger gates money paths.
+Prism gates `web/`. Sounding gates acceptance.
 
-### 6.1 To M-live
+**Process rule (S10):** no more merging `main` into open PR branches before review. Rebase once
+when the gate is ready, then review once.
+
+### 6.1 Path A to M-live (default: a bank or card login that has imported statements)
 
 | # | ID | Scope | Owner | Reviewers | Token | Depends | Acceptance evidence |
 |---|---|---|---|---|---|---|---|
-| 1 | **L1** | Land PR #31 (F5c). Fix its ADR 0015 text first: the "Amendment (F5c): builds without it" paragraph contradicts the shipped `0010_list_household_ids` migration | Harbor | **Bulwark** (protected paths), Ledger (migration) | **yes** (0010, already numbered; rebase only if the head moved) | — | `ci-required` green at head. SHA-bound Bulwark verdict. The ADR 0015 test list passes. Up/down/up |
-| 2 | **L2** | Land PR #32 (F2b) | Lattice | **Bulwark** | no | — | Bulwark verdict at head. Confused-deputy and timeout tests |
-| 3 | **L3** | Land PR #56 (P3) as is | Keel | **Bulwark** delta verdict at the merge head (`cba7f7b` or later). **Ledger** sign-off (lane reviewer: confirms no amount path) | no | — | Both verdicts name the head SHA. The `link_token_create` caller-pin test passes |
-| 4 | **P1** | §3.1 and §3.2, `FakeConnector`, contract tests | Tide | Ledger, Bulwark | no | — (runs alongside L1 to L3) | The contract suite runs against `FakeConnector`. Value types refuse `float` and 3-decimal amounts. import-linter passes |
-| 5 | **P2a** | §3.3 writer verbs + `test_ledger_single_writer` update | Ledger | Bulwark, Ledger (independent run) | no | P1 types only. Serialized with Phase 4 C3b and C4c | Table tests per verb. A user category survives `modified`. `post_pending` keeps notes and category. `supersede` refuses a cross-account pair, a chain or an import winner |
-| 6 | **P2b** | §3.4 `IngestService`, `domain/supersede.py`, reverse call in statement import | Tide | **Ledger**, Bulwark | no | P1, P2a | The 100-interleaving property test. Replay twice gives zero writes. A statement-after-sync overlap supersedes. A currency-less account is skipped |
-| 7 | **P4a** | §4 migration, models, `_account()` switch | Tide | **Bulwark** (RLS migration), Ledger | **yes** | L1 | RLS lint. DELETE as `holdfast_app` is refused. The transition trigger matrix. One reservation under two concurrent inserts. Backfill equality. Re-import of a statement after adoption lands on the same account. Up/down/up |
-| 8 | **P4** | Link-token, exchange, reservations, account mapping (ADR 0033), guard (ADR 0034), D5/D6 product defaults (`config.py`, `.env.example`), `client_fp`, enqueue of the initial sync. Plaid wire mapping for `/accounts/get` in `integrations/plaid/` | Tide | **Bulwark**, Ledger | no | L1, L2, L3, P1, P4a | Guard at 7, 8, 9 and 10. Deletion doesn't lower the count. A relink reserves nothing. `days_requested = 730` pinned. Step-up is enforced. No token in logs (canary). Candidates exclude invisible accounts |
-| 9 | **P5** | `plaid.sync_item` job: full pagination, mutation-restart, one-transaction apply + cursor + `sync_run`, balance snapshots from the sync response, follow-up enqueue until history is complete, `ledger.refresh` enqueue when registered (ADR 0029). Sign mapping for transactions and balances in `integrations/plaid/mapping.py` | Tide | **Ledger**, Bulwark | no | P2b, P4 | Recorded-fixture replay. A kill between pages, then resume, gives no duplicates and the old cursor. Mutation-during-pagination restarts from the saved cursor. Sign tests: debit, credit, card balance, loan balance. `removed` deletes. The pending→posted fixture |
-| 10 | **K1** | ADR 0032: `get_secret` change, `SecretConflict`, `/settings/secrets`, `plaid_credentials()` moves to `get_secret`, setup check reports `conflict` | Harbor | **Bulwark** | no | L1, L3 | ADR 0032 consequence tests. `GET` never echoes a canary. `PUT` with env set gives `409`. Rotation re-seals the new rows |
-| 11 | **P9b** | Rework of P9a: cherry-pick `d973679` onto main, copy for in-app keys, key-entry form (K1), Plaid Link button (Plaid's CDN script; the CSP already allows `cdn.plaid.com`), the account-mapping sheet, slot counter with typed phrase, connection list, "Sync now" | Prism | Prism (brand), Sounding, **Bulwark** (Link token handling in the browser) | no | P4 and K1 APIs (MSW mocks first) | 375 px screenshots. vitest: the phrase is required at 8 and the 11th is blocked in the UI. The mapping sheet never offers an account the API didn't return. No `/api` caching in the SW |
-| 12 | **G1** | Sandbox gate: end-to-end on recorded fixtures (Sounding), and the owner's sandbox smoke on their instance (`user_good`, then `user_transactions_dynamic`) | Sounding, then the owner | Keel | no | 1–11 | `docs/phases/PHASE-2-gate.md` with counts only. A re-sync is idempotent. A statement month that overlaps a sandbox link shows once |
-| — | **M-live** | **The owner** sets `PLAID_ENV=production`, enters production keys (K1) or leaves them in `.env`, links **one** institution from the desktop, maps its accounts, and checks transactions | owner | — | — | G1 | Owner says it works. Sounding records counts only (ADR 0019) |
+| 1 | **L1** | Land #31. Rebase once. Fix ADR 0015's stale "builds without `list_household_ids`" paragraph | Harbor | **Bulwark** (full, protected paths), Ledger | yes (0010) | — | SHA-bound verdicts. ADR 0015 test list. Up/down/up |
+| 2 | **L2** | Land #32. Rebase once onto main after L1, resolving `worker/main.py` | Lattice | **Bulwark** | no | L1 | Verdict at head. Confused-deputy and timeout tests |
+| 3 | **H2** | Two isolated compose projects. `holdfast-instance`: real data, own volumes, own env file outside the main checkout's `.env`, `PLAID_ENV` allowed to be `production`, no published DB or Redis port. `holdfast-sandbox`: throwaway, own volumes, own env with fresh `FERNET_KEY`, `PLAID_ENV` forced to `sandbox` at startup, Caddy on another loopback port. Both with `make` targets (`instance-up`, `sandbox-up`, `sandbox-destroy`). Agents' test stacks never use either | Harbor | **Bulwark** (compose) | no | — | `check-compose-ports.py` extended. The sandbox api refuses to start with `PLAID_ENV=production`. `make down` in the main checkout leaves both projects' volumes intact |
+| 4 | **H1** | Minimal `scripts/backup.sh` / `restore.sh`: `pg_dump` (custom format) plus the document store, into an owner-chosen directory off the machine. Prints the key-handling steps (ADR 0034 §5). A restore drill into `holdfast-sandbox` | Harbor | Bulwark | no | H2 | The drill restores a synthetic dataset, the restored instance opens a sealed canary with the kept key, and fails cleanly with a different key |
+| 5 | **P1** | §3.1, §3.2, `FakeConnector`, contract tests | Tide | Ledger, Bulwark | no | — | Contract suite. Value types refuse `float` and 3-decimal amounts. import-linter |
+| 6 | **P2a** | §3.3: verbs, the supersede clause steps 1–6 and 10 and its reverse, `SupersedeConflict`. Lands **before C3b** | Ledger | Bulwark, Ledger (independent run) | no | P1 types | A test per carried field (category, splits moved and kept, paired and single transfer, tax, receipt, notes) and its reverse. Conflict leaves both live. Single-writer lint |
+| 7 | **P2b** | §3.4, `domain/supersede.py` (ADR 0035) | Tide | **Ledger**, Bulwark | no | P1, P2a | ADR 0035 tests. Two-coffees table. Interleaving property. **Sanitized trans≠post fixture: zero live duplicates** |
+| 8 | **P4a** | §4 migration, models, resolver, reverse matcher call | Tide | **Bulwark** (RLS), Ledger | yes (after M1) | L1, P2b | RLS lint. No DELETE on `plaid_link_slot`. Two households, one client, one `reserved`. Transition matrix. The adoption trigger refuses a sandbox connection. Backfill equality. Re-import after adoption lands on the same account. Up/down/up |
+| 9 | **P4** | §5: link plan, guard (ADR 0034), idempotent exchange, `/link/token/get` resolution, preview job, decisions, un-adopt, sandbox refusal on real data, `optional_products` in `client.py`, D5–D7, `client_fp` check at use time | Tide | **Bulwark**, Ledger | no | L1, L2, P1, P4a | Guard at 7/8/9/10 and dashboard > ledger. A deviation needs the long phrase. `auth` refused. An exchange retried after a crash makes no second connection. `onExit` alone never abandons. Adopt without a preview gives `409`. Un-adopt restores the import rows. A sandbox token on a household with an import run gives `409`. Token canaries |
+| 10 | **P5** | `plaid.sync_item` job (§2 D10, D11). Balances from the sync response. Mapping signs in `integrations/plaid/mapping.py`. Enqueues `ledger.refresh` when registered. Plus **R1** `scripts/record_plaid_sandbox.py` (sandbox only; strips tokens and ids; writes `tests/fixtures/plaid/recorded/`) | Tide | **Ledger**, Bulwark | no | P2b, P4 | Hand-built fixtures: kill between pages, then resume, gives no duplicates and the old cursor. Mutation restart. Sign tests (debit, credit, card and loan balance). `removed`. Pending→posted. `client_changed`. Merges on hand-built fixtures. R1 output replays before SBX |
+| 11 | **V1** | `python -m app.tools.connector_audit`, read-only, counts only, opaque account indexes (§6.4) | Tide | Sounding, Bulwark | no | P5 | Runs on synthetic data. The output schema has no names, masks, merchants or amounts |
+| 12 | **P9b-min** | From P9a's `d973679` (cherry-pick onto main, drop `6b8af28`): setup checklist, link-plan dialog (products, days, dashboard count, the "not a duplicate" list, phrase), Plaid Link button, preview and decision sheet with evidence, un-adopt, "Sync now", minimal connection list. No key-entry form | Prism | Prism, Sounding, **Bulwark** | no | P4 API (mocks first) | 375 px. vitest: the phrase is required, the 11th is blocked, a deviation shows the long phrase, adopt is disabled until the preview loads |
+| 13 | **SBX** | Sandbox gate **in `holdfast-sandbox` only**: R1 recording replayed. Owner smoke (`user_good`, `user_transactions_dynamic`) creating only `new` accounts. A restore drill (H1). Then `sandbox-destroy` | Sounding, owner | Keel | no | 1–12 | `docs/phases/PHASE-2-gate.md`, counts only. Re-sync makes zero writes. The owner's real instance is untouched (V1 row counts on it before and after are equal) |
+| — | **M-live** | Owner: backup (H1), then link **one** institution on `holdfast-instance` from the desktop, run the preview, decide, sync. Sounding runs V1 before and after | owner, Sounding | Keel | — | SBX, owner preconditions (§12) | §6.4 numbers |
 
-**Estimate:** about 3 windows of agent time for rows 4–12, plus review latency on L1 to L3.
-- Wave 1: L1, L2, L3 reviews, P1 and P2a.
-- Wave 2: P2b, P4a and P9b against mocks.
-- Wave 3: P4 and K1.
-- Wave 4: P5.
-- Then G1.
+**Estimate (S10, restated):** **6–8 windows** of agent time to M-live.
+- Rows 1–2 are about 1 window of review (#31 alone is 1,671 lines on protected paths).
+- Rows 3–12 are 10 build slices with about 22 SHA-bound review runs.
+- The supersede clause and preview add real work to P2a and P4.
+- Owner steps come on top: Trial check, backups, dashboard reads, the link itself.
 
-### 6.2 After M-live (all connectors)
+### 6.2 After M-live
+| ID | Scope | Owner | Reviewers | Token | Depends |
+|---|---|---|---|---|---|
+| **K1** + **P9c** | ADR 0032 key entry, and the key-entry form on Connections | Harbor, Prism | **Bulwark**, Prism | no | L1, M-live |
+| **P6** | Investments (holdings, securities, investment txns), liabilities, daily balance. A sign test per product | Tide | Ledger, Bulwark | only if a key is missing | P5 |
+| **P7** | `needs_relink`, update mode, backoff, 6-hour cron at a per-connection minute, `seed_sandbox.py` | Tide (+ Harbor) | Bulwark | no | P5 |
+| **P8** | `/sync-health`, stale > 48h. Item replacement defined (plaid-over-plaid supersession for a disconnected connection's rows, or the documented refusal) | Tide | Ledger, Bulwark | maybe | P5 |
+| **P9d** | Sync Health page, relink | Prism | Prism, Sounding | no | P7, P8 |
+| **M1** | Manual accounts and balance entry (`source = 'manual'`) | Ledger (+ Prism) | Bulwark, Prism | no | — |
+| **I2b**, **I3**, **I4** | CSV/OFX (on P4a's resolver), competitor exports, wider overlap dedupe | Tide | Ledger | per brief | I2a, P2b |
+| **S1** | SimpleFIN (ADR 0030), only if the owner subscribes | Tide | **Bulwark**, Ledger | no | P6, P7, M1 |
+| **X1**, **X2** | Crypto Track rebase and renumber, then CCXT exchanges | Tide / Cipher | **Cipher**, **Bulwark** | yes | Keel's schedule |
+| **P10** | Phase 2 threat model and acceptance | Bulwark, Sounding | — | no | all |
 
-| ID | Scope | Owner | Reviewers | Token | Depends | Acceptance |
-|---|---|---|---|---|---|---|
-| **P6** | Investments (holdings, investment txns, securities), liabilities, daily `/accounts/balance/get`. A sign test per product | Tide | Ledger, Bulwark | only if a key is missing | P5 | One fixture test per product. Holdings quantities are `Decimal(28,10)`. Liability magnitudes are non-negative |
-| **P7** | `ITEM_LOGIN_REQUIRED` / `PENDING_EXPIRATION` → `needs_relink`, update-mode Link, backoff, a 6-hour poll cron at a per-connection minute, `scripts/seed_sandbox.py` (`/sandbox/public_token/create`) | Tide (+ Harbor for `scripts/`) | Bulwark | no | P5, L2 | A sandbox reset-login recovers in the same slot (fixture). The cron test uses a fake clock |
-| **P8** | `/sync-health`, stale > 48h, relink duplicate cleanup through `supersede` (reversible) | Tide | Ledger, Bulwark | no | P5 | Stale flag unit test. Duplicates after relink merged and restorable |
-| **P9c** | Sync Health page, relink button | Prism | Prism, Sounding | no | P8, P7 | 375 px. Relink opens update mode |
-| **S1** | SimpleFIN connector (ADR 0030): claim, fetch, windows, quota, errlist, allowlist name removed from `secrets.py` | Tide | **Bulwark** (protected path), Ledger | no | P1, P2b, P5 | ADR 0030 test list. Fixtures plus the Bridge demo token recorded once |
-| **I2b** | CSV/OFX import (in progress) | Tide | Ledger, Bulwark | per its brief | I2a | Re-import gives zero rows |
-| **M1** | Manual accounts: create, edit, balance entry (`source = 'manual'`). Web form in the same PR | Ledger (+ Prism web) | Bulwark, Prism | no | — | Writes go through services only. Balance sign tests for an asset and a loan |
-| **I3** | Mint, YNAB, Monarch and Copilot exports | Tide | Ledger | no | I2b | Each re-import gives zero rows |
-| **I4** | Fuzzy overlap dedupe (±3 days, unique match only, otherwise review) | Tide | Ledger | maybe | P2b | Overlap fixtures |
-| **X1** | Crypto Track branch: rebase onto main, renumber its ADR (next free number) and migration (next head at token time), split into ≤ M PRs | Cipher (build review) / Tide | **Cipher**, **Bulwark** | yes | Keel's schedule (ROADMAP puts 10a after Phase 5) | §9 rules. The branch's own tests at a fresh base |
-| **P10** | Phase 2 threat model and acceptance | Bulwark, Sounding | — | no | P1–P9c, S1 | `docs/phases/PHASE-2.md` PASS |
+### 6.3 Path B (an investment login first), and why A is the default
+| | Path A: statement-backed bank or card first (default) | Path B: 401(k), HSA or brokerage first |
+|---|---|---|
+| What the owner sees | transactions and balances for an account with history | holdings and balances only |
+| Extra slices before M-live | none beyond §6.1 | **P6h** (holdings and investment balances from P6) moves before M-live |
+| Slices that can move after M-live | none | P2b's supersession, the `statement_key`, `connector_since` and adoption trigger parts of P4a, and the preview. P4 keeps `new` and `ignore` only |
+| Risk | adoption and dedupe are proven on the first real link. The preview must be clean first, and un-adopt is the fallback | no dedupe risk on the first link. The hard path is proven later, on a second link |
+| Time to first link | 6–8 windows | about the same: P6h replaces the adoption work, and M-live-2 follows |
 
-### 6.3 File ownership per run
+Default: **A**, linked only after a dry-run preview shows the histories agree. That means
+`matched_before_horizon / (matched_before_horizon + connector_only_before_horizon) >= 0.95`, and
+every unmatched row is explained by the owner. Path B is planned only if the owner picks an
+investment login in Q2. The two paths are never planned together.
 
-| Slice | Owns (creates or edits) |
+### 6.4 M-live acceptance (B6): measured on the owner's instance, counts only
+Sounding runs V1 on `holdfast-instance` under ADR 0019. Per linked account, by opaque index:
+
+| # | Measure | Pass |
+|---|---|---|
+| 1 | `rows_before`: live rows in the account before the link. `rows_after`: after the initial sync completes | reported |
+| 2 | `inserted`, `superseded`, `skipped_before_horizon`, `unmatched_import_in_window`, `supersede_conflicts` | conflicts = 0 |
+| 3 | **Duplicates created:** live pairs (connector row, import row) on the account with equal amount and dates within 3 days (ADR 0035 `d`). The connector row is on or after `connector_since`; the import row can have any date, so pairs across the horizon boundary count | **0** |
+| 4 | Latest `sync_run` succeeded with `history_complete` | yes |
+| 5 | A second "Sync now" | 0 rows added, modified or superseded |
+| 6 | **Balance agreement:** expected = closing balance of the last reconciled statement + Σ live posted rows with `posted_date > H`. Compare with the connector's `current` (Holdfast sign). An account with no reconciled statement reports `n/a` | within $0.01, or within $0.01 once live pending rows are included, and the report says which |
+| 7 | Slot ledger | exactly one new `linked` row. The owner confirms the dashboard shows the same count |
+
+Any failure fails M-live. The fix is un-adopt (ADR 0033 §5), a code fix, then another preview. No
+new Item is needed.
+
+### 6.5 File ownership per run
+| Slice | Owns |
 |---|---|
-| P1 | `backend/app/domain/connector.py`, `backend/app/integrations/{base,registry,fake}.py`, `backend/tests/integrations/test_connector_contract.py`, `backend/tests/domain/test_connector_types.py` |
+| H2 | `docker-compose.instance.yml`, `docker-compose.sandbox.yml` (new), `Makefile` (targets), `scripts/check-compose-ports.py`, `scripts/dev.ps1`, `docs/ops/instances.md`, `backend/app/config.py` (startup refusal only) |
+| H1 | `scripts/backup.sh`, `scripts/restore.sh`, `scripts/tests/test_backup*.py`, `docs/ops/backup.md` |
+| P1 | `backend/app/domain/connector.py`, `backend/app/integrations/{base,registry,fake}.py`, tests |
 | P2a | `backend/app/services/ledger_service.py`, `backend/app/domain/ledger_rules.py`, `backend/tests/ledger/test_ledger_sync_verbs.py`, `backend/tests/test_ledger_single_writer.py` |
-| P2b | `backend/app/services/ingest.py`, `backend/app/domain/supersede.py`, `backend/app/services/statement_import.py` (one call), `backend/tests/services/test_ingest*.py`, `backend/tests/domain/test_supersede.py` |
-| P4a | `backend/migrations/versions/<n>_connector_link.py`, `backend/app/models/{accounts,connectors}.py`, `backend/app/models/__init__.py`, `backend/app/models/_common.py`, `backend/app/services/statement_import.py` (`_account`), `backend/tests/models/test_connector_link*.py`, `backend/tests/test_migrations.py` |
-| P4 | `backend/app/integrations/plaid/{link,mapping}.py`, `backend/app/services/{plaid_link,plaid_slots,connections}.py`, `backend/app/services/plaid_setup.py` (slot step), `backend/app/api/routes_connections.py`, `backend/app/schemas/connections.py`, `backend/app/config.py` (product defaults), `.env.example`, `backend/tests/api/test_connections*.py`, `backend/tests/services/test_plaid_slots.py`, `web/src/api/schema.d.ts` (generated) |
-| P5 | `backend/app/integrations/plaid/{sync,mapping}.py`, `backend/app/jobs/handlers/plaid_sync.py`, `backend/app/services/sync.py`, `backend/tests/integrations/plaid/**`, `backend/tests/fixtures/plaid/**` (synthetic) |
-| K1 | `backend/app/security/secrets.py`, `backend/app/services/secret_settings.py`, `backend/app/api/routes_settings_secrets.py`, `backend/app/schemas/settings.py`, `backend/app/services/plaid_setup.py` (`plaid_credentials`), `backend/tests/test_secrets.py`, `backend/tests/api/test_settings_secrets.py`, `docs/adr/0015-*.md` and `docs/adr/0023-*.md` (status lines), `docs/setup/plaid.md` |
-| P9b | `web/src/pages/settings/Connections*.tsx`, `web/src/pages/settings/plaidCopy.ts`, `web/src/features/connections/**` (new), `web/src/api/{plaid,connections,settings}.ts`, `web/src/mocks/{plaid,connections}.ts`, `web/src/mocks/handlers.ts`, `web/src/app/{routes,lazyRoutes}.tsx`, `web/package.json` and lockfile (only if a Link wrapper dependency is added; MIT license and maintenance checked) |
-| S1 | `backend/app/integrations/simplefin/**`, `backend/app/jobs/handlers/simplefin_sync.py`, `backend/app/services/simplefin_link.py`, `backend/app/api/routes_connections.py` (claim route), `backend/app/security/secrets.py` (remove one name), `backend/app/config.py`, `.env.example`, `backend/tests/integrations/simplefin/**` |
+| P2b | `backend/app/services/ingest.py`, `backend/app/domain/supersede.py`, `backend/tests/services/test_ingest*.py`, `backend/tests/domain/test_supersede*.py`, `backend/tests/fixtures/supersede/*.sanitized.*` |
+| P4a | `backend/migrations/versions/<n>_connector_link.py`, `backend/app/models/{accounts,connectors,imports}.py`, `backend/app/models/{__init__,_common}.py`, `backend/app/services/statement_accounts.py` (new), `backend/app/services/statement_import.py`, `backend/tests/models/test_connector_link*.py`, `backend/tests/test_migrations.py` |
+| P4 | `backend/app/integrations/plaid/{client,link,mapping}.py`, `backend/app/services/{plaid_link,plaid_slots,connections,connection_preview}.py`, `backend/app/services/plaid_setup.py`, `backend/app/jobs/handlers/connection_preview.py`, `backend/app/api/routes_connections.py`, `backend/app/schemas/connections.py`, `backend/tests/api/test_connections*.py`, `backend/tests/services/test_plaid_slots.py`, `web/src/api/schema.d.ts` (generated) |
+| P5 | `backend/app/integrations/plaid/{sync,mapping}.py`, `backend/app/jobs/handlers/plaid_sync.py`, `backend/app/services/sync.py`, `scripts/record_plaid_sandbox.py`, `backend/tests/integrations/plaid/**`, `backend/tests/fixtures/plaid/**` |
+| V1 | `backend/app/tools/connector_audit.py` (new package `app/tools/`), `backend/tests/tools/test_connector_audit.py` |
+| P9b-min | `web/src/pages/settings/Connections*.tsx`, `web/src/pages/settings/plaidCopy.ts`, `web/src/features/connections/**`, `web/src/api/{plaid,connections}.ts`, `web/src/mocks/{plaid,connections,handlers}.ts`, `web/src/app/{routes,lazyRoutes}.tsx` |
+| K1 | `backend/app/security/secrets.py`, `backend/app/services/secret_settings.py`, `backend/app/api/routes_settings_secrets.py`, `backend/app/schemas/settings.py`, `backend/app/services/plaid_setup.py`, tests, `docs/adr/0015-*.md` and `docs/adr/0023-*.md` (status lines), `docs/setup/plaid.md` |
 
-P4 and S1 both edit `routes_connections.py`. S1 starts after P4 merges.
-
----
-
-## 7. PR #56, PR #31, the P9a branch (and #32, E10a): what happens, in order
-
-1. **PR #31 (F5c): land** (L1). It has no review yet, and it touches protected paths
-   (`app/security/`, `docker-compose.yml`, `tests/conftest.py`), so a full Bulwark run is required.
-   Fix the ADR 0015 contradiction about `list_household_ids` in the same PR. It holds the migration
-   token for `0010`. It must merge before P4, so the first access token is sealed as `hf1` (ADR 0015
-   consequence) and not as a legacy row.
-2. **PR #32 (F2b): land** (L2) before P4, which is the first API route to enqueue a job.
-3. **PR #56 (P3): land as is** (L3). Steps 1–3 are independent, so merge whichever is green first.
-   It needs a new Bulwark verdict, because the APPROVE at `88dda90` is stale after merge commit
-   `cba7f7b`, plus a Ledger sign-off. No rework: `plaid_credentials()` is the one swap point, and
-   K1 does the swap. ADR 0023 §7 ("key entry is open") is settled by ADR 0032, and K1 edits its
-   status line.
-4. **Branch `feat/P9a-plaid-setup-page`: rework, then replace** (P9b). Its first commit `6b8af28`
-   is an old copy of P3, so drop it. Cherry-pick `d973679` onto main after #56 merges. Rewrite
-   `plaidCopy.ts` for in-app keys, add the P4 and K1 surfaces, and push it as
-   `feat/P9b-connections-page`. Keep the local branch until P9b merges, then delete it.
-5. **Branch `feat/E10a-crypto-track`: rework later** (X1). It is not on the M-live path. Renumber
-   ADR `0020-crypto-track-watch-only` and migration `0007_crypto_track` before any PR.
+P4 and P5 both edit `integrations/plaid/mapping.py`, so P5 starts after P4 merges. P2b and P4a both
+touch the matcher: P4a only calls it.
 
 ---
 
-## 8. Carry-over money rules (STATUS "Carry into Phase 2"), mapped to the slice that enforces each
+## 7. Open PRs and branches: what happens, in order
+1. **PR #56: merged** (`6fea745`). Its follow-ups belong to P4:
+   - `optional_products`
+   - the slot count
+   - the product warnings
+2. **PR #31: land first** (L1). Full Bulwark review. Rebase once. Fix the stale ADR 0015 paragraph.
+   It must merge before P4, so the first access token is sealed as `hf1`.
+3. **PR #32: land second** (L2). Rebase once onto main after #31, resolving `worker/main.py`. It
+   must merge before P4, the first route that enqueues a job.
+4. **Branch `feat/P9a-plaid-setup-page`: rework into P9b-min.**
+   - Cherry-pick `d973679` onto main. `6b8af28` is superseded by `6fea745`.
+   - Rewrite the copy for the dedicated instance and the link plan.
+   - Push as `feat/P9b-connections-min`. The key-entry form waits for K1.
+5. **Branch `feat/E10a-crypto-track`: rework later** (X1). Renumber the ADR and migration first.
+
+---
+
+## 8. Carry-over money rules, mapped to the slice that enforces each
 
 | Rule | Enforced by | Evidence |
 |---|---|---|
-| Dedupe Plaid against imported rows by `(account_id, posted_date, amount)`, Plaid wins | **P2b** (`supersede.py`, both directions). **P4a/P4** make it reachable by putting both in one account (ADR 0033) | Interleaving property test. Overlap month shows once (G1) |
-| Import fingerprint includes a same-day ordinal | **already on main** (`domain/fingerprint.py`, I1). P2b never fingerprints connector rows | Existing golden tests |
-| Pending→posted via `transaction.pending_external_id` | **P2a** (`post_pending`), **P5** (Plaid `pending_transaction_id` → `pending_external_id`). S1 is posted-only (ADR 0030) | Pending→posted fixture keeps category and notes |
-| Save `tx_cursor` only after its batch commits | **P5** (one transaction: batch, cursor, `sync_run` success). The `sync_run` CHECK is already merged (F6) | Kill-between-pages test |
-| Upsert on `(account_id, external_id)` and handle `removed` | **P2a** (`upsert_external`, `remove_external`), **P2b**, **P5** | Replay-twice test. `removed` fixture |
-| Parse Plaid JSON with `parse_float=Decimal` | **L3** (#56 client). **S1** does the same for SimpleFIN | Grep test: no `float` in the parse paths |
-| Negate Plaid signs once in `integrations/plaid/`, sign test per product | **P5** (transactions, balances), **P6** (investments, liabilities, balance get). `mapping.py` is the only negation site. **S1** asserts no negation | One sign test per product. A grep test: unary minus on `amount` only in `integrations/plaid/mapping.py` |
-| API amounts are strings, with an OpenAPI test | **already on main** (`MoneyStr`, `test_openapi_export.py`). Every new schema in P4, P8 and M1 uses `MoneyStr` | OpenAPI hash test |
-| Never sum across currencies | **P2b** (skips currency-less accounts), **S1** (custom currencies), **P8** (per-account values, no totals). Totals are Phase 5 | Custom-currency fixture |
-| Splits written through one domain service | **C1, merged**. **P2a** keeps splits inside `LedgerWriter` (`post_pending`, `upsert_external`, `supersede`) | Single-writer lint |
-| Transfer pairing is service-enforced | **C4, merged**. Connectors never set transfer fields. **P5** enqueues `ledger.refresh` (ADR 0029) | Single-writer lint. P5 enqueue test |
-| Metrics use `COALESCE(splits, parent)` and exclude `is_transfer` (and superseded rows, ADR 0017) | **Phase 5 B2**, not this lane. P8 reports no spend totals | B2 |
+| Dedupe Plaid against imported rows; Plaid wins. **Amended by ADR 0035**: horizon, plus amount with a 3-day window against `posted_date`/`authorized_date`, plus a deterministic tie-break | **P2b** (matcher), **P4a** (statement-side call, horizon column), **P4** (adoption brings both into one account) | ADR 0035 tests. Sanitized fixture. §6.4 measure 3 |
+| Import fingerprint with a same-day ordinal | already on main (I1). Used as the ADR 0035 tie-break key | golden tests |
+| Pending→posted via `pending_external_id` | **P2a**, **P5**. S1 is posted-only | fixture keeps category and notes |
+| `tx_cursor` only after the batch commits | **P5** | kill-between-pages test |
+| Upsert on `(account_id, external_id)`, handle `removed` | **P2a**, **P2b**, **P5** | replay-twice test |
+| `parse_float=Decimal` | merged (#56). **S1** too | grep test |
+| Negate Plaid signs once in `integrations/plaid/`, a test per product | **P5**, **P6** (`mapping.py` is the only site) | sign tests. Grep test |
+| API amounts are strings, with an OpenAPI test | merged (F3). Every new schema uses `MoneyStr` | OpenAPI hash |
+| Never sum across currencies | **P2b**, **S1**, **P8** | custom-currency fixture |
+| Splits through one domain service | C1 merged. **P2a** moves splits only inside `LedgerWriter` | single-writer lint |
+| Transfer pairing service-enforced | C4 merged. **P2a**'s supersede keeps pair rules. **P5** enqueues `ledger.refresh` | per-field tests |
+| Metrics: `COALESCE(splits, parent)`, exclude `is_transfer` and superseded rows | Phase 5 **B2**. Supersede moves splits and transfer state to the live row, which keeps this rule correct | B2 |
 
 ---
 
 ## 9. Secrets per connector (ADR 0015, amended by ADR 0032)
 
-| Secret | Kind | Stored | Entered by | Notes |
-|---|---|---|---|---|
-| `plaid_client_id`, `plaid_secret_sandbox`, `plaid_secret_production` | operator key (`get_secret`) | `self_host`: `.env` **or** `household_setting` (exactly one, both = conflict). `hosted`: `household_setting` only | owner on Settings → Connections (K1), or `.env` | `PLAID_ENV` stays in `.env` (ADR 0032 §4) |
-| Plaid access token | linked credential | `bank_connection.access_token_enc`, `hf1` | the exchange (P4), never a person | Opened only in the client call |
-| Plaid `public_token`, Link token | transient | never | Plaid Link | Never logged or audited. Link tokens are discarded after use |
-| Plaid cursor | not a secret | `bank_connection.tx_cursor`, plaintext (ADR 0017) | P5 | — |
-| SimpleFIN setup token | transient, one-time | never | owner pastes it (S1) | Claimed at once. A `403` means it may be compromised |
-| SimpleFIN access URL | linked credential | `bank_connection.access_token_enc`, `hf1` | the claim (S1) | Not a `get_secret` name (ADR 0030). `resolve_outbound` before every fetch |
-| Crypto endpoint URL (Electrum, EVM RPC) | may carry an API key | `household_setting` `crypto.endpoint.<chain>`, encrypted (E10a design) | owner | X1 decides whether it joins the `get_secret` allowlist. Rotation already covers the column |
-| Exchange API key, secret, passphrase | linked credential | `exchange_account.*_enc` (PLAN 18.5) | owner | Read-only only. A new ciphertext column needs a rotator ADR (ADR 0015 §2) |
-| `anthropic_api_key`, `openai_compat_api_key` | operator key | as for the Plaid keys | owner (K1 covers them) | Phase 8 |
+| Secret | Stored | Entered by | Notes |
+|---|---|---|---|
+| Plaid trio (client id, sandbox secret, production secret), one **group** | M-live: the dedicated instance's env file only. After K1: env **or** `household_setting`, the whole group from one source, both = conflict | owner | `PLAID_ENV` stays in env |
+| Plaid access token | `bank_connection.access_token_enc` (`hf1`) | exchange | committed before `/accounts/get` |
+| `public_token`, Link token | never (`link_token_fp` only) | Plaid Link | — |
+| Plaid cursor | `tx_cursor`, plaintext | P5 | ADR 0017 |
+| SimpleFIN setup token | never | owner | one-time |
+| SimpleFIN access URL | `bank_connection.access_token_enc` | claim | not a `get_secret` name |
+| Crypto endpoint URL | `household_setting` (encrypted) | owner | X1 decides the allowlist |
+| Exchange keys | `exchange_account.*_enc` | owner | read-only. A new column needs a rotator ADR |
+| AI keys | as for the Plaid group | owner | Phase 8 |
 
-**In-app Plaid key entry: the options and the choice.**
-- (A) Keep `.env` plus a `make plaid-keys` prompt. Rejected by the owner.
-- (B) The stored row overrides env.
+**In-app Plaid key entry: options and choice** (ADR 0032):
+- (A) `.env` plus a prompt. Rejected by the owner.
+- (B) The row overrides env.
 - (C) Env falls back to the row.
-- (D) Either source, but **both is a conflict**.
+- (D) **One source per key group; both = conflict.** Chosen.
 - (E) The API writes `.env`.
 
-**Chosen: D** (ADR 0032). It is the only option that keeps ADR 0015's rule that no source silently
-replaces or fills in another. It needs no restart and no new store, because rotation already covers
-`household_setting`. It also turns owner-queue item 1 into a concrete step: delete the production
-keys from the dev `.env` and enter them in the app.
+D keeps ADR 0015's rule that no source silently replaces or fills in another, needs no restart for
+in-app changes, and reuses a column the rotator already covers. Scheduled after M-live: the first
+link uses the dedicated instance's env file.
 
 ---
 
-## 10. Crypto 10a (slice level only) and the custody rules it must obey
+## 10. Crypto 10a (slice level) and the custody rules
 
-X1 brings the existing `feat/E10a-crypto-track` work onto main. That work is watch-only Bitcoin
-(xpubs and descriptors through embit), EVM addresses, a `ChainSource` port with Electrum and EVM
-JSON-RPC adapters and a fake, and the Track schema. It is rebased, the ADR and migration are
-renumbered, and it is split into PRs of at most M:
-- schema
-- pure domain plus the guard
-- adapters
-- service plus routes
+X1 brings `feat/E10a-crypto-track` onto main as PRs of at most M each:
+1. schema
+2. pure domain and the guard
+3. adapters (Electrum, EVM RPC, fake)
+4. service and routes
 
-Exchanges (CCXT, read-only keys) are a later slice, X2. Crypto rows reach net worth through Phase 5
-views, never through `IngestService`'s bank-transaction path. Hard rule 11, enforced by Cipher's
-gate on every X PR:
-- No input, field, parameter, log line or table may accept, store, log or transmit a seed phrase or
-  private key. The guard rejects `xprv`-family keys, WIF, 64-hex keys and word lists before any
-  parser runs, with a fixed error that never echoes the input.
-- Only xpubs, descriptors and addresses are stored. `CHECK (is_watch_only)` stays until a 10c
-  migration deliberately relaxes it.
-- No spend, PSBT or signer code in 10a. `FEATURE_CRYPTO_SPEND=false` and self-host only.
-- Exchange keys must be read-only. Keys that report trade or withdraw rights are refused (CHECK).
-  Otherwise a blocking warning is shown, and the key is Fernet-sealed.
-- No public chain endpoint without the owner's explicit, per-chain opt-in and the privacy warning.
-  No default URL in code.
+The ADR and migration are renumbered first. X2 adds CCXT with read-only keys. Crypto reaches net
+worth through Phase 5 views, never through `IngestService`.
+
+Hard rule 11, gated by Cipher on every X PR:
+- No seed phrase or private key is ever accepted, stored, logged or transmitted. A pure guard
+  rejects `xprv`-family keys, WIF, 64-hex keys and word lists before any parser runs, with a fixed
+  error.
+- Only xpubs, descriptors and addresses are stored, and `CHECK (is_watch_only)` stays until 10c.
+- No spend, PSBT or signer code. `FEATURE_CRYPTO_SPEND=false`, self-host only.
+- Exchange keys must be read-only. Trade or withdraw rights are refused, or a blocking warning is
+  shown where permissions aren't reported. Keys are sealed.
+- No public chain endpoint without a per-chain opt-in and the privacy warning. No default URL.
 
 ---
 
 ## 11. Fastest path for the owner's own instance
 
-**This week, with what is merged (`733132e`):**
-- **Statement PDFs: yes, now.** `make up && make migrate` on the owner's machine. Then Import → upload
-  the PDFs from the private directory (ADR 0019). The six merged layouts reconcile or land in the
-  review queue with a reason. The Transactions screen shows the rows, and categories exist. This
-  works on the PC at `https://localhost`.
-- **Everything else needs a merge first.** Nothing else on main ingests real data today.
+**Now, with what is merged:** statement PDFs through the Import wizard (6 layouts), the review
+queue and the Transactions screen.
+- Today this runs on the dev stack at `https://localhost`.
+- Once H2 merges, real data moves to `holdfast-instance`. That means re-importing from the private
+  directory; the dev stack's data is not migrated.
 
-**This week, if the lane runs as planned (about 3 windows plus reviews):**
-- **Plaid, one institution (M-live).** This needs rows 1–12, then the owner acts: confirm Trial
-  approval, pick the institution, and link from the desktop.
-  - Link an institution **without** imported statements first. That way M-live doesn't depend on
-    getting the adoption mapping right on the first try. Link a statement-backed institution second.
-  - Balances arrive with P5. Investments and liabilities wait for P6.
-- **CSV/OFX** when I2b merges.
+**Next:**
+- CSV/OFX when I2b lands on P4a's resolver.
+- Plaid M-live after §6.1, which is 6–8 windows plus the owner's preconditions.
 
 **Waits:**
-- SimpleFIN: S1 plus the owner's subscription.
-- Plaid investments and liabilities: P6.
-- Automatic polling: P7. Until then, use "Sync now".
-- Manual accounts: M1.
-- Competitor exports: I3.
-- Crypto: X1, on Keel's schedule.
-- Credit reports: Phase 6. Tax documents: Phase 7.
+- after M-live: K1, P6 (investments and liabilities), P7 (polling; until then "Sync now"), M1
+- SimpleFIN, only if subscribed
+- I3, crypto (X1)
+- Phase 6 credit, Phase 7 tax
 
-**The phone** is outside this lane. Merged code serves the PC on `localhost` only. The supported
-path is ADR 0021: PA1, or the smaller manual host path PA-D9 (Harbor, S, Bulwark gate). Keel can
-pull PA-D9 forward. Either way the owner installs Tailscale on the host and the phone. Until PA-D1
-there is one RP id, so passkeys must be registered at the tailnet name, and the PC then uses that
-name too. An ad-hoc `tailscale serve` in front of Caddy is not recommended: every phone request
-would look like `127.0.0.1` (`docs/ops/client-ip-check.md`).
+**The phone** is outside this lane: ADR 0021 PA1, or the smaller manual host path PA-D9 (Harbor,
+Bulwark). Keel can pull it forward.
+- The owner installs Tailscale on the host and the phone.
+- Until PA-D1 there is one RP id, so passkeys are registered at the tailnet name, and the PC uses
+  that name too.
+- An ad-hoc `tailscale serve` in front of Caddy is not recommended: every phone request would look
+  like `127.0.0.1`.
 
 ---
 
-## 12. Questions only the owner can answer
+## 12. Owner questions and actions
 
-1. **Is the Plaid Trial approved for production**, and does the dashboard list Transactions,
-   Investments and Liabilities? (Free. It blocks M-live.)
-2. **The 10-slot plan (PLAN 3.2).** Which logins get Plaid, which go to SimpleFIN, statements or
-   manual entry, and **which institution is linked first**? (Irreversible: each production Item
-   is one of 10 lifetime slots.)
-3. **SimpleFIN Bridge: subscribe or not?** ($1.50/month or $15/year plus tax.)
-4. **Production keys:** after K1, will you delete them from the dev `.env` and enter them in the
-   app (owner-queue item 1)? Until K1, M-live uses the `.env` keys you already have.
-5. **Sandbox gate (G1):** will you run the 10-minute sandbox smoke on your instance, or add
-   sandbox-only Plaid keys as a GitHub Actions secret so Sounding can run it? Agents never read
-   `.env`.
-6. **Which machine is "your instance"** for real data: the dev stack on this machine, or a separate
-   host (owner-queue item 3)? A separate compose project keeps agents' test stacks away from your
-   data.
-7. **Phone:** install Tailscale on the host and phone? Accept re-registering your passkey at the
-   tailnet name? Optionally, register `https://<tailnet name>/plaid/oauth-return` in Plaid's
-   dashboard so you can link from the phone later.
-8. **Crypto:** do you run an Electrum server and/or an EVM node? If not, do you accept a public
-   endpoint's privacy cost when that path is built? Which exchanges do you use, if any?
+**Questions only the owner can answer:**
+1. **Is the Plaid Trial approved for production?** Does the dashboard list Transactions, Liabilities
+   and Investments? Is the institution you'd link first an OAuth institution? OAuth institutions may
+   need the company profile and per-bank registration completed before production Link works
+   (**VERIFY**). Sandbox can't show this.
+2. **The slot plan (PLAN 3.2), and the first institution.** Path A (default) is a bank or card login
+   with imported statements, linked after a clean preview. Path B is a 401(k), HSA or brokerage
+   login, with holdings only at first (§6.3). **!** Each production Item is one of 10 lifetime
+   slots.
+3. **SimpleFIN Bridge: subscribe or not?** ($15/year.) Only worthwhile if your plan exceeds 10
+   logins or an institution is missing from Plaid. ADR 0030 stays Proposed until you answer.
+4. **Which machine and directory hosts `holdfast-instance`?** This is a precondition for SBX and
+   M-live, not a later question.
+5. **Sandbox keys for `holdfast-sandbox` and R1.** Will you paste them into that project's env file
+   and run the recording script, or add them as a GitHub Actions secret? Agents never read env files.
+6. **Backups:** where off the machine do the dumps go, and which password manager holds
+   `FERNET_KEY`?
+7. **Phone:** Tailscale on the host and phone, passkey at the tailnet name, and optionally the OAuth
+   redirect URI in Plaid's dashboard.
+8. **Crypto:** your own Electrum or EVM node, the public-endpoint privacy trade-off, and exchanges.
+9. **After M-live:** move the Plaid keys in-app (K1) and delete them from the env file?
+
+**Owner actions before M-live (S11):**
+1. Run H2's `instance-up` on the chosen machine, and enrol a passkey or TOTP there (step-up needs
+   it).
+2. In that instance's env file, set the production keys and `PLAID_ENV=production`, and **delete**
+   the `PLAID_PRODUCTS` and `PLAID_TX_DAYS_REQUESTED` lines. Then
+   `docker compose up -d --force-recreate api worker` for that project.
+3. Remove the production keys from the dev checkout's `.env` (owner-queue item 1).
+4. Take a backup (H1) and store `FERNET_KEY` separately. Take another right after the link.
+5. Before the link: read the production Item count in Plaid's dashboard and type it into the
+   link-plan dialog. Check the institution supports Transactions.
+6. At the mapping step: choose the owner and visibility for each account, and adopt only when the
+   preview's evidence agrees.
 
 ---
 
 ## 13. Out of this contract
-Plaid webhooks and Funnel (cut from Q1). The Plaid Statements product. An in-app Sandbox/Production
-switch (ADR 0032 §4). Hosted-mode shared operator keys and cross-household slot counts (ADR 0034).
-Credit (Phase 6), tax documents (Phase 7), crypto tax (10b), spend (10c). Plugin entry points for
-connectors (PLAN 20.3 "3+"). Un-adopting an account (ADR 0033 §5).
+Plaid webhooks and Funnel. The Statements product. An in-app Sandbox/Production switch. Hosted-mode
+shared keys across households. Phase 6, Phase 7, 10b and 10c. Plugin entry points. Description
+similarity in matching (I4).
+
+---
+
+## 14. Review responses (Gadfly, `docs/phases/reviews/PHASE-2-contract-gadfly.md`)
+
+Gadfly's factual claims were checked against the code before building on them:
+- The card profile captures the first of two printed dates (lines 20 and 23), and interest takes
+  the period end (line 3).
+- The import key is `profile:last4:block`.
+- `.env.example` line 62 lists `auth` and `statements`, and compose passes both variables through.
+- `link_token_create` has no `optional_products`.
+- `scripts/backup.sh` exits 1.
+- `pair_transfers` skips superseded rows.
+- `_require_live` refuses edits to superseded rows.
+
+The owner's `.env` was not read. B4 is reasoned from `.env.example`, compose and `config.py`. The
+claim that `make keys` copied the example into the owner's `.env` is consistent with
+`gen-keys.py --write` but is unverified. The fix doesn't depend on it.
+
+### Blockers
+| # | Accepted | How it is closed | Where |
+|---|---|---|---|
+| B1 | yes (Keel ruling) | Statement horizon `connector_since`, fixed at adoption. Amount plus `d <= 3` against `posted_date` or `authorized_date`. A deterministic greedy tie-break with the two-coffees case stated. A sanitized trans≠post fixture gates P2b. Keel ruled "deterministic tie-break" over Gadfly's "ties go to review" | ADR 0035, §3.4, §8 |
+| B2 | yes | Dry-run preview job with evidence counts. Ranked (not filtered) candidates. `adopt`, `new` or `ignore`. `close` for twins. Adopt refused without a fresh preview. Un-adopt in P4 with a reverse trigger path | ADR 0033 rev. 2, §5.2, §6.1 P4 |
+| B3 | yes | The full supersede clause and its reverse. Steps named per slice (P2a, C3b, C4c, C4d, C5b). The note for PR #59 is in `~/.local/state/holdfast-keel/supersede-clause.md` | §3.3 |
+| B4 | yes (Keel ruling) | Products built from `login_kind`. Env deviations block until the long phrase names the effective products and days. `auth` and `statements` refused. Setup check warns. `optional_products` added to the client. Owner action to delete both lines. **Narrowing:** `auth` is refused outright, not just confirmable, under the data-minimization rule | §5.1, ADR 0034 §2, §12 |
+| B5 | yes (Keel ruling) | SBX runs only in `holdfast-sandbox` (H2). A sandbox token on a household with real data gives `409`. A sandbox connection can never adopt: trigger, candidate query and supersede precondition, each tested. Q4 is a precondition | §2 D12–D13, §6.1, ADR 0033 §6 |
+| B6 | yes (Keel ruling) | V1 audit. Counts only, run by Sounding under ADR 0019: rows before and after, duplicates created = 0, idempotent second sync, balance agreement within $0.01, slot ledger versus dashboard | §6.4 |
+| B7 | yes (Keel ruling) | Both orders presented with trade-offs. Default A: a statement-backed login after a clean preview, with a stated threshold. B is planned only if Q2 picks it | §6.3, Q2 |
+| B8 | yes (Keel ruling) | The restore, fresh-install and new-key outcomes stated plainly. Ledger keyed by client with a count function. Dashboard count typed on every production link. `tokens_unreadable` and `ledger_orphans` checks. Backup items and the H1 drill are preconditions | ADR 0034 rev. 2 §4–§5, §6.1 H1 |
+
+### Should-fixes
+| # | Response |
+|---|---|
+| S1 | **Accepted.** K1 and the key form move after M-live. P9b is cut to P9b-min. The path is 10 build slices plus 2 landings (H1, H2 and V1 were added by B5, B6 and B8) |
+| S2 | **Accepted.** Fixed token order and file orders in §4, shared with Phase 4 through the note. P2b's statement-import call moves into P4a |
+| S3 | **Accepted.** P4a extracts `statement_accounts.py`. I2b must use it, and P4a switches I2b if I2b lands first |
+| S4 | **Accepted.** `/link/token/get` resolution (**VERIFY** on Trial, with a fallback rule). Idempotent exchange. Commit before `/accounts/get`. `onExit` only triggers a check. Duplicate-login list required. The Trial-limit code and where it surfaces are **VERIFY** |
+| S5 | **Accepted.** The trio is one key group. `client_fp` compared at use time (P4, P5). A conflict is one banner and leaves connection status alone. The recreate step is in the copy and owner actions |
+| S6 | **Accepted.** Unseen accounts go to `pending` in `connector_account_link`. Adopting an account with another connection's live rows is refused until P8 defines replacement, and P8's text no longer claims `supersede` covers it |
+| S7 | **Accepted.** C3e adds inline rules to `IngestService`, with a test (P2b lands first by the §4 order) |
+| S8 | **Accepted, changed.** P5 merges on hand-built fixtures. R1, the recording script, ships in P5. Recorded output is required before SBX, not before P5. Q5 asks for the keys |
+| S9 | **Accepted.** S1 moves after P6, P7 and M1, and only if the owner subscribes. The backfill walks 8 windows regardless of empty windows. Status is per `conn_id`. Q3 is reworded. ADR 0030 is Proposed |
+| S10 | **Accepted.** 6–8 windows. Rebase once, review once. Stale SHAs removed (#56 is merged) |
+| S11 | **Accepted.** All seven actions are in §12. The passkey enrolment and the dashboard read are tied to H2 and the link-plan dialog |

@@ -1,6 +1,8 @@
 # 0030. SimpleFIN connector next to Plaid
 
-- Status: Accepted
+- Status: Proposed (revision 2, after Gadfly's S9). It stays Proposed until the owner says yes or
+  no to the Bridge subscription. Building it is deferred until after the first Plaid link (Keel,
+  2026-11-21).
 - Date: 2026-11-21
 - Deciders: Lattice (architect). Keel schedules it. Subscribing costs the owner money, so whether
   the owner's own instance uses it is an owner-queue item.
@@ -72,17 +74,21 @@ the Bridge's developer, pricing and security pages, all read on 2026-11-21:
 5. **Quirk handling, fixed in S1:**
    - **No pending rows.** S1 never sends `pending=1`. Without a pending-to-posted link, pending rows
      would be orphaned.
-   - **Windows.** The initial backfill walks back in 90-day windows until a window comes back empty
-     or 8 windows have run (about 24 months). It stays under 12 requests in the first day. A
+   - **Windows.** The initial backfill walks back in 90-day windows for 8 windows (about 24
+     months, 8 requests, because one request covers every account). An empty window does **not**
+     stop it, because a quiet savings account can have empty quarters. It stops early only when the
+     window start is before `extra.account-open-date` for every account that reports one. A
      scheduled sync fetches from `cursor - 5 days` to now, in one request. The cursor is
      `sf1:<epoch seconds>`, the end of the last committed window, and is written in the same
      transaction as the batch (ADR 0017).
    - **Schedule.** One sync per connection every 6 hours, at a minute derived from the connection
      id. A per-connection budget of 20 requests per rolling 24 hours is enforced before every
      request. "Sync now" counts against it.
-   - **Errors.** `errlist` entries map to connection status. `con.auth` marks the affected accounts'
-     connection `needs_relink`. `act.*` is a per-account warning in Sync Health. `gen.*` fails the
-     run. `402` gives status `error`, code `payment_required`. `403` gives `needs_relink`, code
+   - **Errors, keyed per bank login.** One access URL spans up to 25 banks, so status is kept per
+     `conn_id`, on `connector_account_link.status_code` for that login's accounts (ADR 0033), never
+     on the whole `bank_connection`. `con.auth` marks only that login's accounts `needs_relink`, and
+     the other banks keep syncing. `act.*` is a per-account warning in Sync Health. `gen.*` fails
+     the run. `402` gives status `error`, code `payment_required`. `403` gives `needs_relink`, code
      `revoked`. Message text is stored only after sanitizing: control characters stripped, length
      capped at 200, rendered as text and never as HTML. It is never logged.
    - **Currency.** An account whose `currency` is not a three-letter ISO code is skipped, and Sync
@@ -93,9 +99,13 @@ the Bridge's developer, pricing and security pages, all read on 2026-11-21:
    - **Parsing.** Amounts are parsed with `Decimal(str)` from the numeric string and refused if they
      have more than 2 decimal places. JSON is parsed with `parse_float=Decimal` as a backstop.
    - **Investments.** Balance snapshots only. No holdings.
-6. **When.** After the first live Plaid sync path exists (P5), and in parallel with P6 and P7. S1
-   reuses P1, P2a and P2b unchanged. It needs no migration: `bank_connection.provider` already
-   allows `simplefin`.
+   - **Categories.** SimpleFIN rows carry no PFC, so they arrive uncategorized until rules
+     (Phase 4) categorize them. The Connections copy says so.
+6. **When.** After M-live, P6, P7 and M1, and only if the owner subscribes. For this owner it is
+   worth it only if the slot plan exceeds 10 logins, or for an institution Plaid lacks: M1 manual
+   accounts cover low-activity accounts for free. S1 reuses P1, P2a, P2b and P4a unchanged. It needs
+   no migration: `bank_connection.provider` already allows `simplefin`, and
+   `connector_account_link` carries per-login status.
 
 ## Alternatives considered
 - **Plaid only:** the 10-Item lifetime cap forces people with many institutions onto statements, and
@@ -113,7 +123,8 @@ the Bridge's developer, pricing and security pages, all read on 2026-11-21:
 - The owner decides whether to subscribe (money). Without a subscription, S1 is still built and
   tested against recorded fixtures and the Bridge's reusable demo token.
 - People get a no-slot path for institutions that Plaid's Trial would otherwise spend a slot on.
-- Data is daily and posted-only. Sync Health shows "updates daily" for SimpleFIN connections.
+- Data is daily, posted-only, uncategorized and holdings-free, and it passes through two third
+  parties. Sync Health shows "updates daily" for SimpleFIN connections.
 - S1 edits `app/security/secrets.py` (protected path) to drop the allowlist name, so it needs a
   Bulwark verdict.
 - Tests: recorded, sanitized JSON only, with the socket guard on. Fixtures cover claim `200` and
