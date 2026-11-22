@@ -19,6 +19,7 @@ from app.jobs import queue
 from app.jobs.registry import discover_jobs
 from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function
 from app.logging import configure_logging, get_logger
+from app.security import crypto
 
 log = get_logger(__name__)
 
@@ -34,6 +35,8 @@ async def heartbeat(ctx: dict[str, Any]) -> None:
 
 async def startup(ctx: dict[str, Any]) -> None:
     configure_logging()
+    if (key := get_settings().fernet_key) is not None:
+        crypto.load_ring(key)  # malformed or duplicate keys fail startup
     engine = create_engine(get_settings())
     ctx[CTX_KEY] = RunnerDeps(engine=engine, factory=create_session_factory(engine))
     log.info("worker.startup", version=__version__, jobs=len(discover_jobs()))
