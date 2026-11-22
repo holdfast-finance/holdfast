@@ -50,6 +50,50 @@ Process notes from W1:
 
 Notes: Codex ran its own setup in the main checkout (uncommitted `AGENTS.md` edit, `.codex/`, `.agents/`). Untouched by Keel; reconcile with #8 (which owns AGENTS.md) next window, and read `.codex/hooks/patch.py` before committing any of it.
 
+### Checkpoint 2026-11-20 — owner stop and usage limit
+
+`main` was at `0633604`. Merged in this window: #18, #21, #17, #19, #20, #22, #23, #25, #24, #26.
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| F3c MoneyStr, PriceStr, QuantityStr | #27 | money review APPROVE, then merged `2b4a61e` | — |
+| F7b free-tier main guard | #16 | open, Harbor fixed Bulwark's empty-listing finding | Bulwark re-review, then land |
+| S0 statement sanitizer | #29 | merged `7916e34` | — |
+| F5c secret resolver and rotation | #31 | open, conflicted with main at the stop | merge main, rerun suite, Bulwark |
+| F6 import and sync runs | #28 | merged `6a6c8fa` | — |
+| F2b job hardening | #32 | open | Bulwark |
+| Codex and Grok onboarding | #8 | open, conflicting | reconcile into one PR, Bulwark |
+| Dependabot #11 to #14 | — | closed | — |
+
+### Checkpoint 2026-11-21 — `main` at `733132e`
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| I1 PDF statement import, I1b, I1c, I5b upload API | #40, #41, #48, #46, #55 | merged | follow-ups below |
+| U1 accounts and transactions read API and screen | #42 | merged | — |
+| C1 one ledger writer | #44 | merged | — |
+| I2a CSV and OFX/QFX parsers (pure) | #45 | merged | wire into the import service |
+| C2 category tree and Plaid mapping | #47 | merged | — |
+| I5 import wizard, needs-review queue, I5c stored reason | #49, #57 | merged | web follow-ups |
+| C5a recurring detection (pure), C5a-2 | #52, #58 | merged | storage, job and screen; off the event loop |
+| C3a rules matcher (pure) | #53 | merged | C3b needs an ADR for a linear-time regex engine first |
+| C4 transfer pairing | #50 | merged, not wired (a guard test blocks callers) | C6 stores suggestions per person under RLS |
+| ADR 0021 zero-config private access | #51 | merged as Proposed | owner checks, then Accepted |
+| Phase 4 wiring contract | #59 | open | Gadfly, Bulwark, then slices |
+| P3 Plaid client and checklist | #56 | open, other lane | that lane decides |
+| F5c, F7b, F2b | #31, #16, #32 | open | as above |
+
+Queued follow-ups:
+- Import: freeze `review_reason` in `import_run_guard`; report an ignored profile; an audited re-import action; balance-only documents that stay latched; year ambiguity in periods of 11 months or more.
+- Web: copy for a balanced run with no reason; unknown result codes; Retry error text; the shell remount that drops the result card.
+- Guard tests for `app.household_wide`; ADR 0021 open points.
+- Docs: this refresh. ADR 0031 names the dependencies that had none.
+
+Process notes:
+- `firstchair delegate` bases the worktree on the checkout it runs from. Pass `--repo` for work on a PR branch.
+- Codex cannot run database tests or `pnpm`. Keel applies its patch and runs the suite. Reviewers rerun with their own data.
+- A Grok review is a second opinion. It does not satisfy `review-gate`.
+
 ## Sprint 2 (W2) — Phase 1.5, wave 2 (planned)
 **First:** F7b free-tier CI (ADR 0013, owner: no paid plans) · resume F3 · Bulwark re-review #8 (first PR to exercise `review-gate`; verify it reports on the head SHA) · F8b, F10b follow-ups.
 F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migration (schema run) · F11 trunk-model skills + PR template · F12 e2e in CI · Phase 1.5 acceptance (Sounding) · tag `phase-1.5`.
@@ -57,6 +101,8 @@ F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migratio
 ## Standups
 
 ```
+W2b · done: #40 to #58 (I1, I5, C1 to C5a, ADR 0021); phases 3 and 4 in progress on trunk · doing: Phase 4 wiring contract (#59), Plaid P3 (#56) · blocked: C3b needs a regex-engine ADR; live instance upgrade waits on the owner · tokens: Codex about 6.4M input, Claude builders 65k to 175k each
+W2a · done: #18 to #27, #29, #28 (F2, F3b/c, F5a, F6, F10b/c, S0) · doing: F5c, F7b, F2b reviews · blocked: weekly limit at the stop · tokens: limit
 W1b · done: F1 (#4), F10 (#6), F8 (#7) · doing: F7, F9 reviews; #8 re-review; F3 · blocked: weekly limit (all accounts) · tokens: limit
 W1 · done: F4 (#2) · doing: — (stopped by owner) · blocked: none · open: #3 F7, #4 F1, WIP F9/F10 · tokens: ~1.3M subagent this window
 W0 · done: Phase 1 merged + tagged; round table (7 memos + challenge); roadmap, SDLC, routing, roster, agent defs · doing: — · blocked: none · tokens: ~0.6M output this session
