@@ -8,15 +8,16 @@ export function ImportPage() {
   const [result, setResult] = useState<ImportResult | null>(null)
 
   const markAccepted = (runId: string) => {
-    setResult((current) =>
-      current && {
-        ...current,
-        blocks: current.blocks.map((block) =>
-          block.run_id === runId
-            ? { ...block, reconcile_status: 'accepted', reason: null }
-            : block,
-        ),
-      },
+    setResult(
+      (current) =>
+        current && {
+          ...current,
+          blocks: current.blocks.map((block) =>
+            block.run_id === runId
+              ? { ...block, reconcile_status: 'accepted', reason: null }
+              : block,
+          ),
+        },
     )
   }
 
