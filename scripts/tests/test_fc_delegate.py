@@ -47,6 +47,8 @@ class FcDelegateTest(unittest.TestCase):
             (self.runtime / name).mkdir()
         (self.runtime / ".mutter-Xwaylandauth.ABC123").write_text("cookie")
         (self.runtime / "vscode-git-1.sock").write_text("")
+        (self.runtime / "anything-new.sock").write_text("")
+        (self.runtime / "fnm_multishells").mkdir()
         self.private = self.tmp / "private data"
         self.private.mkdir()
         self.log = self.tmp / "calls.jsonl"
@@ -82,16 +84,11 @@ class FcDelegateTest(unittest.TestCase):
         self.assertIn("--confine", argv)
         hidden = [argv[i + 1] for i, a in enumerate(argv) if a == "--hide"]
         self.assertEqual(len(hidden), len(set(hidden)))
-        for expected in (
-            self.private,
-            self.runtime / "bus",
-            self.runtime / "systemd",
-            self.runtime / "at-spi",
-            self.runtime / "keyring",
-            self.runtime / ".mutter-Xwaylandauth.ABC123",
-            self.runtime / "vscode-git-1.sock",
-        ):
-            self.assertIn(str(expected.resolve()), hidden)
+        self.assertIn(str(self.private.resolve()), hidden)
+        for name in ("bus", "systemd", "at-spi", "keyring", ".mutter-Xwaylandauth.ABC123",
+                     "vscode-git-1.sock", "anything-new.sock"):
+            self.assertIn(str((self.runtime / name).resolve()), hidden, name)
+        self.assertNotIn(str((self.runtime / "fnm_multishells").resolve()), hidden)
         self.assertIsNone(calls[1]["display"])
 
     def test_session_and_repo_go_before_the_subcommands(self) -> None:
