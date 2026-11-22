@@ -31,10 +31,13 @@ die() {
 }
 
 [ "$#" -gt 0 ] || die "usage: fc-delegate.sh <seat> [delegate run options] [task]"
+# argparse accepts unambiguous prefixes (--hid, --conf), so refuse any prefix of either flag too.
 for arg in "$@"; do
-  case "$arg" in
-    --confine | --hide | --hide=*) die "do not pass $arg; this script sets every hide itself" ;;
-  esac
+  name=${arg%%=*}
+  if [ "${#name}" -ge 3 ] &&
+    { [[ "--confine" == "$name"* ]] || [[ "--hide" == "$name"* ]]; }; then
+    die "do not pass $arg; this script sets --confine and every --hide itself"
+  fi
 done
 
 command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed; refusing to run unconfined"
@@ -99,7 +102,7 @@ clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_A
 # Dry run first: the same arguments must resolve to a confined worker, or nothing starts.
 plan=$("${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "$@" "${flags[@]}" --dry-run) ||
   die "firstchair dry run failed"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("confined") is True else 1)' "$plan" ||
+python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("confined") is True else 1)' "$plan" ||
   die "dry run did not report \"confined\": true; refusing to start the worker"
 
 exec "${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "$@" "${flags[@]}"

@@ -130,10 +130,43 @@ class FcDelegateTest(unittest.TestCase):
         self.assertIn("confined", result.stderr)
         self.assertEqual(len(self.calls()), 1)  # only the dry run
 
-    def test_caller_cannot_pass_its_own_hides(self) -> None:
-        result = self.run_script("codex", "--hide", "/x", "task")
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(self.calls(), [])
+    def test_caller_cannot_pass_its_own_hides_or_a_prefix_of_them(self) -> None:
+        for flag in ("--hide", "--hid", "--hi", "--hide=/x", "--confine", "--conf", "--con"):
+            with self.subTest(flag=flag):
+                result = self.run_script("codex", flag, "/x", "task")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_ordinary_flags_are_not_mistaken_for_hide_prefixes(self) -> None:
+        result = self.run_script("codex", "--mode", "read", "--name", "n", "--help-me", "task")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_planted_module_in_the_working_directory_is_not_imported(self) -> None:
+        planted = self.tmp / "planted"
+        planted.mkdir()
+        (planted / "json.py").write_text(
+            "import sys\n"
+            "def loads(_s):\n"
+            "    return {'confined': True}\n"
+        )
+        env = {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": str(self.tmp),
+            "FAKE_LOG": str(self.log),
+            "FC_RUNTIME_DIR": str(self.runtime),
+            "HOLDFAST_PRIVATE_DIR": str(self.private),
+            "FAKE_CONFINED": "false",
+        }
+        result = subprocess.run(
+            [BASH, str(SCRIPT), "codex", "task"],
+            env=env,
+            cwd=planted,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(len(self.calls()), 1)  # only the dry run
 
     def test_runs_from_any_directory(self) -> None:
         env = {

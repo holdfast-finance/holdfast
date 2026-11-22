@@ -19,7 +19,7 @@ tool is alpha and its interface can change.
    view under the lead's own user and groups, not a user boundary, and it hides no sockets.
    Residual risk until a separate OS user exists for these workers: loopback TCP ports and
    abstract Unix sockets (the X server) stay reachable.
-2. **`conduct` cannot confine.** `conduct run` has no `--confine`, `--hide`, `--base`, `--model` or
+2. **`conduct` and `run` cannot confine.** `conduct run` has no `--confine`, `--hide`, `--base`, `--model` or
    `--effort`. On a machine that holds real data, a score may use only the `claude` and `self`
    seats. Fan out Codex and Grok with several `delegate run` jobs in the background instead.
 3. **Codex writes, Grok reads.** A Grok write worker is refused unless `--allow-grok-write` is
@@ -44,7 +44,7 @@ tool is alpha and its interface can change.
 |---|---|
 | One build task for Codex | `scripts/fc-delegate.sh codex --mode write ...` |
 | One second-opinion review of a PR branch | `scripts/fc-delegate.sh auto --mode read --base origin/<branch> ...` |
-| A plan checked by a second model, nothing written | `run --provider codex --reviewer grok --workspace <dir>` |
+| A plan checked by a second model, nothing written | `run --provider claude --workspace <dir>` only (rule 2): `run` cannot confine Codex or Grok |
 | Several independent Claude-only parts, or a part that reads an earlier part's reply | `conduct run` with a score |
 | What a write worker changed | `delegate diff <name>` |
 | Put a worker's edits on a PR branch worktree | `delegate apply <name> --to <worktree>` |
@@ -139,7 +139,10 @@ and `task`, and may have `timeout` and `after`.
 
 `firstchair run --provider P [--reviewer R] [--workspace DIR] "task"`. The lead plans, the reviewer
 critiques, the lead writes the answer. Providers get read-only tools and no MCP servers. It writes
-nothing, so it suits a design question, not a build.
+nothing, so it suits a design question, not a build. **On this machine use only the `claude`
+provider and reviewer:** `run` has no `--confine`, and Codex's read-only sandbox can still read
+the whole home directory, private data included (ADR 0019). For a Codex or Grok second opinion,
+use `scripts/fc-delegate.sh <seat> --mode read` instead.
 
 | Flag | Effect |
 |---|---|
