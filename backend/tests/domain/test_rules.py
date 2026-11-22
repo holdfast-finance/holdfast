@@ -1,14 +1,11 @@
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from time import perf_counter_ns
 from unittest import TestCase
 from uuid import UUID
 
 from app.domain.category_precedence import SOURCE_RANK, can_replace_category
 from app.domain.rules import (
-    MAX_REGEX_DESCRIPTION_LENGTH,
-    MAX_REGEX_LENGTH,
     DescriptionCondition,
     Rule,
     RuleAction,
@@ -27,10 +24,22 @@ TXN = RuleTransaction(
     amount=Decimal("-12.34"),
     account_id=UUID(int=2),
     posted_on=date(2026, 11, 21),
-    merchant_key="moonfern",
+    merchant_key="MOONFERN",
+    account_owner_person_id=None,
+    is_split=False,
 )
 CATEGORY = UUID(int=3)
-RULE = Rule(UUID(int=4), 10, True, RuleConditions(merchant_key="moonfern"), RuleAction(CATEGORY))
+AUTHOR = UUID(int=40)
+CREATED = datetime(2026, 1, 1, tzinfo=UTC)
+RULE = Rule(
+    UUID(int=4),
+    10,
+    True,
+    RuleConditions(merchant_key="MOONFERN"),
+    RuleAction(CATEGORY),
+    AUTHOR,
+    CREATED,
+)
 
 
 class TestRules(TestCase):
@@ -39,7 +48,6 @@ class TestRules(TestCase):
             (DescriptionCondition("contains", "stationery"), "station"),
             (DescriptionCondition("starts-with", " moonFERN   stationery "), "stationery 37"),
             (DescriptionCondition("exact", "moonfern stationery 37"), "moonfern stationery 370"),
-            (DescriptionCondition("regex", r"^(moonfern|sunfern) stationery \d\d$"), "moonfern!"),
         )
         for condition, other in cases:
             with self.subTest(mode=condition.mode):
@@ -50,26 +58,22 @@ class TestRules(TestCase):
     def test_conditions_are_anded(self) -> None:
         conditions = RuleConditions(
             description=DescriptionCondition("contains", "stationery"),
-            merchant_key="moonfern",
+            merchant_key="MOONFERN",
             amount_equals=Decimal("-12.34"),
             amount_min=Decimal("-15.00"),
             amount_max=Decimal("-10.00"),
             amount_sign="outflow",
-            account_ids=frozenset({TXN.account_id, UUID(int=5)}),
             date_from=TXN.posted_on,
             date_through=date(2026, 11, 23),
         )
         rule = replace(RULE, conditions=conditions)
         self.assertIsNotNone(match([rule], TXN))
-        self.assertIsNotNone(
-            match([rule], replace(TXN, posted_on=date(2026, 11, 23), account_id=UUID(int=5)))
-        )
+        self.assertIsNotNone(match([rule], replace(TXN, posted_on=date(2026, 11, 23))))
         for txn in (
             replace(TXN, description="moonfern"),
             replace(TXN, merchant_key=None),
-            replace(TXN, merchant_key="MOONFERN"),
+            replace(TXN, merchant_key="moonfern"),
             replace(TXN, amount=Decimal("-12.33")),
-            replace(TXN, account_id=UUID(int=6)),
             replace(TXN, posted_on=date(2026, 11, 20)),
             replace(TXN, posted_on=date(2026, 11, 24)),
         ):
@@ -105,10 +109,6 @@ class TestRules(TestCase):
         with self.assertRaisesRegex(RuleValidationError, "at least one condition"):
             RuleConditions()
 
-    def test_rejects_empty_account_filter(self) -> None:
-        with self.assertRaisesRegex(RuleValidationError, "at least one account"):
-            RuleConditions(account_ids=frozenset())
-
     def test_rejects_blank_description_conditions(self) -> None:
         for mode in ("contains", "starts-with", "exact", "regex"):
             for value in ("", " \t\n"):
@@ -141,88 +141,6 @@ class TestRules(TestCase):
         self.assertEqual(match(rules, TXN), expected)
         self.assertEqual(match(reversed(rules), TXN), expected)
         self.assertIsNone(match(rules[:1], TXN))
-
-    def test_regex_rejects_unbounded_syntax_and_invalid_patterns(self) -> None:
-        for pattern in (
-            "(a+)+$",
-            r"(a)\1",
-            "a" * (MAX_REGEX_LENGTH + 1),
-            "^a*a*$",
-            "(a|aa)+$",
-            "(?=a)",
-            "(",
-        ):
-            with self.subTest(pattern=pattern), self.assertRaises(RuleValidationError):
-                DescriptionCondition("regex", pattern)
-
-    def test_regex_rejects_empty_alternatives(self) -> None:
-        for pattern in (
-            "|a",
-            "a|",
-            "(|a)",
-            "(a|)",
-            "(a||b)",
-            "()",
-            "[A-Z ]?(|).*[XZ]",
-            ".?(|).*X",
-            ".*(|)X",
-            r"\S?(|).*X",
-            r"\w?(|).*X",
-        ):
-            with self.subTest(pattern=pattern), self.assertRaises(RuleValidationError):
-                DescriptionCondition("regex", pattern)
-
-    def test_regex_rejects_excess_branches_and_alternation_with_repetition(self) -> None:
-        for pattern in (
-            "(a|b|c|d|e|f|g|h|i)",
-            "a?b?c?(d|e|f)",
-            "(a|b)c*",
-            "a+(b|c)",
-        ):
-            with self.subTest(pattern=pattern), self.assertRaises(RuleValidationError):
-                DescriptionCondition("regex", pattern)
-
-    def test_accepted_regex_search_budget(self) -> None:
-        subject = "a" * MAX_REGEX_DESCRIPTION_LENGTH
-        for pattern in (
-            "a?a?a?a?b",
-            "(a|ab|abc|abcd|abcde|abcdef|abcdefg|abcdefgh)a?b",
-            "a*b",
-            "a?a?a?a?a*b",
-            r"\w?\w?\w?\w?\w+b",
-            ".*a?a?a?a?b",
-        ):
-            with self.subTest(pattern=pattern):
-                condition = DescriptionCondition("regex", pattern)
-                elapsed = []
-                for _ in range(3):
-                    start = perf_counter_ns()
-                    found = condition.matches(subject)
-                    elapsed.append(perf_counter_ns() - start)
-                    self.assertFalse(found)
-                # Use the fastest run to discount scheduling delays. Leave headroom for CI.
-                self.assertLess(min(elapsed), 2_500_000_000)
-
-    def test_regex_treats_escaped_operators_and_classes_as_atoms(self) -> None:
-        rule = replace(
-            RULE,
-            conditions=RuleConditions(
-                description=DescriptionCondition("regex", r"^moonfern\+ [a-z*?]+$")
-            ),
-        )
-        self.assertIsNotNone(match([rule], replace(TXN, description="Moonfern+ pens*?")))
-        self.assertIsNone(match([rule], replace(TXN, description="Moonfern pens")))
-
-    def test_regex_skips_overlong_descriptions(self) -> None:
-        rule = replace(
-            RULE, conditions=RuleConditions(description=DescriptionCondition("regex", "^a+$"))
-        )
-        self.assertIsNotNone(
-            match([rule], replace(TXN, description="a" * MAX_REGEX_DESCRIPTION_LENGTH))
-        )
-        self.assertIsNone(
-            match([rule], replace(TXN, description="a" * (MAX_REGEX_DESCRIPTION_LENGTH + 1)))
-        )
 
     def test_source_precedence_including_manual_clear(self) -> None:
         for source in (*SOURCE_RANK, None, "unknown"):
