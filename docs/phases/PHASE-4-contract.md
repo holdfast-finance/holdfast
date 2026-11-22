@@ -10,7 +10,8 @@ Revision 2 (2026-11-21) answers Gadfly's two critiques (`docs/phases/reviews/PHA
 Bulwark's second review and Gadfly's round 2 at `f651389`. Revision 4 answers Bulwark's third
 review at `cc7949d` and aligns with the Phase 2 contract's round 3: one supersede verb pair
 (`PHASE-2-contract.md` §3.3) and the shared migration and file order (PHASE-2 §4). Revision 5
-answers Gadfly round 3 at `fcb3a4e`. Section 11
+answers Gadfly round 3 at `fcb3a4e`. Revision 6 answers Gadfly round 4 at `038a875` and carries
+Bulwark's round-5 slice notes. Section 11
 lists every item and where it was closed.
 
 **Problem.** Three engines are merged as pure code and nothing runs them:
@@ -857,6 +858,14 @@ transactions are. Summary-only viewers see none.
     - "Keep categories and delete" passes `keep_categories=true`, which accepts the orphaning
       knowingly.
     - Superseded rows don't block a delete. They're history, and the FK sets their rule id to NULL.
+    - **But clear-and-delete also resets them** (Gadfly R4-B1). `supersede_transaction` copies the
+      category to the winner and leaves the loser's, so a superseded row can carry the rule's id.
+      If it kept its category, un-adopt's `unsupersede_transaction` step 5 would bring it back
+      live with source `rule` and a NULL rule id: the orphan this rule exists to prevent.
+      - So the clear runs one more `UPDATE` over superseded rows carrying the rule's id, the ones
+        the author can write. It has no count check, isn't included in N, and is audited under
+        the same `rule.cleared`.
+      - `keep_categories=true` leaves superseded rows alone too, knowingly.
   - Editing a rule leaves `category_rule_id` in place: "Set by rule: <name>" names the rule that
     set it, even if it has changed since.
   - A disabled rule can be previewed but not applied (409 `conflict`).
@@ -960,6 +969,18 @@ import result can offer the change.
     (`pending` or `needs_review`) on the account (Gadfly R3-B4). After a claim, no single person
     would pass `IMPORT_RUN_WRITE` for that run: it needs both `d.person_id = app_person_id()` and a
     writable account. The other person finishes or rejects their run first.
+    - The 409 has one fixed message, "An import on this account isn't finished yet", and no
+      person, run or document id (Bulwark).
+    - The check runs under the claimer's RLS, which works because `document` has no per-person
+      read policy today. If documents gain per-person read policies, the check must move into a
+      database-side check that fails closed. The documents slice that adds those policies must
+      say so.
+    - **Residual, stated** (Gadfly round 4): the account lock is `FOR NO KEY UPDATE`, which doesn't
+      conflict with the `FOR KEY SHARE` that the FK check takes when an import run is inserted. So
+      an upload that starts after the 409 check, and commits after the claim, can still be
+      stranded. It's rare: it needs the other person uploading to that account during the claim.
+      It's recoverable: the household owner can make the account joint again, and the run becomes
+      acceptable.
   - A joint account has no visibility of its own. ACCOUNT_VISIBLE shows every joint account to
     every member, so `visibility` on a joint account is refused with 422. Nobody "changes a joint
     account's visibility".
@@ -1053,7 +1074,7 @@ RuleClearOut       {cleared_count: int}
 | POST `/rules` | `RuleCreateIn` → 201 `RuleCreateOut`; with `apply`, create and apply in one transaction | 422, 409 `preview_stale` (nothing saved), 409 `conflict` (200 rules per author, or 25 enabled pattern rules per household) |
 | GET `/rules/{id}` | → `RuleOut` | 404 |
 | PATCH `/rules/{id}` | partial `RuleIn` → `RuleOut` (never applies) | 404, 403 `forbidden` (visible, not yours), 422, 409 `conflict` (caps) |
-| DELETE `/rules/{id}?keep_categories=false&clear_token=` | → 204. With `clear_token`, the clear runs first in the same transaction. With `keep_categories=true`, the categories stay and lose their rule id | 404, 403, 409 `rule_has_categories` (live rows carry the rule's id, neither option given), 409 `preview_stale` (the clear token is stale) |
+| DELETE `/rules/{id}?keep_categories=false&clear_token=` | → 204. With `clear_token`, the clear runs first in the same transaction, live rows by token plus the superseded rows carrying the rule's id (4.4). With `keep_categories=true`, the categories stay and lose their rule id | 404, 403, 409 `rule_has_categories` (live rows carry the rule's id, neither option given), 409 `preview_stale` (the clear token is stale) |
 | POST `/rules/{id}/preview` | → `RulePreviewOut` | 404 |
 | POST `/rules/{id}/apply` | `RuleApplyIn` → `RuleApplyOut` | 404, 403, 409 `preview_stale`, 409 `conflict` (disabled), 503 `rules_too_slow` |
 | POST `/rules/{id}/clear/preview` | → `RuleClearPreviewOut` (4.4 "Clear this rule's categories") | 404, 403, 503 `rules_too_slow` |
@@ -1354,7 +1375,14 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - supersede then unsupersede a rule-categorised row: `category_rule_id` is on the live row each
       time
     - `post_pending` over a rule-categorised pending row: the posted row has the rule id
-  - Switch C6a's inline `can_edit` to `app_account_writable`, with an equivalence test (5.1).
+  - Switch C6a's inline `can_edit` to `app_account_writable`, with an equivalence test (5.1). The
+    test covers own-private, own-shared, own-summary_only, joint, and another person's shared
+    account (false), each against `app_account_writable` (Bulwark round 5).
+- **C6a** (Bulwark round 5):
+  - Compute `can_edit` exactly as `owner_person_id IS NULL OR owner_person_id =
+    principal.person_id`.
+  - Never read `visibility`.
+  - `can_edit` is false when the principal has no person.
 - **A1:**
   - `owner` is `"me" | "joint"` only. Any other value is a 422 from the schema (Bulwark).
   - `app/services/accounts.py` never sets or mentions `household_wide`.
@@ -1370,7 +1398,8 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - summary-only viewers and other people's private accounts are a 404
     - **after `joint`, both people can upload a statement to it, and each person accepts their
       own `needs_review` run**
-    - a claim while the other person has a `pending` or `needs_review` run on the account is a 409
+    - a claim while the other person has a `pending` or `needs_review` run on the account is a
+      409 with the fixed message and no ids
     - audit detail has ids only
 - **C3c:**
   - Delete the C3a `re` validator. Until C3d, `compile_pattern` raises `RuleValidationError("Patterns
@@ -1401,8 +1430,19 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
   - Record the CI numbers in the PR.
 - **C3e:**
   - Rule DELETE: `409 rule_has_categories`, "Clear N and delete" in one transaction, and
-    `keep_categories=true` (4.4). Test: deleting a rule with live rows is refused, clear-and-delete
-    leaves no row with source `rule` and a NULL rule id, and superseded rows don't block it.
+    `keep_categories=true` (4.4).
+    - **Order** (Bulwark round 5): 404, then 403, then `rule_has_categories`. A non-author never
+      reaches the count.
+    - The 409 and the "Clear N" count are computed in the author's person-scoped session, never
+      household-wide.
+    - Rows the author can no longer see don't block the delete. The FK orphans them, and that's
+      accepted.
+    - Clear-and-delete also resets superseded rows that carry the rule's id (Gadfly R4-B1).
+    - Tests:
+      - deleting a rule with live rows is refused
+      - clear-and-delete leaves no row *the author can see* with source `rule` and a NULL rule id
+      - superseded rows don't block the delete
+      - **supersede, clear-and-delete, unsupersede: the old row is uncategorised**
   - The ingest matcher runs in `anyio.to_thread.run_sync` (Bulwark 1).
   - The 25 enabled `regex` rules per household → 409 (Bulwark 1).
   - **Budget per ADR 0024 point 9** (Bulwark round 3). Tests:
@@ -1816,3 +1856,11 @@ has it. Phase 4's ADRs are 0024 and 0026–0029. 0023 and
 | R3-B3 deleting a rule orphans its categories | **Accepted.** `409 rule_has_categories`, "Clear N and delete" in one transaction, and an explicit `keep_categories=true`. The clear copy is corrected | 4.4, 5.2, 6 item 3, 7.3 C3e |
 | R3-B4 a claim strands the other person's runs | **Accepted.** A claim is a 409 while another person has a `pending` or `needs_review` run on the account. The A1 test reads "each person accepts their own run" | 5.0, 7.3 A1 |
 | R3-B5 gaps between the contracts | **Accepted.** `post_pending` carries `category_rule_id` (C3b, with a test, and listed for PHASE-2 in 11.7). The shared order is cited as PHASE-2 §4. P4a is in wave 1 ahead of C3b | 3, 4.4, 7.1, 7.3 C3b, 11.7 |
+
+### 11.9 Gadfly, round 4 (`reviews/PHASE-4-contract-gadfly.md`, "Round 4"), and Bulwark round 5
+| Item | Response | Where |
+|---|---|---|
+| R4-B1 un-adopt revives a cleared category | **Accepted.** Clear-and-delete also resets superseded rows that carry the rule's id: one more UPDATE, no count check, outside N, audited under `rule.cleared`. Test: supersede, clear-and-delete, unsupersede, and the old row is uncategorised | 4.4, 5.2, 7.3 C3e |
+| Upgrade 2's dump name | **Filled in:** `holdfast-pre-0010-20261121T224905.dump` | SPRINTS |
+| The claim lock residual | **Recorded:** an upload that starts after the 409 check can still be stranded. It's rare, and making the account joint again recovers it | 5.0 |
+| Bulwark round 5 slice notes | **Pasted into the briefs:** C6a's `can_edit` predicate; C3b's equivalence cases; C3e's delete order and author-session count; A1's fixed message and the documents-slice condition | 5.0, 7.3 |

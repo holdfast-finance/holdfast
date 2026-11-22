@@ -111,7 +111,7 @@ also confirmed that day that this laptop is the long-term host.
 - The tailnet URL answered 200.
 
 **Upgrade 2** (after #32 merged):
-- Dump: `holdfast-pre-0010-<timestamp>.dump`, in the same directory.
+- Dump: `holdfast-pre-0010-20261121T224905.dump`, in the same directory.
 - Migration 0010 applied. `alembic current`: `0010_list_household_ids (head)`.
 - Counts were the same as above. The tailnet URL answered 200.
 - Re-running the statement loader over all 125 PDFs inserted 0 rows (idempotent).

@@ -454,3 +454,42 @@ If there's no entry, the first redeploy is an owner-queue item.
   Fix: C3b also carries `category_rule_id` in `post_pending`, with a test, and 4.4 points to it.
 - The shared migration and file order is in PHASE-2 **§4**, not §3.3 (header, section 3).
 - Wave 1's "C3b once #31 and P2a have merged" leaves out P4a, the token holder before M1 (3, 7.2).
+
+## Round 4 (038a875)
+
+Checked against `fcb3a4e..038a875`, `SPRINTS.md`, 0002/0005 RLS, and PHASE-2 as merged (#62).
+
+**Verdict: REWORK-small, one item (R4-B1).** Everything else from round 3 is closed.
+
+| Round 3 item | Status | Why |
+|---|---|---|
+| R3-B1 record | Closed | "Checkpoint 2026-11-21 evening" has the owner's words and date, `alembic current` after each upgrade (0009, then 0010) and count parity. Reading those words as a standing go-ahead is Keel's call. It's recorded and can be withdrawn |
+| R3-B2 shortest path | Closed | `can_edit` is computed inline in C6a and moves to the helper in C3b with an equivalence test. Every redeploy rehearses every pending revision, from any lane |
+| R3-B3 delete | Closed, but see R4-B1 | 409 `rule_has_categories`, clear-and-delete in one transaction, `keep_categories` passed explicitly, the copy corrected |
+| R3-B4 claim | Closed | `document` has no person policy, so the claimer can see the other person's runs on a joint account and the 409 check works under RLS. The test wording is fixed |
+| R3-B5 cross-contract | Closed | C3b covers `post_pending`, with a test. §4 is cited. P4a is in wave 1. PHASE-2 text follow-ups are listed in 11.7 |
+
+**Ruling on the live-rows deviation:** it holds for *blocking*, but not for *clearing*.
+
+**R4-B1. Un-adopt brings back a category that "Clear N and delete" removed, with no way to find it.**
+- `supersede_transaction` copies the category to the winner and never clears the loser. So the
+  superseded statement row keeps source `rule` and the rule's id.
+- Clear-and-delete clears only live rows. Then the FK sets the superseded row's rule id to NULL.
+- Later, `remove_external` or un-adopt runs `unsupersede_transaction`. Step 5 moves the category
+  to `old` only when the winner's source outranks old's. The winner's source is now NULL, so `old`
+  keeps its own category: it comes back live with source `rule` and a NULL rule id. That's exactly
+  the orphan R3-B3 closed.
+
+Fix (C3e):
+- In clear-and-delete, the clear also resets superseded rows that carry the rule's id. That's one
+  more UPDATE, with no count check, not included in N, and audited under the same `rule.cleared`.
+- Test: supersede a rule-categorised row, clear-and-delete, then unsupersede. The old row comes
+  back uncategorised.
+- `keep_categories=true` keeps today's behaviour, knowingly.
+
+Not blocking:
+- SPRINTS Upgrade 2 names its dump as `holdfast-pre-0010-<timestamp>.dump`, but 11.8 says "by name".
+  Fill in the timestamp.
+- The claim's `FOR NO KEY UPDATE` doesn't conflict with the `FOR KEY SHARE` lock that the FK check
+  takes when an import run is inserted. So an upload that starts after the 409 check can still be
+  stranded. State it as a residual next to the service-only claim check.
