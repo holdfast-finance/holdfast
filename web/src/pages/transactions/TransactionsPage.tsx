@@ -1,5 +1,5 @@
 import { Landmark, ListFilter, Search, Tags, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { errorMessage } from '@/api/client'
@@ -103,20 +103,46 @@ export function TransactionsPage() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const open = items.find((t) => t.id === openId) ?? null
-  const failed = (t: Transaction, what: string) => (error: Error) => {
-    setSaveError(
-      `Couldn't ${what} for ${t.description}. It's back how it was. ${errorMessage(error)}`,
-    )
+  const [announcement, setAnnouncement] = useState('')
+  // The row that opened the sheet, so focus can go back to it (Radix only does that for a Trigger).
+  const openerRef = useRef<HTMLElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const failed = (message: string) => (error: Error) => {
+    setSaveError(`${message} It's back how it was. ${errorMessage(error)}`)
   }
   const onSetCategory = (t: Transaction, categoryId: string) => {
     setSaveError(null)
     setOpenId(null)
-    setCategory.mutate({ id: t.id, categoryId }, { onError: failed(t, 'save the category') })
+    setCategory.mutate(
+      { id: t.id, categoryId },
+      {
+        onSuccess: () => {
+          setAnnouncement(
+            `${categoryIndex.get(categoryId)?.name ?? 'Category'} set for ${t.description}`,
+          )
+        },
+        onError: failed(`Couldn't save the category for ${t.description}.`),
+      },
+    )
   }
   const onRelease = (t: Transaction) => {
     setSaveError(null)
     setOpenId(null)
-    releaseCategory.mutate({ id: t.id }, { onError: failed(t, 'hand it back') })
+    releaseCategory.mutate(
+      { id: t.id },
+      {
+        onSuccess: () => {
+          setAnnouncement(`${t.description} handed back to automation`)
+        },
+        onError: failed(`Couldn't hand ${t.description} back to automation.`),
+      },
+    )
+  }
+  const restoreFocus = (event: Event) => {
+    event.preventDefault()
+    const opener = openerRef.current
+    if (opener?.isConnected) opener.focus()
+    else listRef.current?.focus()
   }
   const toggleUncategorized = () => {
     update({ uncategorized: !filters.uncategorized, category: '', source: '' })
@@ -124,13 +150,17 @@ export function TransactionsPage() {
   }
 
   const filterCount = activeFilterCount(filters)
+  // The Needs category toggle is its own button, so the Filters badge doesn't count it.
+  const badgeCount = filterCount - (filters.uncategorized ? 1 : 0)
   const anyFilter = filterCount > 0 || selected.length > 0 || filters.showHidden
   const clearAll = () => {
     setParams(new URLSearchParams(), { replace: true })
     setResetCount((n) => n + 1)
   }
   const applyForm = (values: FilterFormValues) => {
-    update(values)
+    // Picking a category or source means leaving the needs-category view, which can't combine
+    // with them (the API refuses both), so turn it off instead of silently ignoring the pick.
+    update(values.category || values.source ? { ...values, uncategorized: false } : values)
   }
 
   const accountsPanel = (
@@ -180,7 +210,8 @@ export function TransactionsPage() {
           items={items}
           accounts={accounts}
           categories={categoryIndex}
-          onOpen={(t) => {
+          onOpen={(t, opener) => {
+            openerRef.current = opener
             setOpenId(t.id)
           }}
         />
@@ -261,7 +292,7 @@ export function TransactionsPage() {
                 >
                   <ListFilter aria-hidden="true" />
                   Filters
-                  {filterCount > 0 && <Badge variant="secondary">{filterCount}</Badge>}
+                  {badgeCount > 0 && <Badge variant="secondary">{badgeCount}</Badge>}
                 </Button>
               </>
             )}
@@ -281,10 +312,26 @@ export function TransactionsPage() {
             )}
           </div>
 
+          {categoriesQuery.isError && (
+            <div
+              role="alert"
+              className="flex items-center justify-between gap-3 rounded-card border border-destructive/50 p-3 text-sm text-destructive-text"
+            >
+              <p>Couldn't load categories. You can't pick one until they load.</p>
+              <Button variant="outline" onClick={() => void categoriesQuery.refetch()}>
+                Retry
+              </Button>
+            </div>
+          )}
+
+          <div role="status" aria-live="polite" className="sr-only">
+            {announcement}
+          </div>
+
           {saveError && (
             <div
               role="alert"
-              className="flex items-start justify-between gap-3 rounded-card border border-destructive/50 p-3 text-sm text-destructive-text"
+              className="sticky top-[calc(3rem+env(safe-area-inset-top))] z-20 flex items-start justify-between gap-3 rounded-card border border-destructive/50 bg-background p-3 text-sm text-destructive-text lg:static"
             >
               <p>{saveError}</p>
               <Button
@@ -309,7 +356,15 @@ export function TransactionsPage() {
             />
           )}
 
-          <div className="rounded-card border border-border bg-card">{body}</div>
+          <div
+            ref={listRef}
+            tabIndex={-1}
+            role="region"
+            aria-label="Transaction list"
+            className="rounded-card border border-border bg-card focus:outline-none"
+          >
+            {body}
+          </div>
         </div>
       </div>
 
@@ -322,6 +377,7 @@ export function TransactionsPage() {
         }}
         onSetCategory={onSetCategory}
         onRelease={onRelease}
+        onCloseAutoFocus={restoreFocus}
       />
 
       {!isWide && (

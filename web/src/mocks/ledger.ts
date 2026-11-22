@@ -66,7 +66,7 @@ export const MOCK_CATEGORIES: CategoryNode[] = [
     node(CATEGORY_IDS.hardware, 'hardware', 'Hardware', 'expense'),
   ]),
   node(CATEGORY_IDS.income, 'income', 'Income', 'income', [
-    node(CATEGORY_IDS.paycheque, 'paycheque', 'Paycheque', 'income'),
+    node(CATEGORY_IDS.paycheque, 'paycheck', 'Paycheck', 'income'),
   ]),
   node(CATEGORY_IDS.fun, 'fun', 'Fun', 'expense'),
   node(CATEGORY_IDS.hidden, 'old', 'Retired category', 'expense', [], true),

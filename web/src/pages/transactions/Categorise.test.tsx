@@ -54,7 +54,7 @@ describe('categorising transactions', () => {
   it('shows each row category, where it came from, transfers and uncategorised rows', async () => {
     open()
     const payroll = await row(/Payroll deposit/)
-    expect(within(payroll).getByText('Paycheque')).toBeInTheDocument()
+    expect(within(payroll).getByText('Paycheck')).toBeInTheDocument()
     expect(within(payroll).getByText(/set by rule/)).toBeInTheDocument()
     const harbor = await row(/Harbor Grocers/)
     expect(within(harbor).getByText(/set by you/)).toBeInTheDocument()
@@ -100,7 +100,8 @@ describe('categorising transactions', () => {
   it('hands a category the person set back to automation', async () => {
     open()
     const sheet = await openSheet(/Harbor Grocers/)
-    expect(within(sheet).getByText('Set by you')).toBeInTheDocument()
+    expect(within(sheet).getByText('Source')).toBeInTheDocument()
+    expect(within(sheet).getByText('You')).toBeInTheDocument()
     await userEvent.click(within(sheet).getByRole('button', { name: 'Hand back to automation' }))
     await waitFor(() => {
       expect(requests.some((r) => r.method === 'POST' && r.url.pathname.endsWith('/release'))).toBe(
@@ -139,7 +140,9 @@ describe('categorising transactions', () => {
     await userEvent.click(within(sheet).getByRole('button', { name: 'Save category' }))
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent(/Couldn't save the category for Lantern Coffee/)
+    expect(alert).toHaveTextContent(
+      /Couldn't save the category for Lantern Coffee\. It's back how it was/,
+    )
     expect(alert).toHaveTextContent('That transaction changed. Try again.')
     await waitFor(() => {
       expect(firstRow(/Lantern Coffee/)).toHaveTextContent('Needs category')

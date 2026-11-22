@@ -9,7 +9,7 @@ import { ResponsiveSheet } from '@/components/ResponsiveSheet'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { indexCategories, pickerGroups, READ_ONLY_REASON, sourcePhrase } from './categories'
+import { indexCategories, pickerGroups, READ_ONLY_REASON, SOURCE_LABELS } from './categories'
 import { formatDay } from './format'
 
 const pickSchema = z.object({ categoryId: z.string().min(1, 'Pick a category') })
@@ -26,6 +26,7 @@ export function TransactionSheet({
   onClose,
   onSetCategory,
   onRelease,
+  onCloseAutoFocus,
 }: {
   transaction: Transaction | null
   account: Account | undefined
@@ -33,9 +34,11 @@ export function TransactionSheet({
   onClose: () => void
   onSetCategory: (t: Transaction, categoryId: string) => void
   onRelease: (t: Transaction) => void
+  onCloseAutoFocus?: (event: Event) => void
 }) {
   return (
     <ResponsiveSheet
+      onCloseAutoFocus={onCloseAutoFocus}
       open={transaction !== null}
       onOpenChange={(open) => {
         if (!open) onClose()
@@ -96,14 +99,16 @@ function SheetBody({
         <dd>
           {t.is_transfer
             ? 'Transfer'
-            : current
-              ? `${current.group ? `${current.group} / ` : ''}${current.name}`
-              : 'Needs category'}
+            : !t.category_id && !t.can_edit
+              ? 'Uncategorised'
+              : current
+                ? `${current.group ? `${current.group} / ` : ''}${current.name}`
+                : 'Needs category'}
         </dd>
         {t.category_id && (
           <>
-            <dt className="text-muted-foreground">Set by</dt>
-            <dd>{sourcePhrase(t.category_source)}</dd>
+            <dt className="text-muted-foreground">Source</dt>
+            <dd>{t.category_source ? SOURCE_LABELS[t.category_source] : 'Automation'}</dd>
           </>
         )}
       </dl>
@@ -152,12 +157,22 @@ function SheetBody({
               placeholder="Search categories"
               value={search}
               onChange={(e) => {
-                setSearch(e.target.value)
+                const next = e.target.value
+                setSearch(next)
+                // A choice the search has hidden must not be saved by accident.
+                const visible = pickerGroups(categories, next).flatMap((g) => g.options)
+                if (chosen && !visible.some((o) => o.id === chosen)) {
+                  form.setValue('categoryId', '')
+                }
               }}
             />
             <div className="flex max-h-[40dvh] flex-col gap-3 overflow-y-auto pr-1">
               {groups.length === 0 && (
-                <p className="text-sm text-muted-foreground">No category matches that.</p>
+                <p role="status" className="text-sm text-muted-foreground">
+                  {categories.length === 0
+                    ? "Categories aren't loaded yet."
+                    : 'No category matches that.'}
+                </p>
               )}
               {groups.map((g) => (
                 <fieldset key={g.id} className="flex flex-col">

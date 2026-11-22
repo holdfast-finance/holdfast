@@ -18,10 +18,24 @@ function groupByDay(items: Transaction[]): { date: string; rows: Transaction[] }
   return groups
 }
 
+const neutralBadge = 'text-muted-foreground'
 const warnBadge = 'border-warning/50 bg-transparent text-warning-text'
 
 function CategoryChip({ t, info }: { t: Transaction; info: CategoryInfo | undefined }) {
-  if (t.is_transfer) return <Badge variant="secondary">Transfer</Badge>
+  if (t.is_transfer)
+    return (
+      <Badge variant="outline" className={neutralBadge}>
+        Transfer
+      </Badge>
+    )
+  if (!t.category_id && !t.can_edit) {
+    // Nothing the person can do about it, so no call to action.
+    return (
+      <Badge variant="outline" className={neutralBadge}>
+        Uncategorised
+      </Badge>
+    )
+  }
   if (!t.category_id) {
     return (
       <Badge variant="outline" className={warnBadge}>
@@ -31,7 +45,7 @@ function CategoryChip({ t, info }: { t: Transaction; info: CategoryInfo | undefi
   }
   const by = t.category_source === 'user' ? 'you' : t.category_source === 'rule' ? 'rule' : null
   return (
-    <Badge variant="secondary" title={info?.group ?? undefined}>
+    <Badge variant="outline" className={neutralBadge} title={info?.group ?? undefined}>
       {info?.name ?? 'Category'}
       {by && (
         <>
@@ -52,7 +66,7 @@ function Row({
   t: Transaction
   account: Account | undefined
   info: CategoryInfo | undefined
-  onOpen: (t: Transaction) => void
+  onOpen: (t: Transaction, opener: HTMLElement) => void
 }) {
   const inflow = parseMoney(t.amount).isPositive() && !parseMoney(t.amount).isZero()
   const outflow = parseMoney(t.amount).isNegative()
@@ -60,8 +74,9 @@ function Row({
     <li className="border-b border-border">
       <button
         type="button"
-        onClick={() => {
-          onOpen(t)
+        aria-haspopup="dialog"
+        onClick={(e) => {
+          onOpen(t, e.currentTarget)
         }}
         className="grid min-h-14 w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-3 py-3 text-left hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:outline-none min-[1200px]:min-h-11 min-[1200px]:grid-cols-[minmax(8rem,1fr)_11rem_auto_9rem] min-[1200px]:items-center min-[1200px]:gap-y-0 min-[1200px]:py-2"
       >
@@ -80,7 +95,7 @@ function Row({
               ? `${account.name}${account.mask ? ` ··${account.mask}` : ''}`
               : 'Unknown account'}
           </span>
-          <span className="flex flex-wrap gap-1">
+          <span className="flex flex-wrap gap-1 min-[1200px]:flex-nowrap min-[1200px]:whitespace-nowrap">
             {t.is_pending && (
               <Badge variant="outline" className={warnBadge}>
                 Pending
@@ -108,7 +123,7 @@ export function TransactionList({
   items: Transaction[]
   accounts: Account[]
   categories: Map<string, CategoryInfo>
-  onOpen: (t: Transaction) => void
+  onOpen: (t: Transaction, opener: HTMLElement) => void
 }) {
   const byId = new Map(accounts.map((a) => [a.id, a]))
   return (
