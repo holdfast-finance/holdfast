@@ -36,7 +36,10 @@ tool is alpha and its interface can change.
    `uv sync`, `pnpm install` or `git commit` on an applied diff, read every changed line of any
    file a run executes or that configures one: `conftest.py` and tests, `pyproject.toml`,
    `uv.lock`, `package.json`, `pnpm-lock.yaml`, `Makefile`, `scripts/`, `.githooks/`,
-   `migrations/env.py`, Docker files. A diff that cannot be reviewed in time goes to CI only.
+   `migrations/env.py`, Docker files, and `.claude/` (hooks run on Keel's next Edit or Write with no
+   `make` at all), `.codex/`, `.grok/`, `.agents/`. A test run also imports every changed module
+   under `backend/app/` and `web/src/`, so read those too. A diff that cannot be reviewed in time
+   goes to CI only.
    Then run `make test-locked` and `make lint` before believing a pass: Codex cannot run database
    tests or `pnpm` in its sandbox.
 7. **One session ID per lead session.** Pass `--session <id>` before the subcommand on every call.

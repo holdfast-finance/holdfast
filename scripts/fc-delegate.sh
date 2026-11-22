@@ -70,6 +70,8 @@ candidates=(
 # Every entry of the per-user runtime directory (session bus, systemd user manager, keyring,
 # agent and credential-prompt sockets, Wayland, PipeWire, the X11 cookie, ...), except the few
 # a worker needs to start at all. An allowlist, because a denylist here always missed something.
+# The list is computed at launch: an entry created during a run (a new ssh-askpass or vscode-git
+# socket) is visible to that worker until it exits.
 # fnm_multishells holds the Node shims the Codex CLI is launched through.
 RUNTIME_KEEP=(fnm_multishells)
 for entry in "$runtime"/* "$runtime"/.*; do
