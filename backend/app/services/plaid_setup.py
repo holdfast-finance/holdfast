@@ -10,9 +10,10 @@ Nothing here returns, logs or audits a key. The response says only whether a key
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
-import re
 import uuid
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -26,6 +27,7 @@ from app.integrations.plaid.client import (
     PlaidCredentials,
     PlaidError,
     PlaidUnavailable,
+    credentials_well_formed,
 )
 from app.models import BankConnection
 from app.schemas.plaid import PlaidSetupOut
@@ -42,8 +44,8 @@ CLIENT_NAME = "Holdfast"
 # Each check is up to seven Plaid calls; Sandbox allows ten /institutions/get a minute.
 CHECKS_PER_WINDOW = 6
 CHECK_WINDOW_SECONDS = 300
+CHECK_TIMEOUT_SECONDS = 45
 STATEMENTS_PROBE_DAYS = 90
-_KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 
 
 def _plaid_keys(settings: Settings) -> tuple[str, str]:
@@ -74,15 +76,6 @@ def plaid_credentials(settings: Settings) -> PlaidCredentials | None:
 def open_client(credentials: PlaidCredentials) -> PlaidClient:
     """Seam for tests, which replace this with a client on a recorded transport."""
     return PlaidClient(credentials)
-
-
-def _malformed(credentials: PlaidCredentials) -> bool:
-    """True when a key holds anything but printable ASCII (a line break or stray byte from a
-    copy-paste). Such a key cannot be sent as a header, so it is refused before any request."""
-    return not all(
-        _KEY_SHAPE.fullmatch(value.reveal())
-        for value in (credentials.client_id, credentials.secret)
-    )
 
 
 def _probe_error(exc: PlaidError | PlaidUnavailable) -> pf.Probe:
@@ -143,34 +136,66 @@ class PlaidSetupService:
             raise ApiError(
                 "rate_limited", limited.message, headers={"Retry-After": str(limited.retry_after)}
             )
-        facts = await self._facts()
-        credentials = plaid_credentials(self.ctx.settings)
-        if credentials is not None and _malformed(credentials):
-            facts = _with(facts, keys=pf.Probe("rejected", "keys_malformed"))
-        elif credentials is not None:
-            async with open_client(credentials) as plaid:
-                facts = await _probe(plaid, facts, self.ctx.settings, datetime.now(UTC).date())
-        result = pf.evaluate(facts)
-        await audit.record(
-            self.ctx.factory,
-            "plaid.setup_check",
-            household_id=self.principal.household_id,
-            user_id=self.principal.user_id,
-            ip=self.ctx.ip,
-            outcome="success" if result.ready else "failure",
-            detail={
-                "env": result.env,
-                "steps": {step.id: step.state for step in result.steps},
-            },
-        )
-        return _out(result)
+        calls: Counter[str] = Counter()
+        result: pf.Preflight | None = None
+        state = "incomplete"
+        timed_out = False
+        try:
+            facts = await self._facts()
+            credentials = plaid_credentials(self.ctx.settings)
+            if credentials is not None and not credentials_well_formed(credentials):
+                facts = _with(facts, keys=pf.Probe("rejected", "keys_malformed"))
+            elif credentials is not None:
+                deadline = asyncio.timeout(CHECK_TIMEOUT_SECONDS)
+                async with open_client(credentials) as plaid:
+                    try:
+                        async with deadline:
+                            facts = await _probe(
+                                plaid, facts, self.ctx.settings, datetime.now(UTC).date(), calls
+                            )
+                    except TimeoutError:
+                        if not deadline.expired():
+                            raise
+                        timed_out = True
+                        facts = _with(facts, keys=pf.Probe("unreachable", "timeout"))
+            result = pf.evaluate(facts)
+            response = _out(result)
+            if timed_out:
+                state = "timed_out"
+            elif not any(probe.result == "unreachable" for probe in facts.product_probes.values()):
+                state = "complete"
+            return response
+        finally:
+            await audit.record(
+                self.ctx.factory,
+                "plaid.setup_check",
+                household_id=self.principal.household_id,
+                user_id=self.principal.user_id,
+                ip=self.ctx.ip,
+                outcome=(
+                    "success"
+                    if state == "complete" and result is not None and result.ready
+                    else "failure"
+                ),
+                detail={
+                    "env": result.env if result is not None else self.ctx.settings.plaid_env,
+                    "steps": {step.id: step.state for step in result.steps} if result else {},
+                    "calls": dict(calls),
+                    "state": state,
+                },
+            )
 
 
 async def _probe(
-    plaid: PlaidClient, facts: pf.PreflightFacts, settings: Settings, today: date
+    plaid: PlaidClient,
+    facts: pf.PreflightFacts,
+    settings: Settings,
+    today: date,
+    calls: Counter[str],
 ) -> pf.PreflightFacts:
     countries = list(settings.plaid_country_codes)
     try:
+        calls["/institutions/get"] += 1
         await plaid.institutions_get(country_codes=countries)
         keys = pf.Probe("ok")
     except (PlaidError, PlaidUnavailable) as exc:
@@ -188,6 +213,7 @@ async def _probe(
     async def token(products: list[str], redirect_uri: str | None = None) -> pf.Probe:
         try:
             # The token itself is discarded: it never leaves this function.
+            calls["/link/token/create"] += 1
             await plaid.link_token_create(
                 client_user_id=user_id,
                 client_name=CLIENT_NAME,
@@ -203,7 +229,10 @@ async def _probe(
 
     product_probes: dict[str, pf.Probe] = {}
     for product in pf.requestable_products(facts.products):
-        product_probes[product] = await token([product])
+        probe = await token([product])
+        product_probes[product] = probe
+        if probe.result == "unreachable":
+            return _with(facts, keys=keys, product_probes=product_probes)
     enabled = [p for p, probe in product_probes.items() if probe.result == "ok"]
 
     redirect: pf.Probe | None = None
