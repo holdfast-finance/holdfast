@@ -71,6 +71,9 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
    - `possibly_cancelled` once half a nominal interval has passed beyond the expected date. That's
      1.5 intervals after the last charge, as PLAN 8.4 says. Nominal intervals are 7, 14, 15, 30, 91
      and 365 days.
+     The boundary is strictly greater: with an even nominal interval, a series exactly 1.5 intervals
+     past its last charge is still `late`, and turns `possibly_cancelled` the next day. Odd intervals
+     use the floor of the half (7 gives 3, so day 4).
    - `late` in between
 
    Nothing has to run at night for a bill to become late.

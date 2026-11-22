@@ -178,6 +178,18 @@ def test_detected_from_derives_direction_first_date_and_uuid_members(
     assert item == DetectedSeries(series, direction, FIRST, frozenset({first, last}))
 
 
+def test_detected_from_normalises_a_string_account_id_for_the_lapsed_merge_key() -> None:
+    series = replace(_detected((1, 2)).series, account_id=str(ACCOUNT))
+    item = detected_from(series, {UUID(int=1): FIRST, UUID(int=2): LAST})
+    assert item.series.account_id == ACCOUNT
+    assert isinstance(item.series.account_id, UUID)
+    predecessor = _stored(1, (7, 8), lapsed=True, last_date=date(2023, 1, 1))
+    plan = reconcile_series([predecessor], [item])
+    assert [(p.stored_id, p.member_ids) for p in plan.upserts] == [
+        (predecessor.id, _ids((1, 2, 7, 8)))
+    ]
+
+
 def test_detect_rows_decodes_the_worker_payload_and_uses_the_detector() -> None:
     rows: list[RowTuple] = [
         (
@@ -309,6 +321,22 @@ def test_newest_twelve_members_carry_the_confirmed_id_to_the_new_merchant_key() 
         ),
         (),
     )
+
+
+def test_split_series_falls_back_when_its_newest_detection_goes_to_a_larger_overlap() -> None:
+    confirmed = _stored(1, (*range(1, 11), 30), state="confirmed")
+    twin = _stored(2, range(11, 30))
+    old_history = _detected(range(1, 11))
+    current = _detected(range(11, 31), first=date(2024, 3, 1))
+    plan = reconcile_series([confirmed, twin], [current, old_history])
+    assert plan == SeriesPlan(
+        (
+            PlannedSeries(confirmed.id, old_history, old_history.member_ids, None),
+            PlannedSeries(twin.id, current, current.member_ids, None),
+        ),
+        (),
+    )
+    assert all(item.detected is not None and item.member_ids for item in plan.upserts)
 
 
 def test_merge_uses_latest_lapsed_predecessor_then_lowest_id_and_unions_history() -> None:

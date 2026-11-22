@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Literal
@@ -79,6 +79,12 @@ def detected_from(series: RecurringSeries, posted: Mapping[UUID, date]) -> Detec
         UUID(member) if isinstance(member, str) else member for member in series.transaction_ids
     )
     direction: Direction = "outflow" if series.typical_amount.is_signed() else "inflow"
+    # Stored series carry UUID account ids, and the lapsed-merge key compares them by equality.
+    account_id = (
+        UUID(series.account_id) if isinstance(series.account_id, str) else series.account_id
+    )
+    if account_id != series.account_id:
+        series = replace(series, account_id=account_id)
     return DetectedSeries(series, direction, min(posted[member] for member in members), members)
 
 
@@ -118,7 +124,13 @@ class SeriesPlan:
 
 def _overlap_edges(
     stored: Mapping[UUID, StoredSeries], detection_by_member: Mapping[UUID, int]
-) -> list[tuple[int, bool, UUID, int]]:
+) -> list[tuple[int, int, bool, UUID, int]]:
+    """Order every stored-to-detection overlap, best claim first.
+
+    Among split detections, the one holding the series' newest live member goes first (tier 0),
+    ahead of larger overlaps. The other detections stay as tier-1 fallbacks, so a series whose
+    preferred detection another series took still follows its remaining members.
+    """
     edges = []
     for series in stored.values():
         counts = Counter(
@@ -132,10 +144,8 @@ def _overlap_edges(
             else None
         )
         for index, count in counts.items():
-            # Among split detections, only the one with the newest live member can inherit the id.
-            if len(counts) > 1 and newest is not None and index != newest:
-                continue
-            edges.append((-count, not series.user_stated, series.id, index))
+            tier = 1 if len(counts) > 1 and newest is not None and index != newest else 0
+            edges.append((tier, -count, not series.user_stated, series.id, index))
     return sorted(edges)
 
 
@@ -152,14 +162,14 @@ def reconcile_series(
 
     matches: dict[int, UUID] = {}
     matched: set[UUID] = set()
-    for _, _, candidate_id, index in edges:
+    for _, _, _, candidate_id, index in edges:
         if candidate_id not in matched and index not in matches:
             matches[index] = candidate_id
             matched.add(candidate_id)
 
     takeovers: set[UUID] = set()
     displaced: set[UUID] = set()
-    for negative_count, is_auto, candidate_id, index in edges:
+    for _, negative_count, is_auto, candidate_id, index in edges:
         incumbent = matches.get(index)
         if (
             not is_auto
@@ -208,6 +218,10 @@ def reconcile_series(
     for series in sorted(stored, key=lambda item: item.id):
         if series.id in matched:
             continue
+        # Worker note: all-transfer series are deleted whatever their state, so the
+        # worker must delete these ids without the `user_state = 'auto'` guard that protects the
+        # others (ADR 0028 section 2), and series_tier needs the label too, since a label implies
+        # confirmed.
         if series.all_members_transfers or not series.user_stated:
             deletes.append(series.id)
         else:
