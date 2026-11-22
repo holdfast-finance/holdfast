@@ -3,6 +3,7 @@ that no key ever appears in a response, an audit row or a log line."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable
@@ -392,7 +393,7 @@ async def test_check_is_rate_limited_per_household(owner: Owner, fake: FakePlaid
     assert len(fake.requests) == calls
 
 
-async def test_check_is_audited_with_states_only(
+async def test_check_is_audited_with_states_and_call_counts(
     app: FastAPI, owner: Owner, fake: FakePlaid
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
@@ -404,6 +405,9 @@ async def test_check_is_audited_with_states_only(
     rows = sorted(await audit_rows(app, hid), key=lambda r: r.at)
     assert [r.detail["outcome"] for r in rows] == ["success", "failure"]
     assert rows[0].detail["env"] == "sandbox"
+    assert [r.detail["state"] for r in rows] == ["complete", "complete"]
+    assert rows[0].detail["calls"] == {"/institutions/get": 1, "/link/token/create": 3}
+    assert rows[1].detail["calls"] == {"/institutions/get": 1}
     assert rows[1].detail["steps"]["keys_valid"] == "action"
     assert str(rows[0].user_id) == owner.user["id"]
     assert_no_key(json.dumps([r.detail for r in rows]))
@@ -420,3 +424,69 @@ async def test_no_key_or_link_token_reaches_the_logs(
     assert_no_key(json.dumps(events, default=str) + caplog.text + r.text)
     codes = {e.get("error_code") for e in events if e["event"] == "plaid_error"}
     assert codes == {"INVALID_PRODUCT", "INVALID_FIELD"}
+
+
+@pytest.mark.parametrize("failure", ["offline", "unexpected", "deadline"])
+async def test_interrupted_product_probe_stops_and_audits_calls(
+    app: FastAPI,
+    owner: Owner,
+    fake: FakePlaid,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/institutions/get":
+            return fake(request)
+        if failure == "offline" and json.loads(request.content)["products"] == ["transactions"]:
+            return fake(request)
+        fake.requests.append(request)
+        if failure == "unexpected":
+            raise ValueError("free text that must not be audited")
+        if failure == "deadline":
+            await asyncio.Event().wait()
+        raise httpx.ConnectError("offline")
+
+    def open_client(credentials: PlaidCredentials) -> PlaidClient:
+        return PlaidClient(credentials, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(plaid_setup, "open_client", open_client)
+    app.state.settings.plaid_redirect_uri = REDIRECT
+    if failure == "offline":
+        app.state.settings.plaid_products = ["transactions", "auth", "investments"]
+        app.state.settings.plaid_redirect_uri = None
+    if failure == "deadline":
+        monkeypatch.setattr(plaid_setup, "CHECK_TIMEOUT_SECONDS", 0)
+
+    if failure == "unexpected":
+        with pytest.raises(ValueError, match="free text"):
+            await owner.client.post("/api/plaid/setup/check")
+    else:
+        response = await owner.client.post("/api/plaid/setup/check")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ready"] is False
+        if failure == "deadline":
+            assert steps(body)["keys_valid"]["reason"] == "plaid_unreachable"
+        else:
+            assert steps(body)["products"]["state"] == "blocked"
+            assert steps(body)["products"]["reason"] == "plaid_unreachable"
+            assert [p["state"] for p in body["products"]] == ["enabled", "error", "unchecked"]
+
+    link_calls = 2 if failure == "offline" else 1
+    assert fake.paths() == ["/institutions/get", *["/link/token/create"] * link_calls]
+    if failure == "offline":
+        assert [b["products"] for b in fake.link_bodies()] == [["transactions"], ["auth"]]
+    [row] = await audit_rows(app, uuid.UUID(owner.household["id"]))
+    assert row.detail["calls"] == {"/institutions/get": 1, "/link/token/create": link_calls}
+    assert (
+        row.detail["state"]
+        == {
+            "offline": "incomplete",
+            "unexpected": "incomplete",
+            "deadline": "timed_out",
+        }[failure]
+    )
+    assert row.detail["outcome"] == "failure"
+    serialized = json.dumps(row.detail)
+    assert "free text" not in serialized
+    assert_no_key(serialized)
