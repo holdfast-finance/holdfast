@@ -219,3 +219,9 @@ source_modules = ["app.jobs.handlers"]
 forbidden_modules = ["app.db", "app.db_context"]
 # Direct imports only: handlers call services, which own sessions through db_context.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Job handlers never import the runner (no household-wide enqueue, no claims; ADR 0016)"
+type = "forbidden"
+source_modules = ["app.jobs.handlers"]
+forbidden_modules = ["app.jobs.runner"]
