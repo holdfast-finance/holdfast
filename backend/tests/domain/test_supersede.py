@@ -225,6 +225,25 @@ def test_coverage_merges_overlaps_preserves_gaps_and_includes_closed_twins_with_
     assert not is_covered(day(30), intervals, is_pending=True)
 
 
+def test_closed_twin_coverage_widens_to_its_rows() -> None:
+    # No period_end: the rows' last date closes the interval.
+    assert coverage([], [CoverageRun(day(0), None, "accepted", (day(5), day(20)))]) == (
+        CoverageInterval(day(0), day(20)),
+    )
+    assert coverage([], [CoverageRun(None, None, "needs_review", (day(7), day(3)))]) == (
+        CoverageInterval(day(3), day(7)),
+    )
+    # A card row dated before period_start (trans date vs post date) and a row after period_end.
+    twin = CoverageRun(day(10), day(30), "reconciled", (day(8), day(12), day(31)))
+    assert coverage([], [twin]) == (CoverageInterval(day(8), day(31)),)
+    assert all(is_covered(day(offset), coverage([], [twin])) for offset in (8, 10, 31))
+    # An adopted run keeps its stated bounds, and a twin with no rows adds nothing.
+    assert coverage([CoverageRun(day(10), day(30), "reconciled", (day(8),))]) == (
+        CoverageInterval(day(10), day(30)),
+    )
+    assert coverage([], [CoverageRun(day(0), None, "accepted", ())]) == ()
+
+
 def test_coverage_skips_runs_without_usable_bounds() -> None:
     assert (
         coverage(

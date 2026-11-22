@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date
 from decimal import Decimal
-from itertools import chain
 from uuid import UUID
 
 from app.domain.fingerprint import normalize_description
@@ -34,18 +33,29 @@ def coverage(
 ) -> tuple[CoverageInterval, ...]:
     """Compute the adopted account's fixed coverage from its runs and those of closed twins.
 
-    A run without usable bounds contributes no interval. Overlaps include a shared boundary
-    day. Separate intervals, including adjacent ones, keep their own bounds.
+    An adopted run without usable bounds contributes no interval. A closed twin's run with rows
+    always does, widened to its rows. Overlaps include a shared boundary day. Separate intervals,
+    including adjacent ones, keep their own bounds.
     """
-    covered_runs = chain(
-        (run for run in adopted_runs if run.reconcile_status == "reconciled"),
-        (run for run in closed_twin_runs if run.posted_dates),
-    )
     intervals: list[CoverageInterval] = []
-    for run in covered_runs:
+    for run in adopted_runs:
+        if run.reconcile_status != "reconciled":
+            continue
         start = run.period_start or min(run.posted_dates, default=None)
         if start is not None and run.period_end is not None and start <= run.period_end:
             intervals.append(CoverageInterval(start, run.period_end))
+    for run in closed_twin_runs:
+        # Every period a twin has rows for stays import-authoritative (ADR 0035 section 1), so
+        # the interval widens to the run's rows and a missing period_end falls back to them.
+        if not run.posted_dates:
+            continue
+        first, last = min(run.posted_dates), max(run.posted_dates)
+        intervals.append(
+            CoverageInterval(
+                min(run.period_start, first) if run.period_start else first,
+                max(run.period_end, last) if run.period_end else last,
+            )
+        )
 
     merged: list[CoverageInterval] = []
     for interval in sorted(intervals):
