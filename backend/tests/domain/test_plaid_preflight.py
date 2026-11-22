@@ -125,10 +125,23 @@ def test_product_probe_errors_block_when_nothing_else_is_enabled() -> None:
         facts(
             products=("transactions",),
             keys=OK,
-            product_probes={"transactions": Probe("unreachable", "timeout")},
+            product_probes={"transactions": Probe("error", "unknown")},
         )
     )
     assert step(result, "products") == Step("products", "blocked", "product_check_failed")
+
+
+@pytest.mark.parametrize("auth_probe", [None, Probe("unreachable", "network")])
+def test_partial_product_check_blocks_readiness(auth_probe: Probe | None) -> None:
+    probes = {"transactions": OK}
+    if auth_probe is not None:
+        probes["auth"] = auth_probe
+    result = evaluate(
+        facts(products=("transactions", "auth", "investments"), keys=OK, product_probes=probes)
+    )
+    assert result.ready is False
+    assert step(result, "products") == Step("products", "blocked", "plaid_unreachable")
+    assert result.products[-1].state == "unchecked"
 
 
 def test_registered_redirect_uri_is_done() -> None:

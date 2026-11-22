@@ -8,6 +8,7 @@ both sides use JSON instead: a tampered job can at worst fail validation.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Protocol
 
 from arq.connections import ArqRedis
@@ -28,7 +29,13 @@ def loads(data: bytes) -> Any:
 class JobQueue(Protocol):
     """The slice of :class:`arq.connections.ArqRedis` that enqueue uses."""
 
-    async def enqueue_job(self, function: str, *args: Any, _job_id: str | None = None) -> Any: ...
+    async def enqueue_job(
+        self,
+        function: str,
+        *args: Any,
+        _job_id: str | None = None,
+        _defer_until: datetime | None = None,
+    ) -> Any: ...
 
 
 def arq_pool(redis: Redis, *, queue_name: str | None = None) -> ArqRedis:

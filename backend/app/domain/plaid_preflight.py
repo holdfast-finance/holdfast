@@ -138,12 +138,17 @@ def _product_statuses(facts: PreflightFacts) -> tuple[ProductStatus, ...]:
     return tuple(out)
 
 
-def _products_step(statuses: tuple[ProductStatus, ...]) -> Step:
+def _products_step(facts: PreflightFacts, statuses: tuple[ProductStatus, ...]) -> Step:
     asked = [s for s in statuses if s.state != "implicit"]
     if not asked:
         return Step("products", "action", "no_products_configured")
-    if all(s.state == "unchecked" for s in asked):
+    if facts.keys is None and all(s.state == "unchecked" for s in asked):
         return Step("products", "unchecked")
+    if any(
+        (probe := facts.product_probes.get(status.product)) is None or probe.result == "unreachable"
+        for status in asked
+    ):
+        return Step("products", "blocked", "plaid_unreachable")
     if any(s.state == "enabled" for s in asked):
         missing = any(s.state in {"not_enabled", "error"} for s in asked)
         # A missing product is not a failure: it is switched off and the rest still sync.
@@ -196,7 +201,7 @@ def evaluate(facts: PreflightFacts) -> Preflight:
         keys_ok = keys.state == "done"
         # Product and redirect answers mean nothing while the keys themselves are refused.
         products = (
-            _products_step(statuses)
+            _products_step(facts, statuses)
             if keys_ok or facts.keys is None
             else Step("products", "unchecked")
         )
