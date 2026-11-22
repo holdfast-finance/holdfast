@@ -16,7 +16,8 @@ automatically, like routers; no hot file to edit)::
 
 Payloads are **IDs only**: every field is a ``uuid.UUID`` and ``household_id`` is always present.
 Every other field names the household-scoped table its id points into (``Ref``), so enqueue can
-check the requester can see that row (ADR 0016, confused deputy). A payload class with any other
+check the requester could write that row themselves, or just see it for ``Ref(Model,
+access="read")`` (ADR 0016, confused deputy). A payload class with any other
 field type, or an id field without exactly one ``Ref``, fails at import. Data the job needs
 (tokens, amounts, dates) is loaded from the database by ID inside the job, so nothing sensitive
 sits in Redis, in arq's logs or in ``job_run``. Validation is strict: before enqueue, and before
@@ -31,15 +32,17 @@ import pkgutil
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import pydantic_core
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db_context import scoped_session
 from app.models._common import (
     IDEMPOTENCY_KEY_MAX,
     IDEMPOTENCY_KEY_PATTERN,
@@ -64,17 +67,30 @@ class InvalidIdempotencyKey(ValueError):
     pass
 
 
+RefAccess = Literal["read", "write"]
+
+
 @dataclass(frozen=True)
 class Ref:
     """Payload field metadata: this id is a row of ``model``'s household-scoped table.
 
     Use as ``Annotated[uuid.UUID, Ref(Account)]``. Before anything is recorded, enqueue looks the
     id up in the requester's own person-scoped session, so RLS decides whether they may name it.
+
+    ``access`` is what the job does to that row, and the default is ``"write"``: enqueue locks
+    the row (``FOR KEY SHARE``), so Postgres applies the table's UPDATE policy as well as its
+    SELECT policy, and a person can only name rows they could write themselves. The worker runs
+    household-wide, so without this a person could get a job to write a row RLS would refuse
+    them (a confused deputy). Use ``Ref(Model, access="read")`` only when the job never writes
+    that row or anything under it; visibility is then the bar.
     """
 
     model: type[Base]
+    access: RefAccess = "write"
 
     def __post_init__(self) -> None:
+        if self.access not in ("read", "write"):
+            raise TypeError(f"Ref access must be 'read' or 'write', not {self.access!r}")
         table = getattr(self.model, "__table__", None)
         columns = getattr(table, "c", ())
         if "id" not in columns or "household_id" not in columns:
@@ -175,6 +191,23 @@ DEFAULT_TIMEOUT = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
+class HouseholdSessions:
+    """Opens side sessions in one household only: ``async with ctx.factory() as s: ...``.
+
+    Each session is household-wide in ``household_id`` (like ``JobContext.session``), commits on
+    a clean exit and rolls back on error. There is no way to pass another household, so a
+    handler can't open a session outside its run's household by mistake. (Handlers are trusted
+    server code: this guards against slips, not against code that digs out the engine.)
+    """
+
+    _factory: async_sessionmaker[AsyncSession]
+    household_id: uuid.UUID
+
+    def __call__(self) -> AbstractAsyncContextManager[AsyncSession]:
+        return scoped_session(self._factory, self.household_id, None, household_wide=True)
+
+
+@dataclass(frozen=True)
 class JobContext:
     """What a handler gets besides its payload.
 
@@ -183,9 +216,10 @@ class JobContext:
     so writes the handler leaves uncommitted land atomically with the success mark: a crash
     before that commit rolls both back and the retry starts clean. Commit earlier (the context
     survives commits) only for progress that must persist across retries, and keep such steps
-    idempotent. ``factory`` opens independent sessions (for example an audit row that must
-    survive a rollback). Open at most one of those at a time: a run's budget is three pooled
-    connections (lock, ``session``, one side session; ``app.worker.main.MAX_JOBS``).
+    idempotent. ``factory()`` opens an independent session in the same household (for example
+    an audit row that must survive a rollback); it can't name another household. Open at most
+    one of those at a time: a run's budget is three pooled connections (lock, ``session``, one
+    side session; ``app.worker.main.MAX_JOBS``).
 
     The handler runs under ``asyncio.timeout(spec.timeout)``. On expiry it is cancelled, its
     uncommitted writes roll back and the run is retried or failed like any other error.
@@ -195,7 +229,7 @@ class JobContext:
     household_id: uuid.UUID
     attempt: int
     session: AsyncSession
-    factory: async_sessionmaker[AsyncSession]
+    factory: HouseholdSessions
 
 
 type Handler[P: JobPayload] = Callable[[JobContext, P], Awaitable[None]]

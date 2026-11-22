@@ -1,8 +1,9 @@
 # 0016. Job framework: arq for delivery, `job_run` for truth, Postgres advisory lock per household
 
-- Status: Accepted (amended by F2b, 2026-11-20: enqueue authority, timeouts, stale attempts)
+- Status: Accepted (amended by F2b, 2026-11-20: enqueue authority, timeouts, stale attempts;
+  2026-11-21: write references, redelivery sweeper, household-bound side sessions)
 - Date: 2026-11-20
-- Deciders: Lattice (architect); Keel; Bulwark (security review of #24)
+- Deciders: Lattice (architect); Keel; Bulwark (security review of #24 and #32)
 
 ## Context
 Phase 2 brings scheduled Plaid polling (poll-first, no webhooks), and later phases add imports,
@@ -40,15 +41,44 @@ household context.
   requester's person-scoped RLS session (`scoped_session(factory, household_id, requested_by)`).
   Any miss raises `JobReferenceNotVisible` (render as not found) before a row is written or a job
   is pushed. The check also runs for a duplicate key, so a key can't probe another person's run.
-  `requested_by=None` is for system callers (schedulers) and gets RLS's person-less view (shared
-  and joint rows), never a household-wide one. **Every API route that enqueues must pass the
-  session's household and person.** Visibility is the bar, not write permission: a job that
-  writes on a person's behalf to rows they can only read must check that itself.
+  **Every API route that enqueues must pass the session's household and person.**
+- **Write references need write rights (Bulwark, #32).** Visibility alone let Sam enqueue a job on
+  Alex's *shared* account, which the job then writes household-wide although the account's
+  `person_update` policy refuses Sam that write: a confused deputy at the person boundary.
+  `Ref(Model)` now means the job writes the row (the default), and enqueue looks it up with
+  `SELECT ... FOR KEY SHARE`. Postgres applies a table's UPDATE policies (USING) to every row a
+  locking SELECT touches and drops the rows that fail, so the check finds exactly the rows the
+  requester could update directly, with the policy defined once, in the migration. Tested on
+  Postgres 16 (`test_the_row_lock_applies_the_update_policy`: plain SELECT sees the row, the
+  locked one doesn't, a direct UPDATE changes nothing). `FOR KEY SHARE` is the weakest row lock
+  (blocks only deletes and key changes) and lasts until enqueue commits. Locking needs the UPDATE
+  privilege, so a table the app can't update needs `access="read"`.
+  `Ref(Model, access="read")` opts out for a job that never writes that row or anything under it;
+  visibility is then the bar.
+- **System callers.** `requested_by=None` gets RLS's person-less view, never a household-wide one:
+  it may *write*-reference joint rows (and tables with no per-person rule), and *read*-reference
+  shared, summary-only and joint rows; private rows are refused either way. A worker scheduler
+  that must name a person's own rows uses `app.jobs.runner.enqueue_household_wide`, which checks
+  household-wide (still inside `household_id`). Request code can't reach it: import-linter forbids
+  `app.api` and `app.services` from importing `app.jobs.runner`, and
+  `tests/jobs/test_job_boundaries.py` fails if anything but the runner calls `_enqueue`.
 - **Idempotency:** the caller passes an explicit key (`[A-Za-z0-9:._-]`, at most 200 characters,
   for example `sync:<item>:<hour>`). A duplicate returns the existing run and creates no new row.
-  If that run is still `queued`, enqueue pushes it to arq again under the same `_job_id`, which
-  arq dedupes. This heals a crash between the commit and the Redis push. Reusing a key with a
-  different payload raises `IdempotencyConflict`.
+  If that run is unfinished (`queued`, `retrying`, `running`), enqueue pushes it to arq again under
+  the same `_job_id` (`retrying` with `_defer_until=next_attempt_at`), which arq drops while it
+  still holds the job. This heals a crash between the commit and the Redis push, and a run arq
+  finished without a retry. Reusing a key with a different payload raises `IdempotencyConflict`.
+- **Redelivery sweeper.** arq's backstop timeout finishes a job without retrying it, after the
+  runner's cancel handler recorded `retrying`, so nothing would ever deliver that run again. A
+  worker cron (`sweep_stalled_runs`, every minute) re-pushes, per household, `queued` runs older
+  than 2 minutes, `retrying` runs 2 minutes past `next_attempt_at`, and `running` runs older than
+  their timeout + `ARQ_TIMEOUT_MARGIN` + 2 minutes (at most 100 per household per sweep). It never
+  claims or marks a run (except failing a pending run whose stored payload no longer validates).
+  Pushing twice can't run twice: a delivery claims only under the household lock with a
+  conditional UPDATE, so extra deliveries defer on the lock or skip a finished run
+  (`test_redelivered_runs_never_run_twice` pushes one lost run three times with no arq dedupe and
+  runs them concurrently: one handler run, one side effect). `household` has RLS, so the sweeper
+  lists tenants from `app_user.household_id`; a household with no login isn't swept.
 - **Per-household lock: a Postgres session-level advisory lock**, `pg_try_advisory_lock(ns, key)`
   on a dedicated pooled connection held for the run. `key` is the first 4 bytes of
   `blake2b(household_id.bytes)`, not the UUID's leading bytes (a UUIDv7 leads with its timestamp). If the lock is busy, the run defers with
@@ -64,6 +94,8 @@ household context.
   is skipped. A `running` row found while holding the lock is an orphan of a dead worker and is
   re-claimed. The handler gets a household-wide session, and the runner marks success in that same
   session's final transaction, so uncommitted handler writes commit atomically with the mark.
+  `JobContext.factory()` opens side sessions in the run's household only (`HouseholdSessions`
+  takes no household argument), so a handler can't open one elsewhere by mistake.
 - **Bounded retries:** capped exponential backoff (`base_delay * factor^(n-1)`, up to `max_delay`)
   until `max_attempts`. arq's own `max_tries` is set to attempts + lock deferrals + 1. On that last
   try the runner always records `failed` instead of asking for another retry, so arq can never drop
@@ -113,11 +145,14 @@ household context.
   `HouseholdBusy`. Tune this per job if it happens.
 - Handlers run household-wide (`household_wide=True`, ADR 0008). Person-scoped jobs (agent runs
   for one person) will need a `person_id` field in the payload and a context option. Not built yet.
-- If arq's backstop timeout ever fires, arq drops the job, and the row sits `retrying` with a
-  past `next_attempt_at`. Unlike `running`, that state is never live work, so a sweeper can safely
-  re-push it.
-- Follow-ups: a sweeper that re-pushes `queued` rows older than N minutes (crash between commit
-  and push when nobody retries the enqueue) and `retrying` rows whose `next_attempt_at` is well
-  past, retention pruning of old `job_run` rows, wiring
-  `arq_pool(app.state.redis)` into the API once the first API-triggered job lands (P7), and
-  Bulwark's Redis-auth item. The import-linter domain contract now also forbids `app.jobs`.
+- A run arq loses is revived within about a minute of becoming overdue. The sweep scans each
+  household's `job_run` rows without a status index (adding one needs a migration); fine at
+  self-host scale, revisit with retention pruning.
+- Open (not built): the lock connection dropping mid-run (Postgres releases the lock while the
+  handler keeps running, so a second delivery could claim the "orphan"); a Redis writer can still
+  deny service (flood deliveries, delete jobs), though never run a forged payload; and
+  `job_run` doesn't record `requested_by` (needs a migration), so a run's requester isn't auditable
+  and the sweeper re-pushes without knowing who asked.
+- Follow-ups: retention pruning of old `job_run` rows, wiring `arq_pool(app.state.redis)` into the
+  API once the first API-triggered job lands (P7), and Bulwark's Redis-auth item. The import-linter
+  domain contract also forbids `app.jobs`.

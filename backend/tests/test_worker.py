@@ -1,4 +1,4 @@
-"""arq worker settings import cleanly and schedule the heartbeat."""
+"""arq worker settings import cleanly and schedule the heartbeat and the stalled-run sweeper."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from arq.worker import get_kwargs
 from app.config import get_settings
 from app.db import create_engine
 from app.jobs import queue
+from app.jobs.runner import sweep_stalled_runs
 from app.worker.main import CONNECTIONS_PER_JOB, MAX_JOBS, WorkerSettings, heartbeat
 
 
-def test_worker_settings_register_heartbeat_cron() -> None:
+def test_worker_settings_register_heartbeat_and_sweeper_crons() -> None:
     assert heartbeat in WorkerSettings.functions
-    assert [job.coroutine for job in WorkerSettings.cron_jobs] == [heartbeat]
+    crons = [job.coroutine for job in WorkerSettings.cron_jobs]
+    assert crons == [heartbeat, sweep_stalled_runs]
 
 
 async def test_heartbeat_is_a_noop() -> None:

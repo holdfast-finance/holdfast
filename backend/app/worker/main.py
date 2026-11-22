@@ -2,7 +2,8 @@
 
 Registered jobs come from ``app/jobs/handlers/`` (ADR 0016). Each is wrapped by
 ``app.jobs.runner.arq_function``: payload validation, the per-household lock, ``job_run`` state
-and retries all happen there, never in arq's own retry logic.
+and retries all happen there, never in arq's own retry logic. ``sweep_stalled_runs`` runs every
+minute and re-pushes runs arq has lost.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from app.config import get_settings
 from app.db import create_engine, create_session_factory
 from app.jobs import queue
 from app.jobs.registry import discover_jobs
-from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function
+from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function, sweep_stalled_runs
 from app.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -50,7 +51,10 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 class WorkerSettings:
     functions: ClassVar[list[Any]] = [heartbeat, *map(arq_function, discover_jobs())]
-    cron_jobs: ClassVar[list[Any]] = [cron(heartbeat, minute=None, second=0, run_at_startup=True)]
+    cron_jobs: ClassVar[list[Any]] = [
+        cron(heartbeat, minute=None, second=0, run_at_startup=True),
+        cron(sweep_stalled_runs, minute=None, second=30, run_at_startup=True),
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url.get_secret_value())
