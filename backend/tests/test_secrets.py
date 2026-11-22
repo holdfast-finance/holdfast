@@ -6,6 +6,7 @@ import secrets
 import uuid
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from app.config import Settings
@@ -32,7 +33,7 @@ def _settings(mode: str, env_value: str | None, ring: str) -> Settings:
 def test_self_host_returns_env_and_ignores_the_household_row() -> None:
     ring = crypto.generate_key()
     env_canary, row_canary = _canaries()
-    row = crypto.seal(SecretToken(row_canary), key=SecretStr(ring))
+    row = _row(row_canary, ring)
     got = get_secret(
         HOUSEHOLD,
         "anthropic_api_key",
@@ -74,7 +75,7 @@ def test_hosted_without_a_row_does_not_fall_back_to_env() -> None:
 def test_self_host_without_env_does_not_use_the_row() -> None:
     ring = crypto.generate_key()
     _, row_canary = _canaries()
-    row = crypto.seal(SecretToken(row_canary), key=SecretStr(ring))
+    row = _row(row_canary, ring)
     with pytest.raises(SecretNotFound) as excinfo:
         get_secret(
             HOUSEHOLD,
@@ -130,7 +131,7 @@ def test_names_outside_the_allowlist_read_neither_source(name: str, mode: str) -
         session_secret=SecretStr("s" * 40),
         cf_api_token=SecretStr("c" * 40),
     )
-    row = crypto.seal(SecretToken("row-value"), key=SecretStr(ring))
+    row = _row("row-value", ring)
     with pytest.raises(SecretUnknown) as excinfo:
         get_secret(HOUSEHOLD, name, settings=settings, household_value_enc=row)
     assert ring not in str(excinfo.value)
@@ -182,14 +183,18 @@ def test_hosted_row_for_a_different_column_fails_closed() -> None:
         )
 
 
-def test_hosted_still_opens_an_hf1_row_until_it_is_upgraded() -> None:
+def test_hosted_refuses_an_unbound_row_even_if_it_opens_unbound() -> None:
+    """A copied TOTP seed (hf1) or a bare Fernet token must not open as a household secret."""
     ring = crypto.generate_key()
-    row = crypto.seal(SecretToken("legacy-row"), key=SecretStr(ring))
-    assert row.startswith(b"hf1.")
-    got = get_secret(
-        HOUSEHOLD,
-        "anthropic_api_key",
-        settings=_settings("hosted", None, ring),
-        household_value_enc=row,
-    )
-    assert got.reveal() == "legacy-row"
+    hf1 = crypto.seal_unbound(SecretToken("totp-seed-canary"), key=SecretStr(ring))
+    bare = Fernet(ring.encode()).encrypt(b"legacy-canary")
+    assert hf1.startswith(b"hf1.")
+    for row in (hf1, bare):
+        with pytest.raises(crypto.DecryptionError) as excinfo:
+            get_secret(
+                HOUSEHOLD,
+                "anthropic_api_key",
+                settings=_settings("hosted", None, ring),
+                household_value_enc=row,
+            )
+        assert "canary" not in str(excinfo.value)

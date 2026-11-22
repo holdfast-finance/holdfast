@@ -12,7 +12,7 @@ the Fernet key itself is never used for a second purpose. The nonce is 12 random
 The associated data is ``b"hf2." + kid + b"." + ctx`` where ``ctx`` is
 ``household_id|table|column|<row key or setting name>`` (UTF-8). A blob moved to another
 household, table, column or row fails the GCM tag, so it fails to open. ``hf2`` needs a context to
-open; ``hf1`` and legacy values ignore any context (they carry no binding).
+open. With a context, only ``hf2`` opens; ``hf1`` and legacy fail (they carry no binding).
 
 An ``hf1`` value is opened with the key its kid names and no other (no trial decryption). A value
 with no key id (a bare Fernet token, the pre-ADR format) is *legacy*: it is trial-decrypted with
@@ -131,9 +131,11 @@ def _check_context(ctx: str | None) -> bytes:
     if len(parts) != 4 or not all(parts):
         raise ContextError
     try:
-        uuid.UUID(parts[0])
+        canonical = str(uuid.UUID(parts[0]))
     except ValueError:
         raise ContextError from None
+    if parts[0] != canonical:  # lower-case hyphenated only: one spelling per household
+        raise ContextError
     return ctx.encode("utf-8")
 
 
@@ -168,26 +170,29 @@ def load_ring(key: SecretStr | None = None) -> KeyRing:
     return KeyRing(tuple(kids), fernets, aeads)
 
 
-def seal(plaintext: SecretToken, ctx: str | None = None, *, key: SecretStr | None = None) -> bytes:
-    """Encrypt under the primary key. With ``ctx``: ``hf2``, bound to it. Without: ``hf1``.
-
-    ``hf1`` (no binding) is only for ``app_user.totp_secret_enc``. Every gated column and every
-    new connector credential passes a context.
-    """
+def seal(plaintext: SecretToken, ctx: str, *, key: SecretStr | None = None) -> bytes:
+    """Encrypt under the primary key as ``hf2``, bound to ``ctx`` (ADR 0015 section 6)."""
     return seal_with(plaintext, load_ring(key), ctx)
 
 
-def seal_with(plaintext: SecretToken, ring: KeyRing, ctx: str | None = None) -> bytes:
-    if ctx is not None:
-        aad = _check_context(ctx)
-        aead = ring.aead(ring.primary_kid)
-        if aead is None:  # unreachable: the primary kid is always in the ring
-            raise InvalidKeyError
-        nonce = os.urandom(_NONCE_LEN)
-        kid = ring.primary_kid.encode("ascii")
-        data = plaintext.reveal().encode("utf-8")
-        ct = aead.encrypt(nonce, data, _HF2_PREFIX + kid + b"." + aad)
-        return _HF2_PREFIX + kid + b"." + base64.urlsafe_b64encode(nonce + ct)
+def seal_with(plaintext: SecretToken, ring: KeyRing, ctx: str) -> bytes:
+    aad = _check_context(ctx)
+    aead = ring.aead(ring.primary_kid)
+    if aead is None:  # unreachable: the primary kid is always in the ring
+        raise InvalidKeyError
+    nonce = os.urandom(_NONCE_LEN)
+    kid = ring.primary_kid.encode("ascii")
+    data = plaintext.reveal().encode("utf-8")
+    ct = aead.encrypt(nonce, data, _HF2_PREFIX + kid + b"." + aad)
+    return _HF2_PREFIX + kid + b"." + base64.urlsafe_b64encode(nonce + ct)
+
+
+def seal_unbound(plaintext: SecretToken, *, key: SecretStr | None = None) -> bytes:
+    """Encrypt as ``hf1`` (no binding). Only for ``app_user.totp_secret_enc``."""
+    return seal_unbound_with(plaintext, load_ring(key))
+
+
+def seal_unbound_with(plaintext: SecretToken, ring: KeyRing) -> bytes:
     fernet = ring.fernet(ring.primary_kid)
     if fernet is None:  # unreachable: the primary kid is always in the ring
         raise InvalidKeyError
@@ -235,7 +240,8 @@ def is_current(blob: bytes, ring: KeyRing, *, bound: bool = False) -> bool:
 def open(blob: bytes, ctx: str | None = None, *, key: SecretStr | None = None) -> SecretToken:
     """Decrypt a stored value. Raises :class:`DecryptionError` (fixed message) on any failure.
 
-    An ``hf2`` blob needs the ``ctx`` it was sealed with; a missing or different one fails.
+    With ``ctx``, only an ``hf2`` blob sealed for that exact context opens: ``hf1`` and legacy
+    values carry no binding and fail. Without ``ctx``, only ``hf1`` and legacy open.
     """
     return open_with(blob, load_ring(key), ctx)
 
@@ -258,6 +264,8 @@ def open_with(blob: bytes, ring: KeyRing, ctx: str | None = None) -> SecretToken
             ad = _HF2_PREFIX + kid_b + b"." + aad
             pt = aead.decrypt(raw[:_NONCE_LEN], raw[_NONCE_LEN:], ad)
             return SecretToken(pt.decode("utf-8"))
+        if ctx is not None:
+            raise DecryptionError  # a bound caller never accepts an unbound value
         if env.version == "hf1":
             fernet = ring.fernet(env.kid or "")
             if fernet is None:

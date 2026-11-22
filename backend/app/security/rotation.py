@@ -3,7 +3,8 @@
 Re-seals exactly three columns under the primary ``FERNET_KEY`` entry. The two gated columns
 (``household_setting.value_enc``, ``bank_connection.access_token_enc``) are opened and sealed as
 ``hf2`` with their own row context, so a row moved from elsewhere fails (not rewritten, counted
-as failed) and an ``hf1`` or legacy row is upgraded to ``hf2``. ``app_user.totp_secret_enc`` stays
+as failed) and an ``hf1`` or legacy row there is a failure (never upgraded: that would bind a copied
+unbound value to its new place). ``app_user.totp_secret_enc`` stays
 ``hf1``. Each row is its own
 transaction: ``SELECT ... FOR UPDATE``, then a compare-and-swap ``UPDATE`` that only lands while
 the column still equals the bytes just read. A failed swap is re-read once under a fresh lock; a
@@ -149,6 +150,12 @@ async def _rotate_row(
             return
         old = bytes(row[0])
         ctx = await _context(s, t, ident)
+        if t.bound and (ctx is None or crypto.parse(old).version != "hf2"):
+            # Nothing legitimate wrote an unbound value here. Re-sealing it would launder a
+            # value copied from elsewhere into a valid binding, so it fails and stays as is.
+            counts.failed += 1
+            await s.rollback()
+            return
         if crypto.is_current(old, ring, bound=t.bound):
             if t.bound and not _opens(old, ring, ctx):
                 counts.failed += 1  # current kid but sealed for another place: a moved value
@@ -156,12 +163,13 @@ async def _rotate_row(
                 counts.already_current += 1
             await s.rollback()
             return
-        if t.bound and ctx is None:
-            counts.failed += 1
-            await s.rollback()
-            return
         try:
-            new = crypto.seal_with(crypto.open_with(old, ring, ctx), ring, ctx)
+            opened = crypto.open_with(old, ring, ctx)
+            new = (
+                crypto.seal_with(opened, ring, ctx)
+                if ctx is not None
+                else crypto.seal_unbound_with(opened, ring)
+            )
         except crypto.CryptoError:
             counts.failed += 1
             await s.rollback()
