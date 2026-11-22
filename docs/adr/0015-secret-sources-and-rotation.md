@@ -1,6 +1,6 @@
 # 0015. Secret sources and Fernet rotation
 
-- Status: Proposed
+- Status: Proposed (section 6 `hf2` implemented in F5d)
 - Date: 2026-11-19
 - Deciders: Lattice (Holdfast). The owner sees it in the weekly digest.
 
@@ -108,6 +108,16 @@ Gate: an `hf2` envelope must land before the first writer to `household_setting.
 
 F5c may merge without `hf2` because today's only live writer of any of the three columns is TOTP enrollment (`app_user.totp_secret_enc`). There a moved ciphertext gains nothing. The TOTP seed is only compared server-side and never sent anywhere, and a database writer can already set `totp_enabled = false` or replace `password_hash` directly, without any key. Nothing writes `household_setting.value_enc` or `bank_connection.access_token_enc` yet, so there is no value to move.
 
+Amendment (F5d): implemented in `app.security.crypto`. Envelope `hf2.<kid>.<urlsafe-b64(nonce(12) || ciphertext || tag(16))>`, `kid` as in `hf1`.
+
+- Cipher: AES-256-GCM (an AEAD from the already-installed `cryptography` package; Fernet has no associated data). Fresh 12-byte random nonce per seal.
+- Key: `HKDF-SHA256(ikm = the 32 raw bytes of the primary ring key, salt = none, info = b"holdfast hf2 aead v1", length = 32)`. HKDF gives the AEAD its own key, so the Fernet key's signing and encryption halves are never reused as a GCM key, and `kid` still names the ring entry. No new secret and no new `.env` variable.
+- Associated data: `b"hf2." + kid + b"." + ctx`, UTF-8. `ctx` is exactly four non-empty `|`-separated fields: `household_id|table|column|<row key or setting name>`, the first a UUID. The second field need not be a table (`household_id|redis|connection_preview|<connection_id>:<requested_by>`). For a table row the row key is the primary key without `household_id`, joined by `:`.
+- `crypto.seal(value, ctx)` makes `hf2`; without `ctx` it makes `hf1` (only for `app_user.totp_secret_enc`, which stays `hf1`). `crypto.open(blob, ctx)` needs the same `ctx` for `hf2` and fails with the fixed `DecryptionError` on a missing, malformed or different one, a tampered blob or a relabelled kid. `hf1` and legacy values still open and ignore `ctx`.
+- Rotator: the two gated targets are `bound`. Each row is opened and re-sealed with its own context built from its own `household_id`, table, column and key. A row that fails its context counts as `failed` and `residual` and its bytes are untouched. `hf1` and legacy rows in those columns become `hf2`. An `hf2` value in `app_user.totp_secret_enc` fails the row.
+- Disaster recovery: given the ring key, any AES-GCM implementation opens a blob. Decode the kid and body, base64url-decode the body, derive the key with HKDF-SHA256 as above, and decrypt `body[12:]` with nonce `body[:12]` and the associated data above. `test_disaster_recovery_stock_tooling_opens_an_hf2_blob_given_the_key` does it with a hand-written RFC 5869 and stock `AESGCM`.
+- Rollback: as with `hf1`, an image older than F5d cannot open `hf2`.
+
 ## Alternatives considered
 
 - Household row overrides the environment, or the environment fills a missing row: a hosted household with no row would silently use the operator's Plaid or API key, and a self-hosted row would silently replace `.env`.
@@ -122,8 +132,8 @@ F5c may merge without `hf2` because today's only live writer of any of the three
 
 - Harbor's build (F5c) adds the envelope to `app.security.crypto`, `get_secret`, the rotator, `make rotate-keys` and the `rotate-keys` compose service (`tools` profile, `holdfast_app` role, backend network only, no ports), and the outbound validator. One small migration (`0010_list_household_ids`) adds `list_household_ids()` and the owner-only `household_list_owner` SELECT policy on `household`. There is no new role.
 - Tests that have to land with the build: self-host returns the env canary when a different canary is in `household_setting`; hosted returns the row and does not use the env canary; hosted with no row and self-host with no env raise `SecretNotFound` whose text contains neither canary; `fernet_key` reads neither source; a null `totp_secret_enc` is not updated; a bare Fernet token becomes `hf1.<primary kid>....`; a broken `hf1` value is not trial-decrypted; two concurrent rotations leave one ciphertext and the plaintext of the bytes that won the lock; a second run writes nothing; a duplicate ring fails; an `hf1` value relabelled with another kid fails; the runtime role is still not a superuser and still has no `BYPASSRLS`.
-- Application writes to the three columns must seal as `hf1` in the same build, or rotation will keep finding fresh legacy rows.
+- Application writes to `app_user.totp_secret_enc` seal as `hf1`. Writes to the two gated columns seal as `hf2` with their context (section 6, F5d), or rotation will keep finding fresh `hf1` rows.
 - The format is one-way. A pre-F5c image cannot open `hf1`. Rolling back after any TOTP setup or any rotation locks out every TOTP user and leaves bank tokens unreadable. F5c is the minimum version for any database it has touched, and the release notes must say so.
 - Rotate in a quiet window. A TOTP login re-reads the user under lock and requires `totp_secret_enc` to equal the bytes it verified against. If a rotation re-seals that row in between, the login fails once and the user has to retry.
-- The first connector PR that writes `household_setting.value_enc` or `bank_connection.access_token_enc` carries `hf2` (section 6) or is blocked.
+- The first connector PR that writes `household_setting.value_enc` or `bank_connection.access_token_enc` carries `hf2` (section 6) or is blocked. F5d has landed the envelope, so that PR only has to call `crypto.seal(value, ctx)`.
 - `SecretToken` remains the F5a type (merged `9e16a5c`); F5c only makes it final. This ADR does not vendor another copy.

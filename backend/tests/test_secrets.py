@@ -43,10 +43,17 @@ def test_self_host_returns_env_and_ignores_the_household_row() -> None:
     assert got.reveal() == env_canary
 
 
+def _row(
+    value: str, ring: str, name: str = "anthropic_api_key", hid: uuid.UUID = HOUSEHOLD
+) -> bytes:
+    ctx = crypto.make_context(hid, "household_setting", "value_enc", name)
+    return crypto.seal(SecretToken(value), ctx, key=SecretStr(ring))
+
+
 def test_hosted_returns_the_row_and_ignores_env() -> None:
     ring = crypto.generate_key()
     env_canary, row_canary = _canaries()
-    row = crypto.seal(SecretToken(row_canary), key=SecretStr(ring))
+    row = _row(row_canary, ring)
     got = get_secret(
         HOUSEHOLD,
         "anthropic_api_key",
@@ -90,7 +97,7 @@ def test_self_host_empty_env_value_is_not_found(empty: str) -> None:
 
 def test_hosted_empty_plaintext_is_not_found() -> None:
     ring = crypto.generate_key()
-    row = crypto.seal(SecretToken("  "), key=SecretStr(ring))
+    row = _row("  ", ring)
     with pytest.raises(SecretNotFound):
         get_secret(
             HOUSEHOLD,
@@ -136,3 +143,53 @@ def test_unknown_deployment_mode_fails_startup() -> None:
 
 def test_default_deployment_is_self_host(clean_env: pytest.MonkeyPatch) -> None:
     assert make_settings().app_deployment == "self_host"
+
+
+@pytest.mark.parametrize(
+    ("hid", "name"),
+    [
+        (uuid.uuid4(), "anthropic_api_key"),  # another household
+        (HOUSEHOLD, "openai_compat_api_key"),  # another setting name
+        (HOUSEHOLD, "plaid_secret_production"),
+    ],
+)
+def test_hosted_row_copied_to_another_household_or_name_fails_closed(
+    hid: uuid.UUID, name: str
+) -> None:
+    ring = crypto.generate_key()
+    canary = "moved-" + secrets.token_hex(12)
+    row = _row(canary, ring, name, hid)
+    with pytest.raises(crypto.DecryptionError) as excinfo:
+        get_secret(
+            HOUSEHOLD,
+            "anthropic_api_key",
+            settings=_settings("hosted", None, ring),
+            household_value_enc=row,
+        )
+    assert canary not in str(excinfo.value) and canary not in repr(excinfo.value)
+
+
+def test_hosted_row_for_a_different_column_fails_closed() -> None:
+    ring = crypto.generate_key()
+    ctx = crypto.make_context(HOUSEHOLD, "bank_connection", "access_token_enc", "anthropic_api_key")
+    row = crypto.seal(SecretToken("x-canary"), ctx, key=SecretStr(ring))
+    with pytest.raises(crypto.DecryptionError):
+        get_secret(
+            HOUSEHOLD,
+            "anthropic_api_key",
+            settings=_settings("hosted", None, ring),
+            household_value_enc=row,
+        )
+
+
+def test_hosted_still_opens_an_hf1_row_until_it_is_upgraded() -> None:
+    ring = crypto.generate_key()
+    row = crypto.seal(SecretToken("legacy-row"), key=SecretStr(ring))
+    assert row.startswith(b"hf1.")
+    got = get_secret(
+        HOUSEHOLD,
+        "anthropic_api_key",
+        settings=_settings("hosted", None, ring),
+        household_value_enc=row,
+    )
+    assert got.reveal() == "legacy-row"

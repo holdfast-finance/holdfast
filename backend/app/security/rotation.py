@@ -1,6 +1,10 @@
 """Fernet key rotation: ``python -m app.security.rotation`` (``make rotate-keys``). ADR 0015.
 
-Re-seals exactly three columns under the primary ``FERNET_KEY`` entry. Each row is its own
+Re-seals exactly three columns under the primary ``FERNET_KEY`` entry. The two gated columns
+(``household_setting.value_enc``, ``bank_connection.access_token_enc``) are opened and sealed as
+``hf2`` with their own row context, so a row moved from elsewhere fails (not rewritten, counted
+as failed) and an ``hf1`` or legacy row is upgraded to ``hf2``. ``app_user.totp_secret_enc`` stays
+``hf1``. Each row is its own
 transaction: ``SELECT ... FOR UPDATE``, then a compare-and-swap ``UPDATE`` that only lands while
 the column still equals the bytes just read. A failed swap is re-read once under a fresh lock; a
 second failure is a conflict. Plaintext from a lost snapshot is never written.
@@ -47,12 +51,13 @@ class Target:
     pk: tuple[str, ...]
     household_scoped: bool
     has_updated_at: bool
+    bound: bool = False  # sealed ``hf2``, bound to its row (ADR 0015 section 6)
 
 
 # The whole rotator list. A new ciphertext column needs an ADR first.
 TARGETS: tuple[Target, ...] = (
-    Target("household_setting", "value_enc", ("household_id", "key"), True, True),
-    Target("bank_connection", "access_token_enc", ("id",), True, True),
+    Target("household_setting", "value_enc", ("household_id", "key"), True, True, True),
+    Target("bank_connection", "access_token_enc", ("id",), True, True, True),
     Target("app_user", "totp_secret_enc", ("id",), False, False),
 )
 
@@ -70,6 +75,43 @@ class Counts:
     @property
     def clean(self) -> bool:
         return self.failed == 0 and self.conflicted == 0 and self.residual == 0
+
+
+async def _context(s: AsyncSession, t: Target, ident: dict[str, Any]) -> str | None:
+    """``household_id|table|column|<row key>`` for a bound target, else ``None``.
+
+    The row key is the primary key without ``household_id`` (joined by ``:``). A row whose own
+    ``household_id`` cannot be read has no context, so it fails rather than guessing.
+    """
+    if not t.bound:
+        return None
+    hid = ident.get("household_id")
+    if hid is None:
+        row = (
+            await s.execute(
+                text(f'SELECT "household_id" FROM "{t.table}" WHERE {_where(t)}'),
+                {f"p_{k}": v for k, v in ident.items()},
+            )
+        ).first()
+        if row is None:
+            return None
+        hid = row[0]
+    key = ":".join(str(v) for k, v in ident.items() if k != "household_id")
+    try:
+        return crypto.make_context(uuid.UUID(str(hid)), t.table, t.column, key)
+    except (crypto.CryptoError, ValueError):
+        return None
+
+
+def _opens(blob: bytes, ring: crypto.KeyRing, ctx: str | None) -> bool:
+    """True when ``blob`` opens under ``ctx``. The plaintext is discarded at once."""
+    if ctx is None:
+        return False
+    try:
+        crypto.open_with(blob, ring, ctx)
+    except crypto.CryptoError:
+        return False
+    return True
 
 
 def _where(t: Target) -> str:
@@ -106,13 +148,21 @@ async def _rotate_row(
             await s.rollback()
             return
         old = bytes(row[0])
-        if crypto.is_current(old, ring):
-            counts.already_current += 1
+        ctx = await _context(s, t, ident)
+        if crypto.is_current(old, ring, bound=t.bound):
+            if t.bound and not _opens(old, ring, ctx):
+                counts.failed += 1  # current kid but sealed for another place: a moved value
+            else:
+                counts.already_current += 1
+            await s.rollback()
+            return
+        if t.bound and ctx is None:
+            counts.failed += 1
             await s.rollback()
             return
         try:
-            new = crypto.seal_with(crypto.open_with(old, ring), ring)
-        except crypto.DecryptionError:
+            new = crypto.seal_with(crypto.open_with(old, ring, ctx), ring, ctx)
+        except crypto.CryptoError:
             counts.failed += 1
             await s.rollback()
             return
@@ -199,8 +249,14 @@ async def rotate(
         row = (
             await s.execute(text(f'SELECT "{t.column}" FROM "{t.table}" WHERE {_where(t)}'), params)
         ).first()
+        ctx = await _context(s, t, ident) if t.bound else None
         await s.rollback()
-        if row is not None and row[0] is not None and not crypto.is_current(bytes(row[0]), ring):
+        if row is None or row[0] is None:
+            return
+        blob = bytes(row[0])
+        if not crypto.is_current(blob, ring, bound=t.bound) or (
+            t.bound and not _opens(blob, ring, ctx)
+        ):
             counts.residual += 1
 
     # Catches rows an old-key writer added mid-run and rows a failed row left behind.
