@@ -230,16 +230,16 @@ async def test_an_ofx_card_statement_becomes_a_credit_account_with_owed_negative
 ) -> None:
     txns = (
         "<STMTTRN><DTPOSTED>20260105<TRNAMT>-20.00<FITID>c1<NAME>Example Store"
-        "<BALAMT>-130.00</STMTTRN>\n"
+        "<BALAMT>-132.00</STMTTRN>\n"
         "<STMTTRN><DTPOSTED>20260106<TRNAMT>-5.00<FITID>c2<NAME>Example Cafe"
-        "<BALAMT>-135.00</STMTTRN>\n"
+        "<BALAMT>-137.00</STMTTRN>\n"
     )
     r = await up(
-        owner.client, ofx(txns, closing="-135.00", acct="EXAMPLECARD1", card=True), "c.ofx"
+        owner.client, ofx(txns, closing="-137.00", acct="EXAMPLECARD1", card=True), "c.ofx"
     )
     assert r.status_code == 200, r.text
     (block,) = r.json()["blocks"]
-    assert (block["opening_balance"], block["closing_balance"]) == ("-110.00", "-135.00")
+    assert (block["opening_balance"], block["closing_balance"]) == ("-112.00", "-137.00")
     assert block["reconcile_status"] == "reconciled"
     hid = uuid.UUID(owner.household["id"])
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
