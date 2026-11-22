@@ -294,3 +294,45 @@ or that same account approving itself. Change: use a GitHub App or machine ident
 **R2-S5. N1 is gated on a word in the README (§11).** The gate is "README says no upgrade path before beta". Tie it to
 IN15 passing on the release commit instead. Also add legacy→`hf1` (F5c, PR #31, still unmerged) to the one-way list:
 the first channel release either already contains it or its first `update` carries it.
+
+## Round 3 (6cf8dc4)
+
+Verdict: **ACCEPT.** R2-B1, R2-B2 and R2-B3 (all six sub-points) are closed in the text of ADR 0037 §2, §9 and §11, the
+plan's IN1, IN-A1, IN-B1, IN3, IN15 and IN-CG, and the amended ADR 0021 §12. R2-S1 to R2-S5 are closed too. The four
+items below are should-fixes. Carry each into the brief of the slice named. None blocks merging this PR.
+
+**R3-S1. The backup-receipt gate would break the clone and dev path (IN-B1 (d)).** The import endpoint refuses the
+first import when there is no receipt. The dev stack and the clone install have no wrapper, so they would never have a
+receipt. That blocks the owner's local instance and the Phase 3 import tests. Change: put the gate behind a setting
+that is on in the release `compose.yaml` and off in dev, and test both values. Also say how the host writes the
+receipt into a named volume: through a one-shot helper container fed on stdin, not a bind mount.
+
+**R3-S2. The default backup folder is inside cloud-synced Documents (§2).**
+- Windows OneDrive folder backup and macOS iCloud "Desktop & Documents" often sync `Documents`. The archives are
+  encrypted, so this is not a leak, but Holdfast would be making an off-host copy choice for the user without asking.
+  The free cloud tiers (5 GB) will also fill up.
+- No retention rule exists, so backups grow without limit.
+
+Change: the first run says whether the folder is synced, and offers a local-only folder. Add a retention rule (keep
+the last N, plus every pre-update backup until the next verified one), with a test.
+
+**R3-S3. State lost while the volumes survive is undefined (§2, IN15).**
+- A new first run makes a new install id. The old `holdfast-app_*` volumes then carry a foreign label, and the
+  compose names collide.
+- Compose's behaviour when the labels differ is UNVERIFIED.
+- `install.json`, which holds the install id, is not listed as part of the archive.
+
+Change:
+- Put the install id in the archive.
+- `keys` and `restore` refuse, and name the volume, when a `holdfast-app_*` volume carries a different or missing
+  install id.
+- Offer `holdfast restore <archive>` as the documented path.
+- Add a test for this case.
+
+**R3-S4. IN-A1's merge still waits on owner time (IN-A1; ADR 0021 §12).** The amended bullet makes PA-D2's merge
+depend on Chrome, Firefox and Edge being checked "on the owner's Windows PC and Linux". U-6 needs a real
+authenticator. The slice order says IN-A1 doesn't wait on owner time, so the two contradict each other. Change:
+- IN-A1 merges on Linux checks that an agent can run: Playwright with a virtual authenticator in Chromium and Firefox.
+- The Windows browser checks and U-6 become the support claim.
+- The amended bullet in ADR 0021 says outright that PA-D2 does not need §12 stage-2 "Accepted". It currently sits
+  under that heading.
