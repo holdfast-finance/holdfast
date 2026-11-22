@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     postgres_app_password: SecretStr | None = None
     postgres_owner_password: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
+    # Fill the password into REDIS_URL when the URL carries none.
+    redis_password: SecretStr | None = None
     document_store: Path = Path("/data/documents")
 
     # Auth (PLAN 12). WebAuthn RP id is APP_HOST; the expected origin is https://{APP_HOST}
@@ -157,6 +159,19 @@ class Settings(BaseSettings):
         if self.migrations_database_url is None:
             return self.sqlalchemy_url
         return _with_password(self.migrations_database_url, self.postgres_owner_password)
+
+    @property
+    def redis_dsn(self) -> str:
+        """REDIS_URL with the password filled from REDIS_PASSWORD when the URL carries none.
+        Never log it."""
+        url = make_url(self.redis_url.get_secret_value())
+        if url.password is None and self.redis_password is not None:
+            # An empty username renders as `redis://:password@host`, which redis-py reads as
+            # "default user".
+            url = url.set(
+                username=url.username or "", password=self.redis_password.get_secret_value()
+            )
+        return url.render_as_string(hide_password=False)
 
 
 def _with_password(dsn: SecretStr, password: SecretStr | None) -> URL:

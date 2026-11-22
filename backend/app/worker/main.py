@@ -60,7 +60,7 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
-    redis_settings = RedisSettings.from_dsn(get_settings().redis_url.get_secret_value())
+    redis_settings = RedisSettings.from_dsn(get_settings().redis_dsn)
     # Plain functions, not staticmethod(): arq builds the Worker from this class's __dict__, so a
     # wrapper would reach it as-is. tests/test_worker.py pins what arq actually receives.
     job_serializer = queue.dumps

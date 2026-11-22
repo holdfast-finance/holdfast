@@ -6,7 +6,7 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys check health ports env-check sync test-locked release-check dist
+.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys keys-add-missing check health ports env-check sync test-locked release-check dist
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -14,6 +14,7 @@ help: ## Show this help
 
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
+	@grep -qE '^REDIS_PASSWORD=.+' .env || { echo "error: REDIS_PASSWORD is missing from .env. Run 'make keys-add-missing' (adds it, changes nothing else)." >&2; exit 1; }
 
 # The backend image runs as uid 10001; hand it ./data/documents using that same image (as root,
 # no extra image pulled). Host-side reads of stored documents then need sudo, by design.
@@ -73,7 +74,10 @@ test: ## Backend pytest (needs `make up` for the db) + web vitest
 	      owner_pw=$$($(call envval,POSTGRES_OWNER_PASSWORD)); \
 	      export TEST_MIGRATIONS_DATABASE_URL="postgresql+psycopg://holdfast_owner:$${owner_pw}@127.0.0.1:5432/$(TEST_DB)"; \
 	    fi; \
-	    export TEST_REDIS_URL="$${TEST_REDIS_URL:-redis://127.0.0.1:56379/15}"; \
+	    if [ -z "$${TEST_REDIS_URL:-}" ]; then \
+	      redis_pw=$$($(call envval,REDIS_PASSWORD)); \
+	      export TEST_REDIS_URL="redis://:$${redis_pw}@127.0.0.1:56379/15"; \
+	    fi; \
 	  fi; \
 	  cd backend && uv run pytest -q; \
 	else echo "skip backend: no backend/pyproject.toml"; fi
@@ -119,6 +123,9 @@ sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-
 
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)
 	python3 scripts/gen-keys.py --write
+
+keys-add-missing: ## Existing .env: add only the generated values it lacks (REDIS_PASSWORD), keep the rest
+	python3 scripts/gen-keys.py --add-missing
 
 check: lint test ## lint + test
 
