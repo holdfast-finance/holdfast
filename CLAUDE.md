@@ -124,8 +124,11 @@ Docker Compose for services.
   never their raw CLIs. The full command and flag reference, and when to use `delegate`, `conduct`
   and `run`, is `docs/process/FIRSTCHAIR.md`: read it before the first dispatch of a session. The
   rules that matter most:
-  - Every Codex or Grok worker runs with `--confine --hide <private data directory>` (ADR 0019).
-    `conduct` cannot confine, so a score uses only the `claude` and `self` seats here.
+  - Every Codex or Grok worker, read or write, runs with the flags `scripts/fc-hides.sh` prints
+    (`--confine` plus hides for the private data directory, the container sockets, the session
+    bus and keyring, and the lead's scratch directory; ADR 0019). `--confine` alone leaves the
+    sockets reachable. `conduct` cannot confine, so a score uses only the `claude` and `self`
+    seats here.
   - Codex writes, Grok reads. Never pass `--allow-grok-write`.
   - Workers never commit, push or merge. Keel applies the diff (`delegate apply --to <worktree>`),
     runs the suite itself, commits with the agent's trailer, then `delegate finish`.

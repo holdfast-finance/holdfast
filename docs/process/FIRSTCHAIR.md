@@ -7,14 +7,24 @@ tool is alpha and its interface can change.
 
 ## Rules for this repo
 
-1. **Always confine a Codex or Grok worker.** Pass `--confine --hide <private data directory>`
-   (ADR 0019). Without it a worker can read the whole home directory, and real statements must
-   never reach another vendor's CLI. `--confine` needs bubblewrap and refuses to run without it.
+1. **Always confine a Codex or Grok worker, with the full hide list.** Pass the flags that
+   `scripts/fc-hides.sh` prints: `firstchair delegate run codex ... $(scripts/fc-hides.sh)`. They
+   are `--confine` plus `--hide` for the private data directory (ADR 0019), the container sockets
+   (`/run/docker.sock`, `/var/run/docker.sock`, the rootless ones under `/run/user/<uid>/`), the
+   session bus and keyring sockets (`/run/user/<uid>/bus`, `keyring`, `gnupg`, `gcr`) and the lead
+   session's scratch directory. `--confine` alone is not enough: it is a filesystem view under the
+   lead's own user and groups, not a user boundary. It hides the project's checkouts and common
+   secret stores but no sockets, so without the extra hides a worker could reach the running
+   stack through the container socket, or a Git host token through the desktop keyring. Real
+   statements and anything derived from them must never reach another vendor's CLI. `--confine`
+   needs bubblewrap and refuses to run without it. Never type the flags by hand.
 2. **`conduct` cannot confine.** `conduct run` has no `--confine`, `--hide`, `--base`, `--model` or
    `--effort`. On a machine that holds real data, a score may use only the `claude` and `self`
    seats. Fan out Codex and Grok with several `delegate run` jobs in the background instead.
-3. **Codex writes, Grok reads.** A Grok write worker has terminal commands and network access, so
-   it is refused unless `--allow-grok-write` is passed. Do not pass it.
+3. **Codex writes, Grok reads.** A Grok write worker is refused unless `--allow-grok-write` is
+   passed. Do not pass it. A Grok read worker still has a shell with no permission prompts (only
+   its two edit tools are removed), and Codex runs commands too, so rule 1 applies to read jobs
+   exactly as it does to write jobs.
 4. **Workers never commit, push or merge.** Keel reviews the diff, runs the suite, commits with
    the worker's agent trailer, scans, and lands the PR.
 5. **A Codex or Grok review is a second opinion.** It never satisfies `review-gate`. Gate
@@ -58,7 +68,7 @@ checkout (ignored by Git). The session ID is 1 to 63 characters of `a-z 0-9 . _ 
 | `--with-changes` | Copy the checkout's uncommitted and untracked files into the worktree |
 | `--confine` | Hide the project's other checkouts, common secret stores and the other providers' files |
 | `--hide PATH` | Also hide this absolute path. Repeatable. Implies `--confine` |
-| `--model MODEL`, `--effort EFFORT` | Override the worker's model or reasoning effort. Explicit seats only, not `auto` |
+| `--model MODEL`, `--effort EFFORT` | Override the worker's model or reasoning effort. Explicit seats only, not `auto` or `self` |
 | `--profile NAME` | Use a named sign-in for an explicit worker |
 | `--rotate-accounts` | Pick the worker's account from real usage |
 | `--timeout SECONDS` | Kill the worker after this long (default 1,800) |
@@ -110,7 +120,7 @@ and `task`, and may have `timeout` and `after`.
 | Command | Effect |
 |---|---|
 | `conduct plan --lead L --score FILE` | Resolve seats without starting a worker |
-| `conduct run --lead L --name N --score FILE [--limit 1..4] [--with-changes] [--rotate-accounts]` | Run the score. Parts run one at a time unless a limit is set |
+| `conduct run --lead L --name N --score FILE [--limit 1..4] [--with-changes] [--rotate-accounts] [--allow-grok-write]` | Run the score. Parts run one at a time unless a limit is set |
 | `conduct status NAME` | The board, plus whether the conductor is `live` or `gone` and each running part's elapsed time |
 | `conduct cancel NAME` | Stop the running parts. Refused if no conductor holds the lock |
 | `conduct resume --name N --score FILE` | Continue a score whose conductor is gone, skipping completed parts |
@@ -166,6 +176,9 @@ calls: use `--account-call-limit` when Grok does a lot of work.
 ## Gaps to remember
 
 - `conduct` has no confine, base, model or effort options (rule 2).
-- `--model` and `--effort` are refused with the `auto` seat.
+- `--model` and `--effort` are refused with the `auto` and `self` seats.
+- `--confine` hides no sockets and does not change the user or its groups (rule 1). The target
+  remains a separate OS user with no container access and a read-only Git host identity for
+  these workers; until that exists, the hide list is the control.
 - A worker killed together with its conductor can keep running in its own process group. Check
   for it before resuming a score.
