@@ -188,6 +188,9 @@ class RetryPolicy:
 
 DEFAULT_RETRY = RetryPolicy()
 DEFAULT_TIMEOUT = timedelta(minutes=5)
+# arq's per-function timeout = spec.timeout + this. It covers the bookkeeping around the handler
+# (pool checkout waits up to 30 s, lock, claim, marks); the runner's own timeout fires first.
+ARQ_TIMEOUT_MARGIN = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,17 @@ class JobSpec[P: JobPayload]:
     payload: type[P]
     retry: RetryPolicy
     timeout: timedelta
+
+    @property
+    def arq_timeout(self) -> timedelta:
+        """arq's backstop: by then the runner's own timeout has cancelled the handler."""
+        return self.timeout + ARQ_TIMEOUT_MARGIN
+
+    @property
+    def orphan_after(self) -> timedelta:
+        """A ``running`` row older than this (by ``started_at``) can't be live work: arq's
+        backstop has cancelled it. Only then may a claim take it over (ADR 0016)."""
+        return self.arq_timeout
 
     def validate(self, payload: P | Mapping[str, Any]) -> P:
         """Strictly re-validate ``payload`` (a model or a plain mapping) as this job's schema.

@@ -22,16 +22,6 @@ async def get_user(s: AsyncSession, user_id: uuid.UUID, *, for_update: bool = Fa
     return (await s.execute(stmt)).scalar_one()
 
 
-async def household_ids(s: AsyncSession) -> list[uuid.UUID]:
-    """Every household with at least one login, for worker sweeps (unscoped session).
-
-    ``household`` has RLS, so ``app_user.household_id`` is the one place the app can list
-    tenants. A household with no login can't enqueue from the API, so a sweep loses nothing.
-    """
-    stmt = select(AppUser.household_id).distinct().order_by(AppUser.household_id)
-    return list((await s.execute(stmt)).scalars().all())
-
-
 async def has_passkey(s: AsyncSession, user_id: uuid.UUID) -> bool:
     found = await s.execute(select(exists().where(WebauthnCredential.user_id == user_id)))
     return bool(found.scalar_one())
