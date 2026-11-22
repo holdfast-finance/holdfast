@@ -120,6 +120,22 @@ Docker Compose for services.
 - **Hooks** (`.claude/hooks/`): `guard-secrets.sh` blocks writes that contain real-looking
   secrets, seed phrases or files under `data/`, `.env` and `secrets/`. `format.sh` formats edited
   Python/TS files once the toolchains exist.
+- **Other vendors' CLIs (Codex as Anvil, Grok as Helm):** drive them only through `firstchair`,
+  never their raw CLIs. The full command and flag reference, and when to use `delegate`, `conduct`
+  and `run`, is `docs/process/FIRSTCHAIR.md`: read it before the first dispatch of a session. The
+  rules that matter most:
+  - Start every Codex or Grok worker, read or write, through `scripts/fc-delegate.sh` (same
+    arguments as `firstchair delegate run`). It adds `--confine` and every required `--hide`
+    (private data directory per ADR 0019, container sockets, session bus, systemd user manager,
+    keyring) and refuses to start if confinement cannot be proven. `conduct` cannot confine, so a
+    score uses only the `claude` and `self` seats here.
+  - Codex writes, Grok reads. Never pass `--allow-grok-write`.
+  - Workers never commit, push or merge. Keel applies the diff (`delegate apply --to <worktree>`),
+    runs the suite itself, commits with the agent's trailer, then `delegate finish`.
+  - Their reviews are second opinions and never satisfy `review-gate`.
+  - Pass one `--session <id>` on every call, check `firstchair auth usage --refresh` before a
+    sprint, and use `--rotate-accounts`. `--base <ref>` reviews a PR branch; `--model` and
+    `--effort` work only with an explicit seat, not `auto`.
 - **Plugins:** pyright-lsp, typescript-lsp, security-guidance, frontend-design, pr-review-toolkit,
   commit-commands, claude-md-management, context7 (library docs), playwright (UI checks).
 
