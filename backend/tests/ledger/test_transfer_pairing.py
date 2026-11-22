@@ -209,7 +209,7 @@ async def test_a_users_category_keeps_a_row_out_of_auto_pairing(
     ]
 
 
-async def test_accounts_of_two_owners_are_suggested_not_paired(
+async def test_accounts_of_two_owners_are_never_paired(
     factory: Factory, household: uuid.UUID
 ) -> None:
     alex, sam = await _people(factory, household)
@@ -218,7 +218,9 @@ async def test_accounts_of_two_owners_are_suggested_not_paired(
     await _txn(factory, household, a, "-25.00", 4)
     await _txn(factory, household, b, "25.00", 4)
     report = await _run(factory, household)
-    assert not report.paired and [x.reason for x in report.suggested] == ["different_owners"]
+    # ADR 0027: both legs are hinted, so the domain returns a cross-owner `link`, not a pair.
+    # Until C4c (which writes the links table) the service ignores `links`: nothing is written.
+    assert not report.paired and not report.suggested
     assert await _flagged(factory, household) == 0
 
 
@@ -235,7 +237,9 @@ async def test_person_scoped_run_sees_only_their_accounts(
     assert not nothing.paired and not nothing.suggested and not nothing.ambiguous
     async with scoped_session(factory, household, alex) as s:
         report = await pair_transfers(s, household, FROM, TO, user_id=uuid.uuid4())
-    assert [(p.outflow_id, p.inflow_id) for p in report.paired] == [(out, inn)]
+    # Alex's private account versus a joint one is a cross-owner edge (a `link` in the domain,
+    # ADR 0027). Until C4c the service writes no links, so it pairs nothing.
+    assert not report.paired and out != inn
 
 
 async def test_a_session_with_no_user_and_no_system_context_is_refused(
