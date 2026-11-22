@@ -50,6 +50,17 @@ class ImportRunPage(Model):
     next_cursor: str | None
 
 
+class ImportAccountOut(Model):
+    """An import account a CSV or OFX can be added to."""
+
+    id: uuid.UUID
+    name: str
+    type: Literal["bank", "card"]
+    mask: str | None
+    currency: str
+    joint: bool
+
+
 class ImportBlockOut(ReconcileNumbers):
     """One account's block of the uploaded statement."""
 
@@ -63,6 +74,8 @@ class ImportBlockOut(ReconcileNumbers):
     rows_parsed: int
     rows_inserted: int
     rows_duplicate: int
+    # Inserted rows that may already be in the account from another file (``possible_overlap``).
+    rows_overlap: int = 0
     # False: this file was already imported and nothing was written for this block.
     created: bool
     # Why a block that isn't reconciled needs a look (a fixed code such as ``balance_mismatch`` or
@@ -81,6 +94,12 @@ class ImportBalanceOut(Model):
 class ImportResultOut(Model):
     document_id: uuid.UUID
     filename: str
+    # What the file's bytes said it is (the name and MIME type are not trusted): ``pdf``, ``csv``
+    # or ``ofx`` (which covers QFX).
+    file_kind: Literal["pdf", "csv", "ofx"]
+    # A plain-language heads-up about this import, or null. Set when a CSV/OFX created a new
+    # account while the household already had imported accounts (it may repeat their rows).
+    notice: str | None = None
     # False: the file (same SHA-256) was already stored; the response describes the earlier import.
     created: bool
     balances_only: bool

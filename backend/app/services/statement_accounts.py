@@ -42,13 +42,17 @@ async def resolve_statement_account(
     statement_key: str,
     new: NewStatementAccount,
     person_id: uuid.UUID | None,
+    *,
+    joint: bool = False,
 ) -> Account:
     """The household's account with ``statement_key``, created as an ``import`` account if none
     exists. Race-safe on the ``(household_id, statement_key)`` unique key.
 
-    A person importing owns the new account and it starts private (ADR 0008); a household-wide
-    job (no person) creates a joint, shared account. Raises :class:`AccountNotVisibleError` when
-    the account exists but this session can't see it.
+    A person importing owns the new account and it starts private (ADR 0008), unless ``joint``
+    (an upload the person marked as the household's); a household-wide job (no person) creates a
+    joint, shared account. The key should say whose account it is when people can share a
+    source (statement import adds the owner for CSV/OFX), so two people never resolve to one.
+    Raises :class:`AccountNotVisibleError` when the account exists but this session can't see it.
     """
     where = (Account.household_id == household_id, Account.statement_key == statement_key)
     acct = (await s.execute(select(Account).where(*where))).scalar_one_or_none()
@@ -65,8 +69,8 @@ async def resolve_statement_account(
             name=new.name,
             mask=new.mask,
             type=new.type,
-            owner_person_id=person_id,
-            visibility="private" if person_id else "shared",
+            owner_person_id=None if joint else person_id,
+            visibility="private" if person_id and not joint else "shared",
         )
         .on_conflict_do_nothing(index_elements=["household_id", "statement_key"])
     )

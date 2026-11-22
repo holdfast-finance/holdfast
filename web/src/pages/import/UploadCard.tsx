@@ -5,11 +5,18 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
 import {
+  MAX_OFX_UPLOAD_BYTES,
+  MAX_OFX_UPLOAD_LABEL,
+  MAX_TEXT_UPLOAD_BYTES,
+  MAX_TEXT_UPLOAD_LABEL,
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_LABEL,
+  NEW_ACCOUNT,
   UploadError,
+  useImportAccounts,
   useUploadStatement,
   type ImportResult,
+  type UploadTarget,
 } from '@/api/imports'
 import { ApiError } from '@/api/client'
 import { FormError } from '@/components/forms/Field'
@@ -17,18 +24,31 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ReauthCancelledError } from '@/stores/reauth'
 import { resultHeadline } from './format'
+import { AccountPicker } from './AccountPicker'
 import { ResultView } from './ResultView'
+
+const isCsv = (f: File): boolean => /\.csv$/i.test(f.name) || f.type === 'text/csv'
+const isOfx = (f: File): boolean => /\.(ofx|qfx)$/i.test(f.name)
+const isText = (f: File): boolean => isCsv(f) || isOfx(f)
 
 const schema = z.object({
   file: z
-    .custom<File>((v) => v instanceof File, 'Choose a PDF statement.')
+    .custom<File>((v) => v instanceof File, 'Choose a statement file.')
     .refine(
-      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'),
-      'That is not a PDF. Choose the statement PDF from your bank.',
+      (f) => isText(f) || /\.pdf$/i.test(f.name) || f.type === 'application/pdf',
+      'That is not a PDF, CSV or OFX/QFX file. Choose the export from your bank.',
     )
     .refine(
-      (f) => f.size <= MAX_UPLOAD_BYTES,
-      `That file is over the ${MAX_UPLOAD_LABEL} upload limit. Export a smaller PDF and try again.`,
+      (f) => isText(f) || f.size <= MAX_UPLOAD_BYTES,
+      `That file is over the ${MAX_UPLOAD_LABEL} upload limit. Export a smaller file and try again.`,
+    )
+    .refine(
+      (f) => !isCsv(f) || f.size <= MAX_TEXT_UPLOAD_BYTES,
+      `That file is over the ${MAX_TEXT_UPLOAD_LABEL} upload limit. Export a smaller file and try again.`,
+    )
+    .refine(
+      (f) => !isOfx(f) || f.size <= MAX_OFX_UPLOAD_BYTES,
+      `That file is over the ${MAX_OFX_UPLOAD_LABEL} upload limit. Export a smaller file and try again.`,
     ),
 })
 type FormValues = z.infer<typeof schema>
@@ -61,27 +81,36 @@ export function UploadCard({
   onAccepted: (runId: string) => void
 }) {
   const inputId = useId()
+  const descId = useId()
+  const errorId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
   const [progress, setProgress] = useState(0)
   const upload = useUploadStatement(setProgress)
   const form = useForm<FormValues>({ resolver: zodResolver(schema) })
   const file = useWatch({ control: form.control, name: 'file' }) as File | undefined
   const fileError = form.formState.errors.file?.message
+  const [target, setTarget] = useState<UploadTarget>({ account: NEW_ACCOUNT, accountKind: 'bank' })
+  const textFile = file !== undefined && isText(file)
+  const accounts = useImportAccounts(textFile)
 
   const submit = form.handleSubmit(({ file: chosen }) => {
     setResult(null)
     setProgress(0)
-    upload.mutate(chosen, {
-      onSuccess: (data) => {
-        setResult(data)
+    upload.mutate(
+      { file: chosen, target: isText(chosen) ? target : undefined },
+      {
+        onSuccess: (data) => {
+          setResult(data)
+        },
       },
-    })
+    )
   })
 
   const reset = () => {
     setResult(null)
     upload.reset()
     form.reset({ file: undefined })
+    setTarget({ account: NEW_ACCOUNT, accountKind: 'bank' })
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -95,14 +124,19 @@ export function UploadCard({
     <Card>
       <CardHeader>
         <CardTitle className="font-heading text-lg">Import a statement</CardTitle>
-        <CardDescription>
-          PDF only, up to {MAX_UPLOAD_LABEL}. Your statement is stored with your household's
-          documents. Upload the same file twice and nothing is added.
+        <CardDescription id={descId}>
+          PDF up to {MAX_UPLOAD_LABEL}. CSV up to {MAX_TEXT_UPLOAD_LABEL}, OFX/QFX up to{' '}
+          {MAX_OFX_UPLOAD_LABEL}. Stored with your household's documents. Upload the same file twice
+          and nothing is added.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div role="status" aria-atomic="true" className="sr-only">
-          {busy ? progressText : headline === uploadHeadline ? headline : ''}
+          {busy
+            ? progressText
+            : headline === uploadHeadline
+              ? [headline, upload.data?.notice].filter(Boolean).join('. ')
+              : ''}
         </div>
         {result ? (
           <>
@@ -125,7 +159,7 @@ export function UploadCard({
               >
                 <FileUp aria-hidden="true" className="size-5 shrink-0 text-primary-text" />
                 <span className="min-w-0 flex-1 truncate">
-                  {file ? file.name : 'Choose a statement PDF'}
+                  {file ? file.name : 'Choose a statement file'}
                 </span>
                 {file && (
                   <span className="shrink-0 text-xs text-muted-foreground">{size(file.size)}</span>
@@ -134,10 +168,11 @@ export function UploadCard({
                   ref={inputRef}
                   id={inputId}
                   type="file"
-                  accept="application/pdf,.pdf"
+                  accept="application/pdf,.pdf,.csv,text/csv,.ofx,.qfx"
                   className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                   disabled={busy}
-                  aria-label="Statement PDF"
+                  aria-label={file ? `Statement file: ${file.name}` : 'Choose a statement file'}
+                  aria-describedby={fileError ? `${descId} ${errorId}` : descId}
                   aria-invalid={fileError ? true : undefined}
                   onChange={(e) => {
                     upload.reset()
@@ -147,11 +182,22 @@ export function UploadCard({
                 />
               </label>
               {fileError && (
-                <p role="alert" className="text-sm text-destructive-text">
+                <p id={errorId} role="alert" className="text-sm text-destructive-text">
                   {fileError}
                 </p>
               )}
             </div>
+
+            {textFile && (
+              <AccountPicker
+                accounts={accounts.data ?? []}
+                loading={accounts.isPending}
+                isCsv={isCsv(file)}
+                value={target}
+                onChange={setTarget}
+                disabled={busy}
+              />
+            )}
 
             {busy && (
               <div className="flex flex-col gap-1.5">

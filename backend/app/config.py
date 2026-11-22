@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     cf_api_token: SecretStr | None = None
     session_secret: SecretStr | None = None
     fernet_key: SecretStr | None = None
+    # Stable (never rotated) key for CSV/OFX import id tokens. See ``imports.household_id_key``.
+    import_id_key: SecretStr | None = None
     # Runtime connection: the holdfast_app role (no superuser, no BYPASSRLS, no DDL).
     database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
     # Alembic only: the holdfast_owner role. Unset falls back to DATABASE_URL.

@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, ApiError, apiUrl, CSRF_HEADER, readData } from '@/api/client'
 import type { components } from '@/api/schema'
@@ -16,6 +16,7 @@ export type ImportRun = Schemas['ImportRunOut']
 export type ImportBlock = Schemas['ImportBlockOut']
 export type ImportResult = Schemas['ImportResultOut']
 export type ImportBalance = Schemas['ImportBalanceOut']
+export type ImportAccount = Schemas['ImportAccountOut']
 export type ReconcileStatus = ImportRun['reconcile_status']
 
 /** The balances behind a reconcile result: closing - (opening + txn_sum) must be within $0.01. */
@@ -29,11 +30,34 @@ export interface ReconcileNumbers {
 /** The importer refuses larger PDFs (20 MiB); the route takes a 21 MiB body (ADR 0020). */
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 export const MAX_UPLOAD_LABEL = '20 MiB'
+/** CSV is text: the importer caps it at 10 MiB, and OFX/QFX (tag-heavy) at 5 MiB. */
+export const MAX_TEXT_UPLOAD_BYTES = 10 * 1024 * 1024
+export const MAX_TEXT_UPLOAD_LABEL = '10 MiB'
+export const MAX_OFX_UPLOAD_BYTES = 5 * 1024 * 1024
+export const MAX_OFX_UPLOAD_LABEL = '5 MiB'
 
 export const RUNS_PAGE_SIZE = 20
 
 export const importKeys = {
   runs: ['imports', 'runs'] as const,
+  accounts: ['imports', 'accounts'] as const,
+}
+
+/** Where a CSV or OFX/QFX goes: an existing import account, or a new one. */
+export interface UploadTarget {
+  account: string // 'new' or an account id
+  accountKind: 'bank' | 'card' // for a new CSV account; OFX states its own
+}
+
+export const NEW_ACCOUNT = 'new'
+
+/** Import accounts this person can add to. Only fetched once a CSV or OFX is chosen. */
+export function useImportAccounts(enabled: boolean) {
+  return useQuery({
+    queryKey: importKeys.accounts,
+    enabled,
+    queryFn: ({ signal }) => readData(api.GET('/api/imports/accounts', { signal })),
+  })
 }
 
 /** Keyset pages, newest first. The cursor is opaque, so pages are only fetched in order. */
@@ -76,7 +100,7 @@ function uploadErrorFrom(status: number, body: unknown, retryHeader: string | nu
     return new UploadError(
       status,
       'payload_too_large',
-      `That PDF is over the ${MAX_UPLOAD_LABEL} limit.`,
+      `That file is over the upload limit (${MAX_UPLOAD_LABEL} for PDF, ${MAX_TEXT_UPLOAD_LABEL} for CSV, ${MAX_OFX_UPLOAD_LABEL} for OFX and QFX).`,
       null,
     )
   }
@@ -96,6 +120,7 @@ export function uploadStatement(
   file: File,
   onProgress: (fraction: number) => void,
   signal?: AbortSignal,
+  target?: UploadTarget,
 ): Promise<ImportResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
@@ -132,6 +157,10 @@ export function uploadStatement(
       xhr.abort()
     })
     const form = new FormData()
+    if (target && !/\.pdf$/i.test(file.name)) {
+      form.append('account', target.account)
+      form.append('account_kind', target.accountKind) // must agree with an existing account
+    }
     form.append('file', file, file.name)
     xhr.send(form)
   })
@@ -142,13 +171,14 @@ export function useUploadStatement(onProgress: (fraction: number) => void) {
   return useMutation({
     // The user decides whether to try again; a silent retry would re-send the whole PDF.
     retry: false,
-    mutationFn: (file: File) => {
+    mutationFn: ({ file, target }: { file: File; target?: UploadTarget }) => {
       onProgress(0)
-      return uploadStatement(file, onProgress)
+      return uploadStatement(file, onProgress, undefined, target)
     },
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: importKeys.runs }),
+        queryClient.invalidateQueries({ queryKey: importKeys.accounts }),
         queryClient.invalidateQueries({ queryKey: ['ledger'] }),
       ])
     },

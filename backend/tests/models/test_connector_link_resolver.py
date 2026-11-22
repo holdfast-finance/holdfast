@@ -5,6 +5,7 @@ Runs the real statement import as holdfast_app under RLS. All data is synthetic.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterator
 
@@ -17,7 +18,7 @@ from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedStatement, detect_profile, parse_statement
 from app.importers.profile_loader import load_profiles
 from app.models import Account
-from app.services.statement_import import DocumentMeta, import_statement
+from app.services.statement_import import AccountTarget, DocumentMeta, import_statement
 from tests.importers.test_statement_profiles import DEBIT
 from tests.models.conftest import delete_household, set_ctx
 
@@ -106,3 +107,38 @@ async def test_a_new_imported_account_carries_its_statement_key(
         ).all()
     assert rows
     assert all(src == "import" and key is not None and key == ext for src, key, ext in rows)
+
+
+async def test_an_adopted_account_is_still_an_upload_target(
+    factory: async_sessionmaker[AsyncSession], household: uuid.UUID, app_engine: Engine
+) -> None:
+    """A CSV/OFX upload aimed at an account keeps working after a connection adopts it."""
+    full = _parse(DEBIT)
+    st = dataclasses.replace(full, blocks=full.blocks[:1])  # a target takes one account
+    first = await import_statement(factory, household, st, _meta(4), household_wide=True)
+    account_id = first.blocks[0].account_id
+    with app_engine.begin() as c:
+        set_ctx(c, household, wide=True)
+        conn = c.execute(
+            text(
+                "INSERT INTO bank_connection (household_id, provider, external_id,"
+                " access_token_enc, env) VALUES (:h, 'plaid', :e, 'x', 'production') RETURNING id"
+            ),
+            {"h": household, "e": f"item-{uuid.uuid4()}"},
+        ).scalar_one()
+        c.execute(
+            text(
+                "UPDATE account SET source = 'plaid', bank_connection_id = :c,"
+                " external_account_id = 'plaid-account-t', adopted_at = now() WHERE id = :a"
+            ),
+            {"c": conn, "a": account_id},
+        )
+    again = await import_statement(
+        factory,
+        household,
+        st,
+        _meta(5),
+        household_wide=True,
+        target=AccountTarget(account_id=account_id),
+    )
+    assert {b.account_id for b in again.blocks} == {account_id}
