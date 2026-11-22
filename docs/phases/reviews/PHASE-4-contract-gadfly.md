@@ -384,3 +384,73 @@ Fix:
   It's either covered by the go-ahead in R2-B3 or sent to the owner queue.
 
 The first screen with real value is rules (W2, wave 3). It needs M1 on the live instance.
+
+## Round 3 (fcb3a4e)
+
+Checked against `f651389..fcb3a4e`, migrations 0002/0005/0010, `statement_import._account`,
+`LedgerWriter.set_category`/`release_category`, `docs/planning/SPRINTS.md`, and PHASE-2 at `6df9c51`.
+
+**Verdict: REWORK-small.** R2-B1, R2-B2 and R2-B4 are closed. R2-B3 isn't. Four more local edits.
+
+| Round 2 item | Status | Why |
+|---|---|---|
+| R2-B1 | Closed | No hand-over; joint passes `ACCOUNT_DETAIL_WRITABLE` and `IMPORT_RUN_WRITE` (0002, 0005) |
+| R2-B2 | Closed | Step 6 plus the planted, added-back residual |
+| R2-B3 | **Open** (R3-B1) | The cited record doesn't exist |
+| R2-B4 | Closed | Step 0(e) leg offers, created household-wide, own leg only |
+
+**R3-B1. The upgrade record 7.5 cites isn't in the sprint log.**
+- 7.5 says the 2026-11-21 upgrade (dump, 0008 and 0009, row counts unchanged) "is recorded in
+  `docs/planning/SPRINTS.md`". On this branch and on `main`, SPRINTS.md only says "blocked: live
+  instance upgrade waits on the owner". `CHECKPOINT-2026-11-21.md` says "Do not do it without one".
+  The only source for the claim is cc7949d's own sentence.
+- CLAUDE.md names real data as an owner-queue item, so the autonomy decision alone doesn't cover
+  migrating the real-data database.
+
+Fix: commit the real entry to SPRINTS.md in this PR: the date, `alembic current` on the instance,
+that the dump exists (path class only), the row-count parity, and the owner's words with their date.
+If there's no entry, the first redeploy is an owner-queue item.
+
+**R3-B2. The shortest path still needs a migration.**
+- (a) C6a's `can_edit` is `app_account_writable(account_id)` (5.1). That function is created in M1
+  (3.1, C3b). C6a, listed as "C3c only", would call a function that doesn't exist yet.
+  Fix: C6a computes `can_edit` inline from the account row it already joins (`owner_person_id IS
+  NULL OR = principal.person_id`). C3b switches it to the helper and adds an equivalence test.
+- (b) The redeploy after W1 isn't "no migration". By 7.5's own record the instance is at 0009, and
+  `main` already has `0010_list_household_ids`. If they've merged by then, P4a's `connector_link`
+  (the `statement_key` backfill and the unique-index swap on `account`) and M1 (C3b is in wave 1)
+  come too. 7.5 step 1 rehearses only "each Phase 4 migration".
+  Fix: before every redeploy, compare `alembic current` on the instance with `main`'s head, and
+  rehearse every pending revision, whatever lane it came from. Remove "no migration" from wave 2,
+  or pin the deploy to a SHA.
+
+**R3-B3. Deleting a rule makes its categories impossible to clear.**
+- What works: clear resets rows the rule set to NULL category, source and rule id, with an
+  exact-count check. Rows people set (`user`) are left alone. A row that was uncategorised comes
+  back exactly as it was.
+- The hole: DELETE sets `category_rule_id` to NULL and leaves the source as `rule` (4.4). After
+  that, neither clear nor any filter can find those rows. Delete sits next to Clear in the rule list
+  (6 item 3), and deleting is the natural reaction to a bad rule.
+- Fix: DELETE returns `409 rule_has_categories` while live rows carry the rule's id, unless the
+  request passes `keep_categories=true`. The sheet offers "Clear N and delete", which runs the clear
+  token and the delete in one transaction. Add a test.
+- Also fix the copy: "These N rows become uncategorised." Rows the rule took from another rule, and
+  released rows (`release_category` keeps their category), aren't restored.
+
+**R3-B4. Claiming a joint account brings back R2-B1's stuck runs.**
+- When the household owner claims a joint account, the other member's `pending` or `needs_review`
+  runs on it can't be accepted by anyone. `IMPORT_RUN_WRITE` needs both `d.person_id =
+  app_person_id()` and a writable account, and after the claim no single person has both.
+- The A1 test "both people can … accept its `needs_review` runs" also fails as written if it means
+  one person accepting the other's run.
+- Fix: the claim returns 409 while another person has an unfinished run on the account. The test
+  reads "each person accepts their own run".
+
+**R3-B5. Gaps between the two contracts.**
+- `post_pending` (PHASE-2 §3.3 only) moves the category by rank. C3b moves `category_rule_id` in
+  the two supersede verbs only, and 4.5's `apply_category` clears it otherwise. So a Plaid row that
+  goes from pending to posted shows source `rule` with no rule id, and Clear and "Set by rule"
+  both miss it.
+  Fix: C3b also carries `category_rule_id` in `post_pending`, with a test, and 4.4 points to it.
+- The shared migration and file order is in PHASE-2 **§4**, not §3.3 (header, section 3).
+- Wave 1's "C3b once #31 and P2a have merged" leaves out P4a, the token holder before M1 (3, 7.2).

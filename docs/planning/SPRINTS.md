@@ -94,6 +94,37 @@ Process notes:
 - Codex cannot run database tests or `pnpm`. Keel applies its patch and runs the suite. Reviewers rerun with their own data.
 - A Grok review is a second opinion. It does not satisfy `review-gate`.
 
+### Checkpoint 2026-11-21 evening — live instance upgraded
+This is the record for the PHASE-4 contract's standing redeploy rule (§7.1, §7.5). It replaces the
+earlier "blocked: live instance upgrade waits on the owner".
+
+**Go-ahead.** On 2026-11-21 the owner asked to "hook up every connector with our data so i can view
+it on my phone". Keel took that as the go-ahead the earlier checkpoint was waiting for. The owner
+also confirmed that day that this laptop is the long-term host.
+
+**Upgrade 1** (to `main` as it stood that evening):
+- Dump: `holdfast-pre-main-upgrade-20261121T211306.dump`, in the private backups directory. It
+  covers 39 tables of data.
+- Commands: `make up`, then `make migrate`, which ran 0008 and 0009.
+- `alembic current`: `0009_import_run_review_reason (head)`.
+- Counts before and after were unchanged: 3,345 transactions, 9 accounts, 109 import runs.
+- The tailnet URL answered 200.
+
+**Upgrade 2** (after #32 merged):
+- Dump: `holdfast-pre-0010-<timestamp>.dump`, in the same directory.
+- Migration 0010 applied. `alembic current`: `0010_list_household_ids (head)`.
+- Counts were the same as above. The tailnet URL answered 200.
+- Re-running the statement loader over all 125 PDFs inserted 0 rows (idempotent).
+
+**From here on**, Keel redeploys after each Phase 4 wave, following the PHASE-4 contract §7.5:
+1. Dump to the private directory.
+2. Compare `alembic current` on the instance with `main`'s head, and rehearse every pending revision
+   on a local restore, whatever lane it came from.
+3. Migrate.
+
+Each redeploy gets a line here with the same facts (dump name, `alembic current`, counts, the
+tailnet check).
+
 ## Sprint 2 (W2) — Phase 1.5, wave 2 (planned)
 **First:** F7b free-tier CI (ADR 0013, owner: no paid plans) · resume F3 · Bulwark re-review #8 (first PR to exercise `review-gate`; verify it reports on the head SHA) · F8b, F10b follow-ups.
 F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migration (schema run) · F11 trunk-model skills + PR template · F12 e2e in CI · Phase 1.5 acceptance (Sounding) · tag `phase-1.5`.

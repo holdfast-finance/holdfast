@@ -8,8 +8,9 @@ amendment lands in this file before the code merges.
 Revision 2 (2026-11-21) answers Gadfly's two critiques (`docs/phases/reviews/PHASE-4-gadfly.md`,
 `PHASE-4-contract-gadfly.md`) and Bulwark's review of PR #59. Revision 3 (the same day) answers
 Bulwark's second review and Gadfly's round 2 at `f651389`. Revision 4 answers Bulwark's third
-review at `cc7949d` and aligns with the Phase 2 contract's round 3: one supersede verb pair and the
-shared migration and file order (`PHASE-2-contract.md` §3.3). Section 11
+review at `cc7949d` and aligns with the Phase 2 contract's round 3: one supersede verb pair
+(`PHASE-2-contract.md` §3.3) and the shared migration and file order (PHASE-2 §4). Revision 5
+answers Gadfly round 3 at `fcb3a4e`. Section 11
 lists every item and where it was closed.
 
 **Problem.** Three engines are merged as pure code and nothing runs them:
@@ -341,7 +342,7 @@ def detect_rows(rows: Sequence[RowTuple]) -> tuple[DetectedSeries, ...]   # the 
 ## 3. Schema: one ordered migration plan
 
 One migration per slice. The migration token order is shared with the Phase 2 contract
-(`PHASE-2-contract.md` §3.3) and fixed:
+(`PHASE-2-contract.md` §4) and fixed:
 
 **`0010_list_household_ids` (#31, merged) → `<n>_connector_link` (P4a, Phase 2) → M1 `<n>_rules`
 (C3b) → M2 `<n>_import_run_reason_final` (I1d, Tide) → M3 `<n>_transfer_corrections` (C4c) → M4
@@ -591,7 +592,8 @@ after (rejected), on accepted (rejected). It's listed here only for the token or
     whoever made the pair. That's the Phase 2 rule: no rejection, and the next refresh may pair it
     again. Step 0(a) applies the same rule to links of either origin.
 - `transaction_supersede_repoint`, AFTER UPDATE OF `superseded_by_id` ON `transaction`, whenever
-  the value changes. It runs in the same statement as the writer's update, following the 3.0
+  the value changes. **This section is normative for the trigger.** PHASE-2 §3.3's "Trigger
+  effects" is informative (Bulwark, on #62). It runs in the same statement as the writer's update, following the 3.0
   household-wide pattern, so it moves rows the superseding session can't see (Bulwark 10):
   - **NULL → value:** move `transfer_rejection` and `transfer_link` references from the row (`old`)
     to `NEW.superseded_by_id` (`INSERT … ON CONFLICT DO NOTHING`, then `DELETE`). Delete
@@ -822,7 +824,10 @@ transactions are. Summary-only viewers see none.
     single-writer lint entry. They move category by rank, splits, transfer state, tax, receipt and
     notes, in one unit of work, with no per-row audit.
   - Phase 4 adds:
-    - **C3b:** `category_rule_id` travels with the category in both verbs.
+    - **C3b:** `category_rule_id` travels with the category in both verbs, and in `post_pending`
+      (PHASE-2 §3.3), which also moves the category by rank when a posted Plaid row replaces a
+      pending one. Without that, a posted row would show source `rule` with no rule id, and Clear
+      and "Set by rule" would both miss it (Gadfly R3-B5).
     - **C4c (M3):** `transaction_supersede_repoint` moves `transfer_rejection` and `transfer_link`
       rows in both directions and deletes stale suggestions and leg offers (3.3).
     - **C5b (M4):** the same trigger also moves `recurring_member` rows (3.4).
@@ -843,8 +848,15 @@ transactions are. Summary-only viewers see none.
   and `dismissed` stick. Setting a label sets `confirmed` unless the series is `dismissed` (Gadfly
   S1).
 - Rules:
-  - Disabling or deleting a rule leaves its categories (C3a semantics). Deleting sets
-    `category_rule_id` to NULL on those rows (the source stays `rule`).
+  - Disabling a rule leaves its categories (C3a semantics).
+  - **Deleting a rule** (Gadfly R3-B3) returns `409 rule_has_categories` while any live row carries
+    its `category_rule_id`. Otherwise delete would orphan those rows: `category_rule_id` becomes
+    NULL with the source still `rule`, and neither Clear nor a filter could find them again.
+    - The sheet offers **"Clear N and delete"**. It runs the clear (with its token) and the delete
+      in one transaction.
+    - "Keep categories and delete" passes `keep_categories=true`, which accepts the orphaning
+      knowingly.
+    - Superseded rows don't block a delete. They're history, and the FK sets their rule id to NULL.
   - Editing a rule leaves `category_rule_id` in place: "Set by rule: <name>" names the rule that
     set it, even if it has changed since.
   - A disabled rule can be previewed but not applied (409 `conflict`).
@@ -944,6 +956,10 @@ import result can offer the change.
     (`account_guard_ownership` allows it for `OLD.owner_person_id IS NULL`, ADR 0008). That's a
     stated residual: only the API is a claim path.
   - A claimed account starts `shared` unless `visibility` is given.
+  - **A claim returns 409 `conflict` while another person has an unfinished import run**
+    (`pending` or `needs_review`) on the account (Gadfly R3-B4). After a claim, no single person
+    would pass `IMPORT_RUN_WRITE` for that run: it needs both `d.person_id = app_person_id()` and a
+    writable account. The other person finishes or rejects their run first.
   - A joint account has no visibility of its own. ACCOUNT_VISIBLE shows every joint account to
     every member, so `visibility` on a joint account is refused with 422. Nobody "changes a joint
     account's visibility".
@@ -980,7 +996,7 @@ import result can offer the change.
 | `category_id` | `uuid \| null` | C6a |
 | `category_source` | `"user" \| "rule" \| "plaid" \| "ml" \| null` | C6a |
 | `has_splits` | `bool` | C6a |
-| `can_edit` | `bool` (`app_account_writable(account_id)`) | C6a |
+| `can_edit` | `bool`. C6a computes it inline from the account row it already joins (`owner_person_id IS NULL OR owner_person_id = principal.person_id`), because `app_account_writable` doesn't exist until M1. C3b switches it to the helper and adds an equivalence test | C6a, then C3b |
 | `category_rule_id` | `uuid \| null` (null unless the reader can see that rule) | C3e |
 | `transfer_group_id` | `uuid \| null` | C4e |
 | `transfer_counterpart_id` | `uuid \| null`: the other leg of the group or of a link, only when the reader can see it | C4e |
@@ -1037,7 +1053,7 @@ RuleClearOut       {cleared_count: int}
 | POST `/rules` | `RuleCreateIn` → 201 `RuleCreateOut`; with `apply`, create and apply in one transaction | 422, 409 `preview_stale` (nothing saved), 409 `conflict` (200 rules per author, or 25 enabled pattern rules per household) |
 | GET `/rules/{id}` | → `RuleOut` | 404 |
 | PATCH `/rules/{id}` | partial `RuleIn` → `RuleOut` (never applies) | 404, 403 `forbidden` (visible, not yours), 422, 409 `conflict` (caps) |
-| DELETE `/rules/{id}` | → 204 (categories stay) | 404, 403 |
+| DELETE `/rules/{id}?keep_categories=false&clear_token=` | → 204. With `clear_token`, the clear runs first in the same transaction. With `keep_categories=true`, the categories stay and lose their rule id | 404, 403, 409 `rule_has_categories` (live rows carry the rule's id, neither option given), 409 `preview_stale` (the clear token is stale) |
 | POST `/rules/{id}/preview` | → `RulePreviewOut` | 404 |
 | POST `/rules/{id}/apply` | `RuleApplyIn` → `RuleApplyOut` | 404, 403, 409 `preview_stale`, 409 `conflict` (disabled), 503 `rules_too_slow` |
 | POST `/rules/{id}/clear/preview` | → `RuleClearPreviewOut` (4.4 "Clear this rule's categories") | 404, 403, 503 `rules_too_slow` |
@@ -1189,6 +1205,10 @@ Only what acceptance needs. No new nav entries: Transactions gains tabs, Setting
      (own rules), and the author for others' rules (read only).
    - Edit, delete, "Apply to past transactions" (preview first), and "Clear this rule's
      categories" (preview first, then "Clear N"; 4.4).
+   - Delete with categories in place asks "Clear N and delete" or "Keep categories and delete".
+   - The clear copy: "These N rows become uncategorised. Rows this rule took from another rule
+     aren't given back that rule's category." Released rows keep their category until a rule
+     changes it (`release_category`), so they aren't restored either.
 4. **Transactions → Transfers to review (new tab, W3).**
    - The tab carries the count from `/ledger/status` as a badge.
    - One card per group:
@@ -1233,15 +1253,17 @@ Each slice is one PR. Gates:
 
 ### 7.1 Order
 **First path, before anything else** (Gadfly round 2): **C3c → C6a → W1 → live redeploy.**
-- That's three PRs and no migration (`category_rule_id` arrives with C3e).
+- That's three PRs, and none adds a Phase 4 migration (`category_rule_id` arrives with C3e).
+  The redeploy still applies whatever revisions `main` holds by then, from any lane, rehearsed
+  first (7.5 step 1).
 - The result is manual categorisation on the owner's real data on the Activity tab.
 - C6a depends on C3c only, so neither A1 nor C3b's RLS gate can delay it.
 
 | Wave | Slices (parallel inside a wave) | Then |
 |---|---|---|
 | 0 | C3c, C4b, C5c (pure); **A1** | |
-| 1 | **C6a**, C3d, A1w; **C3b** (M1) once #31 and P2a have merged | |
-| 2 | **W1** | live redeploy, no migration |
+| 1 | **C6a**, C3d, A1w; **P4a** (Phase 2, holds the token before M1); **C3b** (M1) once P4a and P2a have merged | |
+| 2 | **W1** | live redeploy (every pending revision on `main`, rehearsed) |
 | 3 | **C3e** (after C3b, P4a, P2b) | live redeploy (A1, A1w and M1 by now) |
 | 4 | W2 | live redeploy: rules usable on real data |
 | 5 | **C4c** (M3, after M2) | |
@@ -1252,8 +1274,11 @@ Each slice is one PR. Gates:
 | 10 | C7 (acceptance) | |
 
 **Standing rule: Keel redeploys the live instance after each wave merges** (Gadfly R2-B3).
-- Take a dump to the private directory first, then migrate. A wave that carries a migration is
-  rehearsed first (7.5 step 1).
+- Take a dump to the private directory first, then migrate.
+- Before every redeploy, compare `alembic current` on the instance with `main`'s head, and
+  rehearse **every pending revision**, whatever lane it came from (7.5 step 1).
+- Each redeploy is recorded in `docs/planning/SPRINTS.md`, starting from the "Checkpoint
+  2026-11-21 evening" entry.
 - So the owner sees each screen as it lands, not at phase acceptance.
 - Waves with no "Then" entry still redeploy if anything user-visible merged. The table marks the
   ones that change what the owner can do.
@@ -1324,9 +1349,12 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     learn how many `own` pattern rules another has, through the 409. That's recorded as an
     accepted leftover in ADR 0026 point 4 (Bulwark).
   - `clear_rule_categories` (4.5), with `AND superseded_by_id IS NULL` as in `apply_rule_bulk`.
-  - `category_rule_id` travels with the category in both `supersede_transaction` and
-    `unsupersede_transaction` (PHASE-2 §3.3). Test: supersede then unsupersede a rule-categorised
-    row, and `category_rule_id` is on the live row each time.
+  - `category_rule_id` travels with the category in `supersede_transaction`,
+    `unsupersede_transaction` and `post_pending` (PHASE-2 §3.3). Tests:
+    - supersede then unsupersede a rule-categorised row: `category_rule_id` is on the live row each
+      time
+    - `post_pending` over a rule-categorised pending row: the posted row has the rule id
+  - Switch C6a's inline `can_edit` to `app_account_writable`, with an equivalence test (5.1).
 - **A1:**
   - `owner` is `"me" | "joint"` only. Any other value is a 422 from the schema (Bulwark).
   - `app/services/accounts.py` never sets or mentions `household_wide`.
@@ -1340,8 +1368,9 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - the household owner claims a joint account, and a non-owner claim is a 403
     - `owner: <uuid>` is a 422
     - summary-only viewers and other people's private accounts are a 404
-    - **after `joint`, both people can upload a statement to it**, and accept its `needs_review`
-      runs
+    - **after `joint`, both people can upload a statement to it, and each person accepts their
+      own `needs_review` run**
+    - a claim while the other person has a `pending` or `needs_review` run on the account is a 409
     - audit detail has ids only
 - **C3c:**
   - Delete the C3a `re` validator. Until C3d, `compile_pattern` raises `RuleValidationError("Patterns
@@ -1371,6 +1400,9 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
   - No 32-literal cap. Above 32 distinct literals, use 8 subjects per literal.
   - Record the CI numbers in the PR.
 - **C3e:**
+  - Rule DELETE: `409 rule_has_categories`, "Clear N and delete" in one transaction, and
+    `keep_categories=true` (4.4). Test: deleting a rule with live rows is refused, clear-and-delete
+    leaves no row with source `rule` and a NULL rule id, and superseded rows don't block it.
   - The ingest matcher runs in `anyio.to_thread.run_sync` (Bulwark 1).
   - The 25 enabled `regex` rules per household → 409 (Bulwark 1).
   - **Budget per ADR 0024 point 9** (Bulwark round 3). Tests:
@@ -1532,17 +1564,27 @@ has better than 6× headroom (section 11).
 Holdfast agents (Sounding, with Ledger for the loader) run it locally under ADR 0019, on the owner's
 machine, and report counts only.
 
-**Record** (Gadfly R2-B3): Keel upgraded the owner's instance to `main` on 2026-11-21. A dump was
-taken first, migrations 0008 and 0009 were applied, and row counts were unchanged. It's recorded in
-the sprint log (`docs/planning/SPRINTS.md`). Live upgrades from then on follow 7.1's standing
-redeploy rule, under the owner's full-autonomy decision of 2026-11-19 (CLAUDE.md). Keel holds that
-record. If the owner withdraws it, each migration becomes an owner-queue item.
+**Record** (Gadfly R2-B3, R3-B1): `docs/planning/SPRINTS.md`, "Checkpoint 2026-11-21 evening",
+committed with this contract. It records:
+- **The owner's go-ahead,** in their words, dated 2026-11-21: "hook up every connector with our data
+  so i can view it on my phone". The owner also confirmed that this laptop is the long-term host.
+- **Upgrade 1:** dump taken (the private backups directory), 0008 and 0009 applied, `alembic
+  current` = `0009_import_run_review_reason (head)`, counts unchanged, tailnet 200.
+- **Upgrade 2:** after #32, with a dump, 0010 applied, `alembic current` =
+  `0010_list_household_ids (head)`, counts unchanged, tailnet 200. A re-run over all 125 PDFs
+  inserted 0 rows.
 
-1. **Before each Phase 4 migration reaches the instance:**
+The standing redeploy rule (7.1) rests on that go-ahead. If the owner withdraws it, each redeploy
+that carries a migration becomes an owner-queue item.
+
+1. **Before every redeploy of the instance** (Gadfly R3-B2):
    - Take a fresh dump to the private directory.
-   - Restore it into a throwaway local stack: its own compose project, non-dev ports, and a data
-     directory inside the private directory.
-   - Run that migration up, down and up there. Only then does Keel upgrade the instance.
+   - Compare `alembic current` on the instance with `main`'s head. Every revision in between is
+     pending, from Phase 4 or any other lane (`0010`, P4a's `connector_link`, and so on).
+   - Restore the dump into a throwaway local stack: its own compose project, non-dev ports, and a
+     data directory inside the private directory.
+   - Run the pending revisions up, down and up there, and check row counts. Only then does Keel
+     upgrade the instance.
 2. **Measure on the restored copy, never the live instance,** so agent labels never become the
    owner's choices. The live instance only gets Phase 4's code and migrations.
 3. **Ground truth stays in the private directory** (never the repo, a PR, an issue or a log). From
@@ -1569,7 +1611,7 @@ record. If the owner withdraws it, each migration becomes an owner-queue item.
 ### 7.6 File ownership per run
 | Slice | Owns (creates or edits) |
 |---|---|
-| C3b | `backend/migrations/versions/<n>_rules.py`, `backend/app/models/transactions.py`, `backend/app/models/__init__.py`, `backend/app/services/ledger_service.py`, `backend/tests/models/test_rls_rules.py`, `backend/tests/models/test_migration_rules.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/test_ledger_single_writer.py` |
+| C3b | `backend/migrations/versions/<n>_rules.py`, `backend/app/services/ledger.py` (`can_edit` to the helper), `backend/app/models/transactions.py`, `backend/app/models/__init__.py`, `backend/app/services/ledger_service.py`, `backend/tests/models/test_rls_rules.py`, `backend/tests/models/test_migration_rules.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/test_ledger_single_writer.py` |
 | A1 | `backend/app/api/routes_accounts.py` (new), `backend/app/schemas/accounts.py` (new), `backend/app/services/accounts.py` (new), `backend/app/schemas/ledger.py` (`AccountOut` fields), `backend/app/services/ledger.py` (account fields), `backend/app/schemas/imports.py`, `backend/app/services/imports.py` (block owner fields), `backend/tests/api/test_account_ownership.py`, `web/src/api/schema.d.ts` (generated). Not `ledger_service.py` (file order, section 3) |
 | A1w | `web/src/pages/transactions/AccountsPanel.tsx`, `web/src/pages/transactions/AccountOwnerSheet.tsx` (new), `web/src/pages/import/ResultView.tsx`, `web/src/api/accounts.ts` (new), `web/src/api/imports.ts`, `web/src/mocks/accounts.ts` (new), `web/src/mocks/imports.ts`, `web/src/mocks/handlers.ts`, `web/e2e/accounts.e2e.ts`. Not `api/ledger.ts` or `mocks/ledger.ts`, which are W1's |
 | C3c | `backend/app/domain/{merchant,rule_regex,rules}.py`, `backend/tests/domain/{test_merchant,test_rule_regex,test_rules,test_regex_imports}.py` |
@@ -1621,7 +1663,7 @@ generated `schema.d.ts` conflicts by rerunning `make api-types`, never by hand.
 | PR #55 Keel | Freeze `review_reason` in `import_run_guard` (own migration) | M2 (3.2), I1d, Tide; in the shared token order |
 | ADR 0016 | Wire `arq_pool` into the API when the first API-triggered job lands | C4d |
 | Bulwark on PR #59 | Items 1–14, then round 2 | Section 7.3 per slice; section 11 |
-| Phase 2 contract §3.3 (round 3) | One verb pair (`supersede_transaction`, `unsupersede_transaction`, P2a), and the shared migration-token and file order | D15, 3, 3.3, 3.4, 4.4, 7.1, 7.6. Phase 4 owns the re-point trigger (M3, M4) and `category_rule_id` in both verbs (C3b) |
+| Phase 2 contract §3.3 and §4 (round 3) | One verb pair (`supersede_transaction`, `unsupersede_transaction`, P2a, §3.3), and the shared migration-token and file order (§4) | D15, 3, 3.3, 3.4, 4.4, 7.1, 7.6. Phase 4 owns the re-point trigger (M3, M4) and `category_rule_id` in both verbs (C3b) |
 
 ---
 
@@ -1662,7 +1704,7 @@ The real-data checks are no longer an owner item. Holdfast agents run them local
 Phase 4 doesn't touch secrets handling, `household_setting`, ADR 0015, or anything in the Plaid
 lane (its key entry and slot-tombstone migration are separate stories). It adds steps to the Phase
 2 supersede verbs (`category_rule_id`, C3b) and owns their re-point trigger (M3, M4). It follows the
-shared token and file order (section 3, 4.4). Un-adopt stays in the person session, as PHASE-2 §3.3
+shared token and file order (section 3; PHASE-2 §4). Un-adopt stays in the person session, as PHASE-2 §3.3
 has it. Phase 4's ADRs are 0024 and 0026–0029. 0023 and
 0025 belong to the Plaid lane.
 
@@ -1697,7 +1739,7 @@ has it. Phase 4's ADRs are 0024 and 0026–0029. 0023 and
 | S1 series identity holes | **Accepted.** A label implies `confirmed`. The tie rule prefers user-stated series, and the takeover rule moves state to the detection | 2.5, ADR 0028 points 1–2 |
 | S2 the process pool can't kill a task | **Accepted, in Bulwark 5's form:** a `forkserver` `ProcessPoolExecutor`, the worker terminated and the pool recreated on timeout. The spec timeout is explicit (300 s). The path is `app/worker/main.py` | 4.3, 7.3 C5b |
 | S3 refresh fan-out and staleness | **Accepted (Keel decision).** 2-minute buckets deferred to the bucket's end, with no tail check needed (4.3 proves it). Transfer edits and ownership changes enqueue the same key | 4.3 |
-| S4 migration path too long | **Accepted in part.** Revision 2 took M2 out. Revision 3 puts it back in the shared token order (PHASE-2 §3.3), still owned by Tide. **Rejected:** merging M3 and M4, because one migration per slice keeps each RLS review whole and keeps Bulwark's items attached to their slices. **Rejected:** recurring before transfers (7.1, with the reason) | 3, 7.1 |
+| S4 migration path too long | **Accepted in part.** Revision 2 took M2 out. Revision 3 puts it back in the shared token order (PHASE-2 §4), still owned by Tide. **Rejected:** merging M3 and M4, because one migration per slice keeps each RLS review whole and keeps Bulwark's items attached to their slices. **Rejected:** recurring before transfers (7.1, with the reason) | 3, 7.1 |
 | S5 cut account scope | **Accepted in part.** `rule_account`, its triggers and its 422s are cut. **Rejected:** cutting `own`. Bulwark 3 needs it so a rule made from a private row stays private | 3.1, 2.3 |
 | S6 types don't match the code | **Accepted.** `DetectedSeries` / `detected_from`, `UUID` ids, rows without a `merchant_key` never sent, `stored_confidence` and the tier from the stored value, the named `load_candidates` loader owned by C4c, the connection comment, and `handlers.ts` ownership | 2.5, 4.1, 7.6 |
 | S7 wall-clock limits flaky in CI | **Accepted, except the ADR 0024 gate,** which Bulwark requires on CI. It keeps better than 6× headroom: accepted corpus patterns took 0.04–0.15 s per 50,000 searches locally against a 1 s gate | 7.3, ADR 0024 |
@@ -1755,3 +1797,22 @@ has it. Phase 4's ADRs are 0024 and 0026–0029. 0023 and
 | Ruling, `transfer_link_guard` | **Recorded:** a full column comparison, `job` → `person` only, `search_path` pinned. The residual is recorded: the zero-row silent UPDATE, rare and reversible | 3.3, ADR 0027 point 2 |
 | Slice notes | **All accepted:** C3d corpus and families; C4d step 0(d) only on `person` links, `job`-link declines under (c), decline needs an `open` offer; `clear_rule_categories` filters `superseded_by_id`; the shared limiter; the C4c guard test | 4.1, 4.4, 4.5, 5.2, 5.3, 7.3 |
 | Cross-contract, PHASE-2 §3.3 round 3 | **Applied, items 1–11 of the supersede-clause note.** The trigger returns in M3 with both branches, and M4 moves members in both. Revision 3's statement that un-adopt's reverse must run household-wide from C4c on is **withdrawn**. The household-wide trigger moves the derived rows whoever calls, and `unsupersede_transaction` clears the winner's transfer state before `remove_external`, with `409 unadopt_blocked` otherwise. Phase 4 adds one thing to the Phase 2 text: the trigger also deletes `transfer_leg_offer` rows, a Phase 4 table | D15, 3, 3.3, 3.4, 4, 4.4, 4.5, 7.1, 7.3, 7.6, 11 |
+
+### 11.7 Cross-contract follow-ups for `PHASE-2-contract.md` (Keel edits PHASE-2)
+1. **`post_pending` carries `category_rule_id`** with the category, as the supersede verbs do. C3b
+   builds it (4.4, 7.3 C3b). PHASE-2 §3.3 should say so (Gadfly R3-B5).
+2. **PHASE-2 §3.3 "Trigger effects" becomes informative**, and PHASE-4 §3.3
+   (`transaction_supersede_repoint`) is normative (Bulwark, on #62).
+3. **The trigger also deletes `transfer_leg_offer` rows**, a Phase 4 table, in both branches.
+   PHASE-2's informative text can say so.
+4. **The shared orders live in PHASE-2 §4.** This contract cites §4 for them and §3.3 only for the
+   verbs.
+
+### 11.8 Gadfly, round 3 (`reviews/PHASE-4-contract-gadfly.md`, "Round 3")
+| Item | Response | Where |
+|---|---|---|
+| R3-B1 the upgrade record isn't committed | **Accepted.** `docs/planning/SPRINTS.md` "Checkpoint 2026-11-21 evening" is added in this PR. It holds the owner's words and date, both dumps (by name, in the private backups directory), `alembic current` after each upgrade, row-count parity, the tailnet checks and the idempotent re-run. 7.5 and the 7.1 standing rule cite it | 7.1, 7.5, SPRINTS |
+| R3-B2 the shortest path needs a migration | **Accepted, both parts.** (a) C6a computes `can_edit` inline, and C3b switches it to the helper with an equivalence test. (b) Every redeploy compares `alembic current` with `main`'s head and rehearses every pending revision from any lane. "No migration" is gone from wave 2 | 5.1, 7.1, 7.3 C3b, 7.5 step 1 |
+| R3-B3 deleting a rule orphans its categories | **Accepted.** `409 rule_has_categories`, "Clear N and delete" in one transaction, and an explicit `keep_categories=true`. The clear copy is corrected | 4.4, 5.2, 6 item 3, 7.3 C3e |
+| R3-B4 a claim strands the other person's runs | **Accepted.** A claim is a 409 while another person has a `pending` or `needs_review` run on the account. The A1 test reads "each person accepts their own run" | 5.0, 7.3 A1 |
+| R3-B5 gaps between the contracts | **Accepted.** `post_pending` carries `category_rule_id` (C3b, with a test, and listed for PHASE-2 in 11.7). The shared order is cited as PHASE-2 §4. P4a is in wave 1 ahead of C3b | 3, 4.4, 7.1, 7.3 C3b, 11.7 |
