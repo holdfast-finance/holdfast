@@ -94,3 +94,10 @@ def test_logging_and_tracebacks_mask_token(
     assert f"ValueError: {REDACTED}" in rendered
     assert canary not in raw
     assert canary not in rendered
+
+
+def test_secret_token_cannot_be_subclassed() -> None:
+    with pytest.raises(TypeError):
+
+        class Leaky(SecretToken):  # type: ignore[misc]
+            pass

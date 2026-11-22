@@ -22,6 +22,7 @@ from app.api import errors
 from app.config import Settings, get_settings
 from app.db import CONNECT_TIMEOUT_SECONDS, create_engine, create_session_factory
 from app.logging import configure_logging, get_logger
+from app.security import crypto
 from app.security.body_limit import BodySizeLimitMiddleware
 from app.security.csrf import CSRFMiddleware
 from app.services.setup import SETUP_TTL_SECONDS, issue_setup_token, setup_state
@@ -145,6 +146,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if settings.fernet_key is not None:
+            crypto.load_ring(settings.fernet_key)  # malformed or duplicate keys fail startup
         log.info("api.startup", version=__version__, app_env=settings.app_env)
         task = asyncio.create_task(_setup_token_loop(app))
         try:
