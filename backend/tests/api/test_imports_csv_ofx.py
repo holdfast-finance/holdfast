@@ -86,6 +86,7 @@ async def test_csv_with_running_balance_reconciles_and_keeps_the_sign(
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["file_kind"], body["created"], body["filename"]) == ("csv", True, "March.csv")
+    assert body["notice"] is None  # nothing imported before: no overlap to warn about
     (block,) = body["blocks"]
     assert block["reconcile_status"] == "reconciled"
     assert (block["rows_parsed"], block["rows_inserted"], block["rows_duplicate"]) == (3, 3, 0)
@@ -340,6 +341,10 @@ async def test_a_csv_overlapping_a_pdf_import_lands_in_its_own_account(
     r = await up(owner.client, csv_overlap.encode())
     assert r.status_code == 200, r.text
     (block,) = r.json()["blocks"]
+    # The user is told, in the result, that this went into its own account.
+    assert pdf.json()["notice"] is None
+    assert "own new account" in r.json()["notice"]
+    assert "repeat transactions" in r.json()["notice"]
     assert (block["rows_inserted"], block["rows_duplicate"]) == (2, 0)
     assert await count(app, hid, Transaction) == pdf_rows + 2
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
@@ -347,7 +352,7 @@ async def test_a_csv_overlapping_a_pdf_import_lands_in_its_own_account(
     assert any(a.startswith("csv-generic:") for a in accounts)
     assert len(accounts) == len(set(accounts))
     # Replaying either file still adds nothing.
-    await up(owner.client, csv_overlap.encode())
+    assert (await up(owner.client, csv_overlap.encode())).json()["notice"] is None
     await up(owner.client, pdf_bytes(DEBIT), "debit.pdf", "application/pdf")
     assert await count(app, hid, Transaction) == pdf_rows + 2
 

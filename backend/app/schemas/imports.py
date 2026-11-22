@@ -84,6 +84,9 @@ class ImportResultOut(Model):
     # What the file's bytes said it is (the name and MIME type are not trusted): ``pdf``, ``csv``
     # or ``ofx`` (which covers QFX).
     file_kind: Literal["pdf", "csv", "ofx"]
+    # A plain-language heads-up about this import, or null. Set when a CSV/OFX created a new
+    # account while the household already had imported accounts (it may repeat their rows).
+    notice: str | None = None
     # False: the file (same SHA-256) was already stored; the response describes the earlier import.
     created: bool
     balances_only: bool

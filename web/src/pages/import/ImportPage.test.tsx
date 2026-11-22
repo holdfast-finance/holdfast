@@ -307,6 +307,20 @@ describe('Import page: uploading', () => {
     })
   })
 
+  it('shows the notice when a CSV or OFX went into its own account', async () => {
+    respond(() =>
+      HttpResponse.json({
+        ...importFile('march.csv', 'ok'),
+        file_kind: 'csv',
+        notice: 'This file went into its own new account. It may repeat transactions.',
+      }),
+    )
+    open()
+    await upload(pdf('march.csv'))
+    const res = await result()
+    expect(await within(res).findByRole('note')).toHaveTextContent(/its own new account/)
+  })
+
   it('flags a statement, maps known reasons to plain copy and shows unknown codes verbatim', async () => {
     respond(() => HttpResponse.json(importFile('november-dates.pdf', 'dates')))
     open()

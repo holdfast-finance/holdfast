@@ -92,6 +92,10 @@ MIME_TYPES: dict[FileKind, str] = {
     "ofx": "application/x-ofx",
 }
 KIND_LABELS: dict[FileKind, str] = {"pdf": "PDF", "csv": "CSV", "ofx": "OFX"}
+SEPARATE_ACCOUNT_NOTICE = (
+    "This file went into its own new account. It is not matched to accounts from your "
+    "statements, so it may repeat transactions you already imported from them."
+)
 UNSUPPORTED = "That file isn't a PDF, CSV or OFX/QFX export."
 UPLOADS_PER_MINUTE = 10
 CHUNK = 64 * 1024
@@ -424,7 +428,7 @@ class ImportService:
             tmp.unlink(missing_ok=True)
             if locked:
                 await self.release(lock_key, token)
-        document_created, document_id, filename, blocks, balances_only = result
+        document_created, document_id, filename, blocks, balances_only, notice = result
         await audit.record(
             self.ctx.factory,
             "import.upload",
@@ -445,6 +449,7 @@ class ImportService:
             document_id=document_id,
             filename=filename,
             file_kind=kind,
+            notice=notice,
             created=document_created,
             balances_only=balances_only,
             blocks=blocks,
@@ -491,7 +496,7 @@ class ImportService:
         size: int,
         raw_filename: str | None,
         kind: FileKind,
-    ) -> tuple[bool, uuid.UUID, str, list[ImportBlockOut], bool]:
+    ) -> tuple[bool, uuid.UUID, str, list[ImportBlockOut], bool, str | None]:
         meta = DocumentMeta(
             sha256=sha,
             filename=sanitise_filename(raw_filename, EXTENSIONS[kind]),
@@ -511,6 +516,11 @@ class ImportService:
             existing = (
                 await s.execute(select(Document.id).where(Document.sha256 == sha))
             ).scalar_one_or_none()
+            known_accounts = set(
+                (await s.execute(select(Account.id).where(Account.source == "import")))
+                .scalars()
+                .all()
+            )
         try:
             result = await import_statement(
                 self.ctx.factory,
@@ -551,7 +561,13 @@ class ImportService:
                 await s.execute(select(Document.filename).where(Document.id == result.document_id))
             ).scalar_one()
         blocks = await self._blocks(result.blocks)
-        return existing is None, result.document_id, doc, blocks, result.balances_only
+        notice = None
+        # A new account made by a CSV/OFX while others exist: accounts are keyed by import
+        # profile, so the file is not matched to a statement's account (no cross-source dedupe).
+        new_account = any(r.created and r.account_id not in known_accounts for r in result.blocks)
+        if kind != "pdf" and known_accounts and new_account:
+            notice = SEPARATE_ACCOUNT_NOTICE
+        return existing is None, result.document_id, doc, blocks, result.balances_only, notice
 
     async def _blocks(self, results: tuple[BlockResult, ...]) -> list[ImportBlockOut]:
         if not results:
