@@ -45,6 +45,10 @@ UNPACK_ALLOWED: dict[tuple[Path, str], str] = {
     (APP / "services" / "audit.py", "add"): "audit_log columns, built in the same function",
     (APP / "services" / "auth.py", "audit.add"): "audit_log columns from the route's own kwargs",
     (APP / "services" / "imports.py", "super().__init__"): "ApiError headers only",
+    (
+        APP / "worker" / "main.py",
+        "cls",
+    ): "MaskedRedisSettings rebuilt from RedisSettings' own fields",
 }
 LOGGER = re.compile(r"(log|logger)\.(debug|info|warning|error|exception|critical)")
 
