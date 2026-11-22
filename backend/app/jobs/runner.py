@@ -6,13 +6,14 @@ arq delivers at least once. These rules turn that into "one successful side effe
    anything runs. A malformed message is never handed to a handler and never retried.
 2. The per-household advisory lock is taken without waiting. If it's busy the delivery is
    deferred (no attempt used); after ``max_lock_deferrals`` the run fails as ``HouseholdBusy``.
-3. Under the lock, ``claim`` moves the row to ``running`` and returns the payload stored in
-   ``job_run``. **That** payload is what the handler gets: it was validated and authorized at
-   enqueue, while the Redis copy is unauthenticated. A Redis copy that differs is logged and
-   ignored. A run that already succeeded or failed is skipped, so a duplicate delivery does
-   nothing. So is a run another execution started less than ``spec.orphan_after`` ago, even
-   with the lock in hand: a dropped lock connection frees the lock while that execution still
-   runs. The sweeper re-pushes it once it is old enough to be a real orphan.
+3. Under the lock, ``claim`` moves the row to ``running`` and returns the payload (and the
+   requester, ``JobContext.requested_by``) stored in ``job_run``. **That** payload is what the
+   handler gets: it was validated and authorized at enqueue, while the Redis copy is
+   unauthenticated. A Redis copy that differs is logged and ignored. A run that already
+   succeeded or failed is skipped, so a duplicate delivery does nothing. So is a run another
+   execution started less than ``spec.orphan_after`` ago, even with the lock in hand: a dropped
+   lock connection frees the lock while that execution still runs. The sweeper re-pushes it
+   once it is old enough to be a real orphan.
 4. The handler runs in a household-wide session under ``asyncio.timeout(spec.timeout)``; the
    success mark commits in that same session, atomically with whatever the handler left
    uncommitted. arq's own timeout sits ``ARQ_TIMEOUT_MARGIN`` above, as a backstop only.
@@ -101,6 +102,7 @@ class _Run:
     household_id: uuid.UUID
     run_id: uuid.UUID
     attempt: int
+    requested_by: uuid.UUID | None
     last_try: bool
     fields: dict[str, str]
 
@@ -167,7 +169,16 @@ async def execute(
             log.info("job.skipped", reason="not_claimable", **fields)
             return "skipped"
 
-        run = _Run(deps, spec, household_id, run_id, claimed.attempt, last_try, fields)
+        run = _Run(
+            deps,
+            spec,
+            household_id,
+            run_id,
+            claimed.attempt,
+            claimed.requested_by,
+            last_try,
+            fields,
+        )
         try:
             return await _handle(run, claimed.payload, delivered)
         except asyncio.CancelledError:
@@ -197,6 +208,7 @@ async def _handle(run: _Run, stored: dict[str, Any], delivered: JobPayload) -> O
                     run_id=run.run_id,
                     household_id=run.household_id,
                     attempt=run.attempt,
+                    requested_by=run.requested_by,
                     session=session,
                     factory=HouseholdSessions(run.deps.factory, run.household_id),
                 )

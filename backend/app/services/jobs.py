@@ -63,7 +63,8 @@ LOCK_NOT_AVAILABLE = "55P03"  # SQLSTATE lock_not_available: lock_timeout expire
 
 
 class IdempotencyConflict(ValueError):
-    """The idempotency key was already used for the same job with a different payload."""
+    """The idempotency key was already used for the same job with a different payload or by a
+    different requester."""
 
 
 class JobReferenceNotVisible(LookupError):
@@ -164,6 +165,11 @@ async def enqueue[P: JobPayload](
     can't be used to probe someone else's run. ``ApiError("busy")`` (409, nothing recorded or
     queued) if a referenced row or the key stays locked by another transaction for
     ``ENQUEUE_LOCK_TIMEOUT``.
+
+    ``requested_by`` is recorded on the run (``job_run.requested_by``) and handed to the handler
+    as ``JobContext.requested_by``. A handler that enqueues a follow-up passes it on, so a
+    chained job keeps its requester. Reusing a key under another requester raises
+    ``IdempotencyConflict``, like a different payload.
 
     A duplicate whose run is unfinished is pushed to arq again (see :func:`push`), which heals a
     crash between commit and push and a run arq dropped (its backstop timeout).
@@ -266,6 +272,7 @@ async def _record(
                 job_name=spec.name,
                 idempotency_key=idempotency_key,
                 payload=body,
+                requested_by=requested_by,
                 max_attempts=spec.retry.max_attempts,
             )
             .on_conflict_do_nothing(index_elements=["household_id", "job_name", "idempotency_key"])
@@ -278,15 +285,24 @@ async def _record(
         else:
             row = (
                 await s.execute(
-                    select(JobRun.id, JobRun.status, JobRun.payload, JobRun.next_attempt_at).where(
+                    select(
+                        JobRun.id,
+                        JobRun.status,
+                        JobRun.payload,
+                        JobRun.requested_by,
+                        JobRun.next_attempt_at,
+                    ).where(
                         JobRun.household_id == household_id,
                         JobRun.job_name == spec.name,
                         JobRun.idempotency_key == idempotency_key,
                     )
                 )
             ).one()
-            if row.payload != body:
-                raise IdempotencyConflict(f"{spec.name}: key reused with a different payload")
+            # One message for both cases, so a conflict doesn't tell a caller which one it was.
+            if row.payload != body or row.requested_by != requested_by:
+                raise IdempotencyConflict(
+                    f"{spec.name}: key reused with a different payload or requester"
+                )
             run_id, status, created = row.id, row.status, False
             next_attempt_at = row.next_attempt_at
     return run_id, status, created, next_attempt_at
@@ -373,6 +389,7 @@ def _owned(run_id: uuid.UUID, attempt: int) -> Any:
 class Claim:
     attempt: int
     payload: dict[str, Any]  # job_run.payload: what the handler runs on, never Redis's copy
+    requested_by: uuid.UUID | None  # job_run.requested_by, recorded at enqueue
 
 
 def _orphaned(spec: JobSpec[Any]) -> Any:
@@ -404,7 +421,7 @@ async def claim(
                     started_at=func.now(),
                     next_attempt_at=None,
                 )
-                .returning(JobRun.attempts, JobRun.payload)
+                .returning(JobRun.attempts, JobRun.payload, JobRun.requested_by)
             )
         ).one_or_none()
         if row is None:
@@ -419,7 +436,7 @@ async def claim(
                 )
             )
             return None
-        return Claim(attempt=row.attempts, payload=row.payload)
+        return Claim(attempt=row.attempts, payload=row.payload, requested_by=row.requested_by)
 
 
 class RunLost(RuntimeError):

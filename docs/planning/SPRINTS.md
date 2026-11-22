@@ -125,6 +125,24 @@ also confirmed that day that this laptop is the long-term host.
 Each redeploy gets a line here with the same facts (dump name, `alembic current`, counts, the
 tailnet check).
 
+### Checkpoint 2026-11-22
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| Phase 2 and Phase 4 contracts | #62, #59 | merged | build to the contracts |
+| firstchair reference, wrapper, ADR 0036, wrapper hides | #64, #70, #72 | merged | none |
+| CSV/OFX import | #65 | merged | I3 competitor exports |
+| Redis password | #66 | merged | none |
+| C3c rules codec | #68 | merged | C3b waits on the regex-engine ADR |
+| F2c job follow-ups | #69 | merged | none |
+| P1 connector protocol | #71 | merged | P4a |
+| F5d hf2 envelope | #73 | merged | P4-link seals tokens as hf2 |
+| P4a connector schema (migration 0011) | #74 | open | review, rehearse on a restore, redeploy |
+| C6a category API | #76 | open | review and merge |
+| W1 Transactions screen | #77 | draft | follows C6a |
+| ADR 0037 install plan | #75 | open | review |
+| Phase 11 plan | #67 | open | review |
+
 ## Sprint 2 (W2) — Phase 1.5, wave 2 (planned)
 **First:** F7b free-tier CI (ADR 0013, owner: no paid plans) · resume F3 · Bulwark re-review #8 (first PR to exercise `review-gate`; verify it reports on the head SHA) · F8b, F10b follow-ups.
 F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migration (schema run) · F11 trunk-model skills + PR template · F12 e2e in CI · Phase 1.5 acceptance (Sounding) · tag `phase-1.5`.
@@ -132,6 +150,7 @@ F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migratio
 ## Standups
 
 ```
+W2c · done: #59, #62, #64 to #66, #68 to #73 (contracts, import, connector protocol, hf2, Redis password, ADR 0036) · doing: P4a (#74), C6a (#76), W1 (#77) · blocked: C3b needs a regex-engine ADR; migration 0011 waits on review · tokens: not tracked
 W2b · done: #40 to #58 (I1, I5, C1 to C5a, ADR 0021); phases 3 and 4 in progress on trunk · doing: Phase 4 wiring contract (#59), Plaid P3 (#56) · blocked: C3b needs a regex-engine ADR; live instance upgrade waits on the owner · tokens: Codex about 6.4M input, Claude builders 65k to 175k each
 W2a · done: #18 to #27, #29, #28 (F2, F3b/c, F5a, F6, F10b/c, S0) · doing: F5c, F7b, F2b reviews · blocked: weekly limit at the stop · tokens: limit
 W1b · done: F1 (#4), F10 (#6), F8 (#7) · doing: F7, F9 reviews; #8 re-review; F3 · blocked: weekly limit (all accounts) · tokens: limit

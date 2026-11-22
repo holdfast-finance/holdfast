@@ -64,6 +64,10 @@ HOUSEHOLD_TABLES = (
     "import_run",
     "sync_run",
 )
+# Connector tables (0011). Household-scoped and RLS-forced like the rest, but not seeded by
+# ``seed_household``: their own suite is ``test_connector_link*.py`` (the slot ledger has no
+# DELETE grant, so the generic DML tests don't apply to it).
+CONNECTOR_TABLES = ("connector_account_link", "plaid_link_slot", "account_coverage")
 IDENTITY_TABLES = ("app_user", "webauthn_credential", "auth_session", "totp_recovery_code")
 REFERENCE_TABLES = ("institution", "security")
 ACCOUNT_DETAIL_TABLES = (
@@ -76,6 +80,7 @@ ACCOUNT_DETAIL_TABLES = (
 CONTRACT_TABLES = (
     "household",
     *HOUSEHOLD_TABLES,
+    *CONNECTOR_TABLES,
     *IDENTITY_TABLES,
     *REFERENCE_TABLES,
     "audit_log",

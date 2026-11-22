@@ -24,14 +24,20 @@ from decimal import Decimal
 from itertools import groupby
 from typing import Any
 
-from sqlalchemy import select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, mask_long_digit_runs
 from app.models import Account, Document, ImportRun, Transaction
 from app.services.ledger_service import LedgerWriter, NewTransaction
+from app.services.statement_accounts import (
+    AccountNotVisibleError as AccountNotVisibleError,
+)
+from app.services.statement_accounts import (
+    NewStatementAccount,
+    resolve_statement_account,
+)
 
 MASK_LEN = 4
 FINGERPRINT_CHUNK = 10_000
@@ -136,7 +142,8 @@ def external_account_key(
     person_id: uuid.UUID | None = None,
     target: AccountTarget | None = None,
 ) -> str:
-    """Stable id of an imported account: profile, last four digits, block key. No full number.
+    """An imported account's ``statement_key``: profile, last four digits, block key. No full
+    number.
 
     A CSV/OFX account (a ``target`` is given) also carries its owner, so two people never share
     one, and a CSV its own token, since it has no account identity.
@@ -181,14 +188,6 @@ async def _document(
     return doc
 
 
-class AccountNotVisibleError(RuntimeError):
-    """The imported account exists but this session cannot see it (per-person visibility).
-
-    Never create a twin: the unique key blocks it. Import as a household-wide job, or as the
-    account's owner. The message carries no account data.
-    """
-
-
 async def _account(
     s: AsyncSession,
     household_id: uuid.UUID,
@@ -198,13 +197,15 @@ async def _account(
     target: AccountTarget | None = None,
     household_wide: bool = False,
 ) -> Account:
+    """The block's account: the chosen target, or the one with the block's statement key (ADR
+    0033 §4), created if none exists. Adopted accounts keep their key, so they qualify too."""
     if target is not None and target.account_id is not None:
         chosen = (
             await s.execute(
                 select(Account).where(
                     Account.id == target.account_id,
                     Account.household_id == household_id,
-                    Account.source == "import",
+                    Account.statement_key.is_not(None),
                 )
             )
         ).scalar_one_or_none()
@@ -223,43 +224,19 @@ async def _account(
         return chosen
     if target is not None and person_id is None and not target.joint and not household_wide:
         raise AccountTargetError("joint_not_chosen")
-    joint = target is not None and (target.joint or person_id is None)
-    key = external_account_key(statement, block, person_id=person_id, target=target)
-    where = (
-        Account.household_id == household_id,
-        Account.source == "import",
-        Account.external_account_id == key,
-    )
-    acct = (await s.execute(select(Account).where(*where))).scalar_one_or_none()
-    if acct is not None:
-        return acct
     last4 = block.account_last4
-    await s.execute(
-        pg_insert(Account)
-        .values(
-            id=uuid.uuid4(),
-            household_id=household_id,
-            source="import",
-            external_account_id=key,
+    return await resolve_statement_account(
+        s,
+        household_id,
+        external_account_key(statement, block, person_id=person_id, target=target),
+        NewStatementAccount(
             name=f"{statement.institution} {last4}" if last4 else statement.institution,
-            mask=last4[-MASK_LEN:] if last4 else None,
             type="credit" if statement.kind == "card" else "depository",
-            # A person importing owns the account and it starts private (ADR 0008); the
-            # household-wide job (no person) creates a joint, shared account.
-            owner_person_id=None if joint else person_id,
-            visibility="private" if person_id and not joint else "shared",
-        )
-        .on_conflict_do_nothing(
-            index_elements=["household_id", "external_account_id"],
-            index_where=text("source = 'import'"),
-        )
+            mask=last4[-MASK_LEN:] if last4 else None,
+        ),
+        person_id,
+        joint=target is not None and (target.joint or person_id is None),
     )
-    # Lost a race (or the row is hidden from this session): read the winner. Still nothing means
-    # per-person visibility hides it, and we must not make a twin.
-    acct = (await s.execute(select(Account).where(*where))).scalar_one_or_none()
-    if acct is None:
-        raise AccountNotVisibleError("imported account is not visible to this session")
-    return acct
 
 
 async def import_statement(
@@ -342,7 +319,7 @@ async def _in_other_account(
     keys = (
         (
             await s.execute(
-                select(Account.external_account_id).where(
+                select(Account.statement_key).where(
                     Account.household_id == household_id,
                     Account.id.in_([r.account_id for r in earlier]),
                 )

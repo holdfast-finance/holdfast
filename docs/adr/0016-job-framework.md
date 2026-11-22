@@ -69,7 +69,10 @@ household context.
   `tests/jobs/test_job_boundaries.py` fails if anything but the runner calls `_enqueue` or
   anything outside `app/jobs` and `app/worker` names `enqueue_household_wide`.
   `tests/test_household_wide_guard.py` fails on any `household_wide=` call keyword under
-  `backend/app/` other than literal `False` outside an allowlist that states each module's reason.
+  `backend/app/` other than literal `False` outside an allowlist that states each module's reason,
+  and on any `**` keyword unpacking there too (logger calls and a reviewed list of call sites
+  aside). Only `db_context`, the runner and rotate-keys may name `list_household_ids`. These are
+  AST tripwires against mistakes; a dynamic `getattr` or `importlib` lookup defeats them.
 - **Idempotency:** the caller passes an explicit key (`[A-Za-z0-9:._-]`, at most 200 characters,
   for example `sync:<item>:<hour>`). A duplicate returns the existing run and creates no new row.
   If that run is unfinished (`queued`, `retrying`, `running`), enqueue pushes it to arq again under
@@ -111,8 +114,9 @@ household context.
   session's final transaction, so uncommitted handler writes commit atomically with the mark.
   `JobContext.factory()` opens side sessions in the run's household only (`HouseholdSessions`
   takes no household argument), so a handler can't open one elsewhere by mistake. Handler modules
-  may not import `app.db` or `app.db_context` (import-linter), and a scan rejects `_factory`,
-  `get_bind`, `.bind` and `set_config` (in code or SQL text) in `app/jobs/handlers/`.
+  may not import `app.db`, `app.db_context` or `app.jobs.runner` (import-linter), and a scan
+  rejects `_factory`, `get_bind`, `.bind` and `set_config` (in code or SQL text) in
+  `app/jobs/handlers/`.
 - **Bounded retries:** capped exponential backoff (`base_delay * factor^(n-1)`, up to `max_delay`)
   until `max_attempts`. arq's own `max_tries` is set to attempts + lock deferrals + 1. On that last
   try the runner always records `failed` instead of asking for another retry, so arq can never drop
@@ -169,8 +173,14 @@ household context.
   start while the first is running (the same run can't start twice; the orphan age guard covers
   that), and a handler that ignores cancellation past `orphan_after` could still overlap its own
   re-claim. A Redis writer can still deny service (flood deliveries, delete jobs), though never
-  run a forged payload. `job_run` doesn't record `requested_by` (P4a, needs a migration), so a
-  run's requester isn't auditable and the sweeper re-pushes without knowing who asked.
+  run a forged payload.
+- **Built in P4a (0011):** `job_run.requested_by` (FK to the run household's `person`, `SET NULL`)
+  is written by enqueue, read back by `claim` and handed to the handler as
+  `JobContext.requested_by`. Redis and the payload never supply it. The handler's session stays
+  household-wide. A handler that needs the requester's rights opens a person-scoped session
+  itself, and one that chains a job passes `requested_by=ctx.requested_by` on. Reusing a key under
+  another requester raises `IdempotencyConflict`, with the same fixed message as a different
+  payload. The sweeper re-pushes by run id, and `claim` reads the requester from the row.
 - Follow-ups: retention pruning of old `job_run` rows, wiring `arq_pool(app.state.redis)` into the
   API once the first API-triggered job lands (P7), and Bulwark's Redis-auth item. The import-linter
   domain contract also forbids `app.jobs`.

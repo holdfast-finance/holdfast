@@ -614,7 +614,7 @@ class ImportService:
                 await s.execute(select(Document.id).where(Document.sha256 == sha))
             ).scalar_one_or_none()
             known_accounts = set(
-                (await s.execute(select(Account.id).where(Account.source == "import")))
+                (await s.execute(select(Account.id).where(Account.statement_key.is_not(None))))
                 .scalars()
                 .all()
             )
@@ -715,7 +715,9 @@ class ImportService:
     async def accounts(self) -> list[ImportAccountOut]:
         stmt = (
             select(Account)
-            .where(Account.source == "import", Account.closed_at.is_(None))
+            # Every account a statement can land in: imported, or adopted by a connection
+            # (ADR 0033 §4 keeps its statement key).
+            .where(Account.statement_key.is_not(None), Account.closed_at.is_(None))
             .order_by(Account.name, Account.id)
         )
         async with self._session() as s:
