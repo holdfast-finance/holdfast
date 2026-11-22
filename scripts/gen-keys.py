@@ -46,10 +46,12 @@ def generate() -> dict[str, str]:
     }
 
 
-# Generated values an install made before they existed may lack: any key generate() knows, except
-# the ones that are unsafe to mint late: the Postgres passwords must match the existing pgdata volume and FERNET_KEY the stored
-# ciphertext, so those are never generated for an existing .env.
-NEVER_ADD = ("FERNET_KEY", "POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD", "POSTGRES_APP_PASSWORD")
+# Allowlist of generated keys safe to mint for an existing .env. A new generate() key is NOT added
+# automatically: a test forces a decision. Never FERNET_KEY or the Postgres passwords (they must
+# match stored ciphertext and the pgdata volume). IMPORT_ID_KEY is safe only because it is minted
+# only when absent: without it OFX uploads are refused, so no stored token depends on it.
+ADDABLE = ("REDIS_PASSWORD", "SESSION_SECRET", "IMPORT_ID_KEY")
+NEVER_ADDABLE = ("FERNET_KEY", "POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD", "POSTGRES_APP_PASSWORD")
 
 
 # URL key -> the password variable whose value replaces its CHANGE_ME placeholder.
@@ -59,7 +61,7 @@ URL_PASSWORDS = {
 }
 
 
-LINE = re.compile(r"^(?:export\s+)?(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
+LINE = re.compile(r"^(?P<indent>\s*)(?:export\s+)?(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 
 
 def render(template: str, values: dict[str, str]) -> str:
@@ -109,7 +111,7 @@ def write_env(example: Path, target: Path, force: bool) -> int:
 
 
 def add_missing(target: Path) -> int:
-    """Fill generated keys (not NEVER_ADD) that are absent (or empty) in an existing .env. Other lines are kept
+    """Fill ADDABLE keys that are absent (or empty) in an existing .env. Other lines are kept
     as they are, and no value is printed."""
     if not target.is_file():
         print(f"error: {target} not found; run 'make keys' to create it", file=sys.stderr)
@@ -122,15 +124,17 @@ def add_missing(target: Path) -> int:
             present[m["key"]] = i
     values = generate()
     added: list[str] = []
-    for key in values:
-        if key in NEVER_ADD:
+    for key in ADDABLE:
+        if key not in values:
             continue
         if key in present:
             current = LINE.match(lines[present[key]])
             if current is not None and current["value"].strip() != "":
                 continue
-            prefix = "export " if lines[present[key]].lstrip().startswith("export") else ""
-            lines[present[key]] = f"{prefix}{key}={values[key]}"
+            stripped = lines[present[key]].lstrip()
+            indent = lines[present[key]][: len(lines[present[key]]) - len(stripped)]
+            prefix = "export " if stripped.startswith("export") else ""
+            lines[present[key]] = f"{indent}{prefix}{key}={values[key]}"
         else:
             lines.append(f"{key}={values[key]}")
         added.append(key)

@@ -116,9 +116,22 @@ class AddMissing(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             keys.add_missing(path)
         names = {x.split("=", 1)[0] for x in path.read_text().splitlines()}
-        for unsafe in keys.NEVER_ADD:
+        for unsafe in keys.NEVER_ADDABLE:
             self.assertNotIn(unsafe, names)
         self.assertIn("REDIS_PASSWORD", names)
+
+    def test_addable_set_is_pinned_and_every_generated_key_is_classified(self) -> None:
+        self.assertEqual(keys.ADDABLE, ("REDIS_PASSWORD", "SESSION_SECRET", "IMPORT_ID_KEY"))
+        classified = set(keys.ADDABLE) | set(keys.NEVER_ADDABLE)
+        self.assertLessEqual(set(keys.generate()), classified, "decide: addable or never?")
+
+    def test_indented_line_filled_in_place_keeps_indent(self) -> None:
+        path = self._env("  REDIS_PASSWORD=\n")
+        with redirect_stdout(io.StringIO()):
+            keys.add_missing(path)
+        line = path.read_text().splitlines()[0]
+        self.assertTrue(line.startswith("  REDIS_PASSWORD=") and len(line) > 30)
+        self.assertEqual(path.read_text().count("REDIS_PASSWORD="), 1)
 
     def test_adds_every_other_generated_key_and_keeps_export_lines(self) -> None:
         path = self._env("export REDIS_PASSWORD=\nexport SESSION_SECRET=keep\nFERNET_KEY=\n")

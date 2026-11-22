@@ -124,7 +124,7 @@ sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)
 	python3 scripts/gen-keys.py --write
 
-keys-add-missing: ## Existing .env: add only the generated values it lacks (REDIS_PASSWORD), keep the rest
+keys-add-missing: ## Existing .env: add the generated values it lacks; never FERNET_KEY or the Postgres passwords
 	python3 scripts/gen-keys.py --add-missing
 
 check: lint test ## lint + test

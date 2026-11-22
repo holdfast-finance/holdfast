@@ -40,5 +40,6 @@ def test_password_with_reserved_characters_is_rejected(
     clean_env: pytest.MonkeyPatch, bad: str
 ) -> None:
     clean_env.setenv("REDIS_PASSWORD", bad)
-    with pytest.raises(ValidationError, match="REDIS_PASSWORD may only contain"):
+    with pytest.raises(ValidationError, match="REDIS_PASSWORD may only contain") as excinfo:
         make_settings()
+    assert bad not in str(excinfo.value)

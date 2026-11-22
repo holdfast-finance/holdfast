@@ -32,6 +32,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         extra="ignore",
+        # A rejected secret must never be echoed into the startup error (and docker logs).
+        hide_input_in_errors=True,
         case_sensitive=False,
     )
 

@@ -14,8 +14,9 @@ value. To add it:
 make keys-add-missing   # Windows: ./scripts/dev.ps1 keys-add-missing
 ```
 
-This appends `REDIS_PASSWORD` and nothing else. It never rewrites or prints an existing value,
-and it never generates database passwords or `FERNET_KEY` for an existing install. Then restart
+This appends the generated values the file lacks (today `REDIS_PASSWORD`). It never rewrites or
+prints an existing value, and it never generates `FERNET_KEY` or the Postgres passwords for an
+existing install. Then restart
 the stack (`make down && make up`). Redis keeps no data you need across the restart: it holds
 queues and locks only, so a restart is safe.
 
