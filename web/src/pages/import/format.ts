@@ -42,6 +42,17 @@ const REASON_COPY: Record<string, string> = {
     'Opening balance plus the transactions does not equal the closing balance. A row may be missing or misread.',
   date_out_of_period: 'Some transactions are dated outside the statement period.',
   no_transactions_in_document: 'This statement had balances but no transactions.',
+  possible_overlap:
+    'Some rows may already be in this account from another file. Check them before accepting.',
+  sign_unverified:
+    'This card file does not say which rows are purchases and which are payments, so the signs could be backwards. Check them before accepting.',
+  sign_conflict:
+    'Some rows have a type (debit or credit) that disagrees with the sign of the amount. Check the signs before accepting.',
+  duplicate_fitid: 'The file reuses a transaction id on more than one row.',
+  ofx_correction: 'The file corrects or deletes earlier rows, which Holdfast does not apply yet.',
+  investment_data_skipped: 'The file also holds investment data, which was not imported.',
+  ledger_balance_after_period_end:
+    'The closing balance was struck after the statement period ended, so it includes later activity.',
   unexplained_duplicates:
     'Some rows were skipped as duplicates and could not be matched to an earlier statement.',
 }
