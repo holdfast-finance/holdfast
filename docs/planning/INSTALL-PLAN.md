@@ -1,4 +1,4 @@
-# Install-everywhere plan (revision 3)
+# Install-everywhere plan (revision 4)
 
 Owner: **Harbor** (drafts), **Keel** (schedules). Decision record: `docs/adr/0037-install-on-every-platform.md`
 (Proposed, revision 2; it answers Gadfly's review point by point). Nothing here is built. Sizes: S = 1 run,
@@ -7,6 +7,10 @@ M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each 
 
 ## Where this sits
 
+- **Revision 4 (Bulwark's BLOCK and Gadfly round 3):** signing and every credentialed step move to a main-only `sign-release.yml` (IN-T1);
+  `latest.json` is gone and each stub installs only its own version (IN-T2); `get.` is redirects only with no Cloudflare token in CI (IN-E1);
+  the backup crypto is specified (IN-B1); the 5.1 bootstrap and the `.exe` elevation are constrained (IN10, IN11, IN-W1); the tap is a third
+  code-execution root (IN13). Per-slice notes are folded into the slices below. Dispositions are in ADR 0037's last tables.
 - **The repository is public** (verified 2026-11-22; `v0.0.0-alpha` published 2026-11-21). No gate in this plan waits for
   "going public".
 - **Preemptible, with a pull-forward.** The Q1 finish line is Phase 5 (`ROADMAP.md`). This lane runs when the critical path
@@ -18,7 +22,7 @@ M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each 
   Phase 8.5 (phone wizard, recover, docs, real-device acceptance) stays where it is. Until IN-A1 merges, any install is a
   labelled "preview" with a certificate warning.
 - **Keel decisions (2026-11-22, owner may veto):** Q4 one 5.1 bootstrap file plus a narrow rule 10 amendment (IN-W1, Bulwark-gated); Q5
-  `.pkg` only, `.dmg` deferred; Q6 Keel creates the Worker and record with `cf` at IN-E1, deployed from CI on a `v*` tag; Q9 Docker Desktop
+  `.pkg` only, `.dmg` deferred; Q6 Keel creates the Worker and record with `cf` at IN-E1 and **updates it with `cf` from the owner's machine, no Cloudflare token in CI** (Bulwark amended the CI deploy away); Q9 Docker Desktop
   default with Colima documented; Q10 Podman after the first usable run, Raspberry Pi after Podman; Q11 Keel creates the tap repo at the
   Homebrew slice (the plan's IN13), winget later; N1 no channel before an upgrade path; N2 key ring in the state directory, host backups
   include it, encrypted with a user passphrase never stored with the backup; N4 GitHub Issues with templates; N5 only Keel creates `v*` tags.
@@ -50,10 +54,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   which actions delete volumes is taken from Docker's docs, and the drill runs only on a machine confirmed to hold no other Docker data (IN-W3).
   The script needs only `pwsh` and Docker on the host, no `python3`, `make` or `git`. Output: a pass/fail table in `docs/ops/`, numbers and counts
   only. **Never on employer equipment** (PLAN Section 0). **It gates IN10 onward only.** IN0, IN1, IN-A1 and IN-B1 do not wait on owner time.
+  **Rev 4:** the script runs unelevated, fetches only the pinned bundle digest, prints no secret and writes nothing outside a temp directory with a current-user ACL; it never installs Docker or WSL.
 - **IN0 Portability audit as a test** — S — Harbor/sonnet — Bulwark — none — `scripts/check-portability.py` fails CI on: a
   `bash` shebang in a script the installer ships, `sha256sum` or `sed -i` without a BSD fallback in shipped scripts, a host-path
   bind mount in the release compose, a `build:` key in the release compose, a port other than the allowed loopback one. Each
   violation is seeded once in a test and must fail.
+  **Rev 4:** the audit also fails on any `Set-ExecutionPolicy`, `-ExecutionPolicy Bypass` or `-EncodedCommand` under `installer/`, the Inno script and the bundle, and on any mount of the Docker socket into `api` or `worker`.
 - **IN1 Release bundle and release compose** — M — Harbor/sonnet, contract by Lattice — Bulwark, Lattice — IN0 — `make bundle`
   makes `holdfast-<ver>-bundle.tar.gz` and `.zip` with `compose.yaml` pinned `@sha256`, no `build:`, no dev override, **project name
   `holdfast-app`** (never `holdfast`: the dev stack and any clone use that name) and every volume labelled
@@ -61,6 +67,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   `/api/health` with `docker-compose.dev.yml` and `./backend` deleted first. A second run from a *different directory* finds the **same labelled
   volumes** (a test fails if a second set appears). **Coexistence test (R2-B1): a dev stack (project `holdfast`) and a release install run side by
   side, and `holdfast keys`, `restore` and `--purge` never select, read or delete an unlabelled `holdfast_*` volume.**
+  **Rev 4:** the release compose has no Docker-socket mount anywhere; `IN1-draft` is built by the unsigned `release.yml` path only, so IN-S0 never receives a signed-looking artifact.
 - **IN-A1 Local ingress (ADR 0021 PA-D2, pulled in, plus the setup-token rate limit from PA1)** — S — Harbor + Tide/sonnet — Bulwark — IN1 —
   Caddy's local site on `127.0.0.1:47800` (plain HTTP, `Host: localhost:47800` only), setup on the local ingress only, token exchange with
   `replaceState`, the local rate-limit family, **and the setup-token rate-limit scope that ADR 0021 puts in PA1 (a scope keyed on the setup
@@ -69,6 +76,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   Bulwark's verdict and Keel's merge. Acceptance: ADR 0021's PA-D2 tests, plus Chrome (and Firefox, U-6, and Edge) on the Windows PC and Linux
   creates a passkey at `http://localhost:47800` with no warning. **The Safari half of U-7 needs a Mac (Q3b) and gates only the macOS channel's
   browser-support claim**; until it closes, the macOS docs say "use Chrome or Firefox", one of Bulwark's two ADR 0021 fallbacks.
+  **Rev 4:** the session cookie name is **per install** (L4), so two Holdfast instances on one machine do not overwrite each other's cookie at `localhost`. IN-A1 **merges on Linux Playwright with a virtual authenticator** (Gadfly round 3); the Windows browser checks and U-6 are the *support claim*, not a merge gate. The non-`Secure` local cookie is never an interim default.
 - **IN-B1 State directory, local backup and restore** — M — Harbor + Tide/sonnet; contract by Lattice — Bulwark — IN1 —
   (a) state directory per OS, separate from code, with the permissions of ADR 0037 §2 (Linux `0700`/`0600`; macOS created by the user's own
   `holdfast open`, never in `.pkg` postinstall, excluded from Time Machine; Windows ACL on the whole directory) **re-checked at every start**,
@@ -83,10 +91,20 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   blocks `rotate-keys`**, captures the ring **after the dump with all kids kept**; restore runs ADR 0015's residual scan and **refuses if a kid is
   missing**, and swaps `.env` atomically keeping `.env.prev`. The chosen primitive gets the maintenance and AGPL-compatibility check. Acceptance
   tests (each can fail): wrong passphrase fails, right one reproduces the data; **delete state, restore from an archive and the passphrase alone**;
-  the archive's secret set equals `.env.example`'s secret keys; the archive and state contain no passphrase and no plaintext `FERNET_KEY`; the backup
+  the archive's secret set equals `.env.example`'s secret keys; **the archive holds no plaintext secret and no passphrase, and state holds no passphrase;** the backup
   folder is a host path, never a volume; **rotate in the middle of a backup, then restore**; scheduled task exists after install and is gone after
   `--purge`; a stopped runtime produces `skipped` and an aged banner, not silence. This overlaps Phase 9 (offsite restic), which layers on top;
   Lattice writes the contract so Phase 9 does not redo it.
+  **Rev 4 (Bulwark must-fix 4, L5, Gadfly R3):** the **default is a generated recovery code** (at least 128 bits from the OS CSPRNG, shown once in groups); a
+  chosen passphrase is opt-in with a **strength floor Bulwark sets in this slice**; the wrapping key comes from a **memory-hard KDF (scrypt or
+  Argon2id)** with its parameters in the archive header and a **CI-asserted minimum**; the passphrase is read **only from a TTY or secure prompt**, never
+  argv, env, a file or any log (**tests grep the installer log, Inno `/LOG`, Task Scheduler history and launchd output for a test passphrase**); the backup
+  folder is `0700` (Windows current-user ACL, inheritance removed) and archives `0600`, **re-checked each run**; **no plaintext dump touches disk**
+  (encryption in the stream, tested by listing the folder and temp directories during a run). On macOS the default backup folder is
+  `~/Library/Application Support/Holdfast Backups`, one the **launchd agent can write without a TCC prompt** (not `~/Documents`). The backup-receipt gate on
+  the first import exists **only in the release compose** (not the dev or clone stack), and the receipt is written into the named volume by a **one-shot
+  helper container**. First run **says whether the backup folder is cloud-synced** and offers a local-only folder. A **retention rule** (keep the newest N and
+  the last pre-update backup) has a test.
 - **IN2 Named documents volume (no host chown)** — S — Harbor + Tide/sonnet — Bulwark — IN1 — the stack stores and reads a synthetic
   document as uid 10001 on a fresh volume with no `chown` helper and no bind mount; a restart keeps it. (Fallback if Bulwark objects:
   bind mount with `:z` and `:U`; spike IN-L-S2.)
@@ -97,6 +115,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   log for the generated values. The **recovery step** has the user set the backup passphrase (or accept a generated recovery code) and confirm they
   stored it, and says plainly that a lost one makes backups unrecoverable. `make keys` and `dev.ps1 keys` keep writing the repo-root `.env` for
   contributors; a parity test asserts they and `holdfast keys` **share the generator**, not the destination.
+  **Rev 4 (M8):** the keys service runs with **`logging: driver: none`** or is invoked with **`exec -T`** so its output never lands in container logs, and a **canary test greps `docker logs`** for the generated values.
 - **IN4 Multi-arch images** — M — Harbor/sonnet — Bulwark (`release.yml` is protected) — IN1 — the images job builds
   `linux/amd64,linux/arm64`; `docker buildx imagetools inspect` lists both; the arm64 image starts the stack on `ubuntu-24.04-arm`
   (free on the public repo now).
@@ -109,6 +128,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN-A2 The `holdfast` wrapper (replaces ADR 0021 PA-D6)** — M — Harbor + Tide/sonnet — Bulwark — IN-B1, IN3, IN5 — `up`, `down`,
   `open`, `update`, `backup`, `restore`, `export`, `recover` below the floor as ADR 0021 says, `keys`, `uninstall`, `phone`. POSIX
   `sh` and a `holdfast.ps1` twin; a parity test lists both command sets and fails on a difference.
+  **Rev 4 (L9):** `holdfast export` writes files **`0600`** (Windows: current-user ACL) and adds an **audit entry** (hard rule 3's audit log), with a test.
 - **IN-O1 `holdfast open` launcher on every OS** — S — Harbor/sonnet — none — IN-A2 — starts the runtime if stopped (Docker Desktop;
   Colima via `brew services`), waits for the engine with a printed reason, runs `up`, opens the browser. Windows gets a Start-menu
   shortcut, macOS gets `Holdfast.app`, Linux a `.desktop` entry. Test: with a fake runtime that starts late, the launcher waits and
@@ -116,19 +136,31 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 
 ### E-I1 Release integrity (before any channel opens)
 
-- **IN-T1 Tag control and release guard (S2, R2-S4)** — S — Harbor/sonnet — Bulwark — none — `release.yml` refuses unless the tagged commit is
-  reachable from `main` and its PR head had a green `ci-required`; signing runs in a protected environment. **Tag control is a process rule today
-  (Keel decision N5: only Keel creates `v*` tags):** every agent acts as the owner's GitHub account, so a tag ruleset has no distinct identity to
-  allow, and a required reviewer is either the owner (a gate on every release) or the same account approving itself. The ruleset and "prevent
-  self-review" become enforceable when the **separate agent identity from ADR 0036** exists; this slice records that dependency and adds the ruleset
-  then. Test: a tag on an unmerged branch commit fails the `verify` job (this works today).
-- **IN-CG Channel gate (R2-S5)** — S — Harbor/sonnet — Bulwark — IN15, IN-T1 — `release.yml` gets a `channel-gate` job and every channel job (stub,
-  `.exe`, `.pkg`, formula bump, `get.` deploy) `needs` it. It fails unless the IN15 upgrade-path test job **passed on the release commit**.
-  Test: a release candidate with a red or missing IN15 result publishes no channel artifact (the job log shows the refusal), and the README is not
-  consulted.
-- **IN-T2 Signed `CHANNEL` and minimum version (S3)** — S — Harbor/sonnet — Bulwark — IN-T1 — `release.yml` signs `SHA256SUMS` and a
-  one-line `CHANNEL` with Sigstore; the stub embeds a minimum version. Test: a stale but validly signed old release is refused by
-  a fresh install (freeze test); a `latest.json` that names a version `CHANNEL` does not is refused.
+- **IN-T1 Signing moved off the tag; main-only signing workflow (S2, R2-S4, Bulwark must-fix 1)** — M — Harbor/sonnet — Bulwark — none —
+  a tag-triggered job runs **the tagged commit's own `release.yml`**, so any guard inside it is chosen by the tagger. So: (a) **`release.yml`
+  on the tag builds unsigned artifacts only** and holds no credential; (b) a new **`.github/workflows/sign-release.yml`**, triggered by
+  `workflow_run`, runs from **main** and performs the Sigstore signing and every credentialed step (SignPath, the tap bump, any `get.`
+  change), after **re-checking** that the tag is annotated, its commit is reachable from `main` with a green `ci-required` on its PR head,
+  the IN15 channel gate (IN-CG) passed on it, and the downloaded **artifact digests equal the build job's recorded digests**; (c) the
+  `release` **environment's deployment policy is the `main` branch only, never `v*` tags**; (d) `main` has a **ruleset with no bypass actor**;
+  (e) **immutable releases** are enabled, and this slice **verifies they are available on this plan** and records the answer. **Tag control
+  stays a process rule today (Keel decision N5: only Keel creates `v*` tags):** every agent acts as the owner's GitHub account, so a tag
+  ruleset has no distinct identity to allow and a required reviewer is the owner or the same account; the ruleset and "prevent self-review"
+  become enforceable when the **separate agent identity from ADR 0036** exists. **Residual risk, stated in the slice's docs:** control of the
+  owner's account or the organisation can still change `sign-release.yml` on `main` and mint a signed release. **Test (can fail): a tag on an
+  unmerged branch commit whose `release.yml` has the guard deleted gets no signature and no credential.**
+- **IN-CG Channel gate (R2-S5)** — S — Harbor/sonnet — Bulwark — IN15, IN-T1 — the channel gate runs **inside `sign-release.yml`** (main's code,
+  not the tag's): every channel step (stub signature, `.exe` and `.pkg` signing or attachment, formula bump, `get.` change) sits behind it. It
+  fails unless the IN15 upgrade-path test job **passed on the release commit**. Test: a release candidate with a red or missing IN15 result
+  publishes and signs no channel artifact (the log shows the refusal), and the README is not consulted.
+- **IN-T2 Signed `CHANNEL`; each stub installs only its own version (S3, Bulwark must-fix 2)** — S — Harbor/sonnet — Bulwark — IN-T1 —
+  `sign-release.yml` signs `SHA256SUMS` and a `CHANNEL` file carrying **the version, the commit SHA and the minimum installable version**.
+  `latest.json` **does not exist**. Each stub embeds its own version and installs exactly that, and **refuses a `CHANNEL` that is not its own**.
+  `holdfast update` resolves the newest release from the **GitHub Releases API**, never from `get.`, and refuses anything below the minimum.
+  The stub verifies with the **exact** identity `https://github.com/holdfast-finance/holdfast/.github/workflows/sign-release.yml@refs/heads/main`,
+  issuer `https://token.actions.githubusercontent.com`, `--certificate-github-workflow-repository holdfast-finance/holdfast` and
+  `--certificate-github-workflow-trigger workflow_run` (any regex fully escaped and anchored). **Test: a stub given a different release's
+  assets is refused (version mismatch, exit 22); an identity of `release.yml@refs/tags/v...` is refused.**
 
 ### E-I2 Endpoints on our domain (Cloudflare, plan only until the owner says go)
 
@@ -136,15 +168,18 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   enabled (`[10042]`); no Pages projects; the account also holds unrelated Workers; the apex returns 404 for `/install.sh` and
   `/install.ps1`. No change made. `cf` is the default tool; `npx wrangler` works on the same account and is used only if a Wrangler
   config is ever committed.
-- **IN-E1 `get.holdfastfinance.app` Worker** — S — Harbor/sonnet; Keel creates the Worker and DNS record with `cf` (Q6) — Bulwark — IN7, IN-T1 —
-  **deployed from CI on a `v*` tag only**, using a Cloudflare API token scoped to this one Worker, stored as a secret of the protected release
-  environment (it can swap the stub, so it is the credential Q7 is about). The deploy job reuses IN-T1's tag guard. `infra/get-site/`
-  holds the stubs, `_headers`, `_redirects`, `latest.json`. After deploy: `curl -sI` shows `text/plain`, `nosniff`, `no-cache`; `/latest`
-  302s to the GitHub Release; `workers.dev` and preview URLs are off; the Worker has no script and no bindings; a CAA record exists
-  for the CA in use; the deployed `install.sh` hash equals the Release asset's (test fails otherwise). **The install page lists the
-  GitHub-URL one-liner and the stub hash from the Release notes.**
-- **IN-E2 Deploy step in RELEASES.md** — S — Beacon + Harbor — Keel — IN-E1 — RELEASES.md describes the CI deploy on a `v*` tag, the manual `cf`
-  fallback, token rotation, and the hash-comparison step.
+- **IN-E1 `get.holdfastfinance.app` redirect Worker (Bulwark must-fix 3)** — S — Harbor/sonnet; Keel creates the Worker and DNS record with `cf` (Q6)
+  — Bulwark — IN7, IN-T1 — `/install.sh`, `/install.ps1`, `/win`, `/mac` and `/latest` are **302 redirects to GitHub Release asset or page URLs**.
+  The Worker holds **only `_redirects` and `_headers`** and **serves no executable bytes**; `infra/get-site/` has no script and no `latest.json`.
+  Keel updates the redirect targets **with `cf` from the owner's machine** after each release. **No Cloudflare token is stored in CI**; this slice
+  checks whether Workers token permissions are account-wide (believed so, UNVERIFIED) and records it, and **if a CI deploy is ever kept, Q7 (a
+  separate Cloudflare account) becomes a precondition of this slice.** `/win` and `/mac` are **not created before the `.exe` is signed and the `.pkg`
+  notarized.** Check (can fail): **each redirect resolves to the matching Release asset** (`curl -sIL` follows to the right filename on
+  `github.com`), and **the Worker returns no body for the stubs** (a request to `/install.sh` that does not 302 fails); `workers.dev` and preview URLs
+  are off; no script and no bindings; a CAA record for the CA in use exists (it limits mis-issuance by other CAs only, not control of the account).
+  **The install page lists the GitHub-URL one-liner and the stub hash from the Release notes.**
+- **IN-E2 Redirect update step in RELEASES.md** — S — Beacon + Harbor — Keel — IN-E1 — RELEASES.md describes the manual `cf` update of the redirect
+  targets from the owner's machine, the "redirect resolves to the asset" check, and that nothing is deployed from CI.
 
 ### E-I3 Linux and other Unix
 
@@ -153,9 +188,11 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   exit 22, all leaving nothing on disk; no `--insecure` flag (test greps); under 80 lines (test counts); the body is a function
   called on the last line (test truncates the stream at every byte offset in a corpus and runs nothing); PATH check with consent
   prompt for the rc line.
+  **Rev 4:** consent prompts **read `/dev/tty` and default to no** (L2), so `curl | sh` cannot answer one from the piped stream (test: no tty means no consent); **a fail-closed "Sigstore unreachable" test** blocks the network and expects exit 21 with no fallback (L10); the stub installs only its own version and refuses a foreign `CHANNEL` (IN-T2).
 - **IN8 Distro detection and `--install-docker`** — M — Harbor/sonnet — Bulwark — IN7 — table-driven tests of `/etc/os-release` fixtures
   (Ubuntu 22.04/24.04/26.04, Debian 12/13, Fedora 43/44, Rocky 9, Raspberry Pi OS, Arch, Alpine, openSUSE): the right action or a
   named "unsupported" message. **Only dry-run and fixtures here**; the real `--install-docker` run happens on a clean VM in IN9.
+  **Rev 4 (L3):** the Docker repository's **GPG key fingerprint is pinned** and a non-matching key is refused (test with a swapped key).
 - **IN9 Linux acceptance on real distros** — M — Sounding/sonnet — Keel — IN7, IN8 — Fedora 43 (the owner's box, **run by hand, not
   as a runner**), and clean Debian 13 and Ubuntu 24.04 VMs each run the one-liner to a healthy `/api/health` and create a household
   and passkey; the Ubuntu 24.04 VM proves `--install-docker` from a clean image. Counts and pass/fail only.
@@ -172,10 +209,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   `powershell.exe` 5.1 on `windows-2025`**, forces TLS 1.2, and takes the hash-pinned PowerShell MSI path when `winget` is absent
   (simulated). A **preflight** reports build, edition, firmware virtualization, RAM, disk, winget, WSL and `pwsh` *before any download*.
   Pester covers the paranoid path including `Unblock-File`. If the amendment is refused, the stub is the two-step form with the same acceptance.
+  **Rev 4 (Bulwark must-fix 7, L10):** the 5.1 bootstrap **hands over by running its own already-downloaded text under `pwsh -NoProfile -File` from a new temporary directory with a current-user ACL, and never re-fetches it**; **TLS 1.2 is added with `-bor`**, never assigned over the set; the MSI fallback is **hash-checked and run from that same directory with no re-read**; **a grep test fails on `Set-ExecutionPolicy`, `-ExecutionPolicy Bypass` and `-EncodedCommand`** over `installer/`, the Inno script and the bundle; a fail-closed "Sigstore unreachable" test (exit 21).
 - **IN11 Inno Setup `.exe`** — M — Harbor/sonnet — Bulwark — IN10, IN-O1 — `windows-2025` builds it (Inno Setup is preinstalled), installs
   silently to a temp per-user dir, checks files, the Start-menu shortcut and the Apps entry, uninstalls, and asserts the code directory
   is gone, **the state directory is untouched**, and nothing under `%ProgramFiles%` was written. `/VERYSILENT` never installs Docker.
   The build fails if `[UninstallDelete]` names any state path.
+  **Rev 4 (M9, must-fix 7):** the `.exe` **elevates only to run `wsl --install` and exits**; the resume after the reboot is an **unelevated `HKCU` RunOnce** entry; **no elevated process runs a file from a user-writable path** (test inspects the script); there is **no `/win` link** before the `.exe` is signed (IN-W2).
 - **IN-W-S1 Spike: WSL 2 on a hosted runner** — S — Harbor/sonnet — none — IN1 — **assume the answer is no** and plan the owner-hardware
   path already (IN-S0, IN-W3): hosted Windows runners do not run WSL 2 or Linux containers in practice (Gadfly S8). The spike runs once
   to record the evidence; if it unexpectedly passes, a hosted stack test is added.
@@ -185,6 +224,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   file, `installer/install.ps1`, whose only job is to install or locate `pwsh` 7 and hand over. Acceptance for (b): Bulwark signs off the text, and
   the IN10 test that the file does nothing else fails if the file gains any other behaviour. If Bulwark or the owner rejects it, IN10 falls back to
   the two-step form.
+  **Rev 4:** the text proposed for CLAUDE.md hard rule 10 is Bulwark's: "10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. **One exception:** `installer/install.ps1`, under 80 lines and written for Windows PowerShell 5.1 and 7, whose only job is to install or locate `pwsh` 7 and hand over to it. CI runs it under 5.1 and fails if it gains any other behaviour." The CI-tested constraints are in IN10.
 - **IN-W2 SignPath signing** — M — Harbor/sonnet — Bulwark — IN11 — apply to SignPath Foundation, **asking whether `v0.0.0-alpha` meets
   "released"** and stating that no Cloud-only code ships in a signed file; then the signing job runs in the protected environment on
   tag jobs. `Get-AuthenticodeSignature` in CI is `Valid` with the right signer; a test fails if the signed file list differs from an
@@ -203,10 +243,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN13 Homebrew tap formula** — S — Harbor/sonnet — Bulwark — IN12 — Keel creates `holdfast-finance/homebrew-tap` when this slice is built (Q11) — `brew install --build-from-source` and `brew test` pass from our
   tap on a macOS runner; the formula pins URL and SHA256; `brew audit --strict` is clean. (The runner has no Docker, so the test is the
   formula and the script, not the stack.)
+  **Rev 4 (Bulwark must-fix 8):** the tap is a **third code-execution root**, so the formula bump runs **only in `sign-release.yml` on main**, with a **fine-grained token scoped to `holdfast-finance/homebrew-tap` (contents write only)** held in the main-only environment. **Acceptance:** the tap's `main` has a ruleset whose **required check re-runs `cosign verify-blob` on `SHA256SUMS`** (exact identity from IN-T2) and confirms the formula's `url` is a Holdfast release asset and its `sha256` is the signed one; a bump with a wrong URL or hash is rejected (test).
 - **IN14 Unsigned `.pkg` (owner decision 1)** — M — Harbor/sonnet — Bulwark — IN12, IN-O1 — `pkgbuild`/`productbuild` job on a macOS runner;
   the `.pkg` installs `holdfast` and `Holdfast.app` into a temp root (`pkgutil --expand` and a file-list assertion); state path is not in
   the payload; it is attached to the Release **labelled "unsigned preview"** with the checksum and `cosign verify-blob` lines in the
   notes. A test fails if a Release attaches a `.pkg` without the preview label.
+  **Rev 4 (M9):** the `.pkg` has **no preinstall or postinstall scripts** (`pkgutil --expand` test asserts the `Scripts` directory is absent or empty); there is **no `/mac` link** before notarization.
 - **IN-M-S1 Spike: Docker on a macOS runner** — S — Harbor/sonnet — none — IN1 — records whether Colima runs on `macos-15-intel` or
   `macos-26-intel` (Intel retirement date UNVERIFIED) and expects "no" on Apple Silicon. Not a dependency of anything.
 - **IN-M3 macOS stack acceptance** — M — Sounding/sonnet — Keel — IN12, IN14, IN-A1, IN-B1, **Q3b** — **blocked until a Mac exists.** On an
@@ -225,11 +267,13 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   delete state and restore from an archive plus the passphrase alone;** **uninstall keeps state
   and volumes; install, create data, uninstall, reinstall, and an old encrypted row still decrypts and the old Postgres password still
   works**; `--purge` needs the typed household name; neither touches Docker or Tailscale.
+  **Rev 4:** (M7) **deletion-path guards**: `uninstall`, `--purge`, `--purge-backups`, restore's state replacement and retention pruning resolve the real path and refuse anything outside that install's state, backup folder or labelled volumes (home directory, a drive root, a symlink target outside, `..`), with a test per hostile path; the **install id is inside the archive**, and `keys` and `restore` **refuse volumes from another install id, naming the volume** (test).
 - **IN16 Phone access per platform** — S — Harbor/sonnet — Bulwark — IN-A2, IN-W3, IN-M3 — the sidecar overlay starts on Linux and Docker
   Desktop (Windows now, macOS when available) with ADR 0021's serve-config test; `holdfast phone off` returns to loopback only.
 - **IN17 Install docs, release notes, support** — S — Beacon/sonnet — Harbor — IN7 — `docs/setup/install.md` per OS: the one-liners (both
   origins), the paranoid path, verify commands, the "unsigned preview" banner, where data lives, how to back up, uninstall. GitHub Issues templates (N4, Keel decision)
   ask for a log with a redaction warning. A link-check job passes and a test asserts every command in the page appears in a CI job.
+  **Rev 4:** the page shows the exact cosign identity and flags and the stub hashes **from github.com**, never lists `/win` or `/mac` before signing, says the `.pkg` and `.exe` are unsigned previews until then, and states the residual root-of-trust risk (owner or organisation account control).
 
 ## macOS without a Mac
 
@@ -301,7 +345,7 @@ hardware is a personal Windows PC and no Mac.
 |---|---|---|
 | Q4 | Yes: one Windows PowerShell 5.1 bootstrap file whose only job is to install or locate `pwsh` 7 and hand over; a narrow CLAUDE.md hard rule 10 amendment is proposed in the same slice, Bulwark-gated | IN-W1, IN10 |
 | Q5 | `.pkg` only for now; `.dmg` deferred | IN14, IN-M4 |
-| Q6 | Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built; deployed from CI on a `v*` tag only (scoped token in the protected environment) | IN-E1, IN-E2 |
+| Q6 | Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built, and updates the redirects with `cf` from the owner's machine; **no Cloudflare token in CI** (Bulwark: Workers token permissions are account-wide as far as known, UNVERIFIED). If a CI deploy is ever wanted, Q7 becomes a precondition | IN-E1, IN-E2 |
 | Q9 | Docker Desktop is the default on Windows and macOS (the installer's licence line says it is free for personal use); Colima documented for macOS | IN10, IN12, IN17 |
 | Q10 | Podman after the first usable run; Raspberry Pi (arm64) after Podman | IN-L-S1, slice order |
 | Q11 | Keel creates the tap repo in the org when the Homebrew slice is built; winget later | IN13, IN-W4 |

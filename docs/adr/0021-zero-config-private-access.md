@@ -1024,8 +1024,9 @@ v1.104.7, Docker 29.9.3, Fedora 43).
    - U-6 and U-7 gate the **per-browser support claim** for the PC app (Firefox; Safari and Chrome on macOS; Edge on
      Windows), **not PA-D2's merge** (amended 2026-11-22 for ADR 0037, Gadfly R2-B2). PA-D2 merges on Bulwark's
      verdict with Chrome, Firefox and Edge checked on the owner's Windows PC and Linux. The **Safari half of U-7
-     needs a Mac** and gates only the macOS channel's browser claim, with Bulwark's fallback in "Local ingress"
-     (a Chrome-or-Firefox note, or a local-origin cookie without `Secure`) applying until it closes. The setup-token
+     needs a Mac** and gates only the macOS channel's browser claim. **Until U-7 closes, the macOS docs say "use Chrome or
+     Firefox".** The non-`Secure` local-origin cookie (Bulwark's other fallback in "Local ingress") **stays conditional on U-7
+     evidence and is never an interim default** (Bulwark, 2026-11-22). The setup-token
      rate-limit scope in PA1 is delivered with PA-D2 by ADR 0037's slice IN-A1.
    - U-8, U-9 and U-10 gate PA-D3 (the phone wizard)
    - all of them gate PA-D8 (real-device acceptance)

@@ -1,12 +1,17 @@
 # 0037. Install on every platform: one verified path per OS, short endpoints on our own domain
 
-- Status: **Proposed (revision 3)**
+- Status: **Proposed (revision 4)**
 - Date: 2026-11-22
 - Deciders: Harbor (DevOps) drafts; Lattice and Bulwark review; Keel decides. The owner asked for it
   (quoted: "right now we only have ubuntu support we need to ensure other distros, a windows exe and a
   pwsh command and macos dmg or package and then terminal command").
 - Reviews: Gadfly on revision 1, `docs/phases/reviews/INSTALL-PLAN-gadfly.md` (REWORK-large). The
   "Gadfly response" section at the end answers every item (B1 to B6, S1 to S12, N1 to N5).
+- **Revision 4 (Bulwark's BLOCK on PR #75 at 6a26020; text only):** signing and every credentialed step move out of the tag's own
+  `release.yml` into a main-only `sign-release.yml` (§9); the cosign identity is exact (§8); stubs install only their own version and
+  `latest.json` is gone (§8); `get.` serves redirects only and no Cloudflare token enters CI (§4); the backup crypto is specified
+  (§11); the Windows bootstrap's hand-over and elevation are constrained (§5); the Homebrew tap is named a third code-execution root
+  (§9); plus ADR 0021's Safari rule and the per-slice notes. The Bulwark and Gadfly round-3 dispositions are the last table.
 - **Revision 3 (Gadfly round 2, `docs/phases/reviews/INSTALL-PLAN-gadfly.md`, REWORK-small):** the release project name is
   `holdfast-app` and volumes are matched by an install-id label (R2-B1, §2); ADR 0021 §12 is amended so the Safari check gates
   only the macOS channel, and the setup-token rate limit moves into IN-A1 (R2-B2); the backup design is fixed: the wrapped key
@@ -21,8 +26,8 @@
   - **Q4** yes: one Windows PowerShell 5.1 bootstrap file whose only job is to install or locate `pwsh` 7 and hand over,
     with a narrow CLAUDE.md hard rule 10 amendment proposed in the same slice (IN-W1), Bulwark-gated (§5).
   - **Q5** `.pkg` only for now; `.dmg` deferred (§6).
-  - **Q6** yes: Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built, **deployed from CI
-    on a `v*` tag only** (§4).
+  - **Q6** yes: Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built. **Amended by Bulwark's
+    block: Keel updates it with `cf` from the owner's machine; no Cloudflare token goes in CI** (§4).
   - **Q9** Docker Desktop is the default on Windows and macOS (the installer's licence line says it is free for personal
     use), with Colima documented for macOS (§3).
   - **Q10** Podman after the first usable run, Raspberry Pi (arm64) after Podman (§3, §7).
@@ -137,7 +142,7 @@ to read its own data.
 | | Code (replaced by update, removed by uninstall) | State (kept by uninstall, removed only by `--purge`) | Default backup folder (outside state) |
 |---|---|---|---|
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/holdfast/` (current bundle plus the previous one) | `${XDG_STATE_HOME:-~/.local/state}/holdfast/` | `~/Documents/Holdfast Backups` (or `$XDG_DOCUMENTS_DIR`) |
-| macOS | brew Cellar/prefix, or `/usr/local/lib/holdfast` for the `.pkg` | `~/Library/Application Support/Holdfast/` | `~/Documents/Holdfast Backups` |
+| macOS | brew Cellar/prefix, or `/usr/local/lib/holdfast` for the `.pkg` | `~/Library/Application Support/Holdfast/` | `~/Library/Application Support/Holdfast Backups` (not `~/Documents`: a launchd agent writing there triggers a TCC permission prompt, Bulwark L5) |
 | Windows | `%LOCALAPPDATA%\Programs\Holdfast` (the Inno `{app}`) | `%LOCALAPPDATA%\Holdfast` (never under `Programs\`, never in `[UninstallDelete]`) | `%USERPROFILE%\Documents\Holdfast Backups` |
 
 State holds: `.env` (every secret in `.env.example`, §11), `install.json` (install id, installed and previous version, backup
@@ -245,13 +250,20 @@ Facts (all read 2026-11-22 unless marked):
 ### 4. Short endpoints on our own domain, artifacts stay on GitHub
 
 ```
-https://get.holdfastfinance.app/install.sh     POSIX sh stub (Linux, macOS)
-https://get.holdfastfinance.app/install.ps1    pwsh stub (Windows)
-https://get.holdfastfinance.app/latest.json    {"version","prerelease","bundle","sha256sums","sigstore"}, URLs into GitHub
+https://get.holdfastfinance.app/install.sh     302 to the release's install.sh asset on github.com (Linux, macOS)
+https://get.holdfastfinance.app/install.ps1    302 to the release's install.ps1 asset on github.com (Windows)
 https://get.holdfastfinance.app/latest         302 to the newest Release page on GitHub
-https://get.holdfastfinance.app/win            302 to the newest setup.exe asset
-https://get.holdfastfinance.app/mac            302 to the newest .pkg asset
+https://get.holdfastfinance.app/win            302 to the signed setup.exe asset (created only once the .exe is signed)
+https://get.holdfastfinance.app/mac            302 to the notarized .pkg asset (created only once the .pkg is notarized)
 ```
+
+The Worker serves **no executable bytes and no `latest.json`**. It holds a `_redirects` file and a `_headers` file and nothing
+else. Each stub redirect targets the **explicit tag URL** of one release (`.../releases/download/v<ver>/install.sh`), because
+GitHub's `releases/latest` skips pre-releases, and Keel changes the target per release (below). The stub that arrives is
+therefore a signed-workflow release asset served by GitHub, and the Worker can only choose *which* GitHub URL, not what is at it.
+**`/win` and `/mac` are not created before signing or notarization** (Bulwark M9): until then the unsigned `.exe` and `.pkg` are
+reachable only from the Release page, labelled "unsigned preview", so a memorable link never points a stranger at an unsigned
+installer.
 
 **A Cloudflare-free one-liner of equal standing (S1).** The same stubs are release assets, so these work with no
 Cloudflare in the path:
@@ -269,16 +281,17 @@ GitHub's `releases/latest` skips pre-releases, so during the alpha the docs use 
 GitHub Pages behind that DNS. **Whoever controls the Cloudflare account is the code-execution root for every
 `get.holdfastfinance.app` one-liner**, and can also repoint the apex and obtain a certificate for it. A hash printed on
 the apex is therefore not independent. That is why the GitHub-URL form exists, why the stub hash is published in the
-Release, and why the Cloudflare account hardening (hardware-key 2FA, scoped tokens, DNSSEC already on per the ops doc,
-a **CAA record pinned to the CA in use**, and a separate account, owner question Q7) matter more than any code here.
+Release, and why the Cloudflare account hardening (hardware-key 2FA, DNSSEC already on per the ops doc, and a separate account, owner
+question Q7) matters more than any code here. A **CAA record pinned to the CA in use** is worth adding, but it only limits mis-issuance
+by *other* CAs: it does not protect against someone who controls the Cloudflare account, who can change the CAA record too (Bulwark L6).
 
 **Cloudflare mechanism: an assets-only Worker with a custom domain** (`holdfast-get`, route `get.holdfastfinance.app`),
 the pattern `docs/ops/domain-email-pages.md` records for `cloud.holdfastfinance.app`:
 - Static-asset requests are free and unlimited on Workers. The 100,000 requests a day cap applies to Worker script
   invocations, and an assets-only Worker has no script (https://developers.cloudflare.com/workers/platform/pricing/
   and `/limits/`).
-- `_redirects` allows 2,000 static and 100 dynamic rules (https://developers.cloudflare.com/workers/static-assets/redirects/).
-  `_headers` sets `text/plain`, `nosniff` and `no-cache` on the stubs.
+- `_redirects` allows 2,000 static and 100 dynamic rules (https://developers.cloudflare.com/workers/static-assets/redirects/); the
+  six lines above are static. `_headers` sets `nosniff`, `no-store` and a strict `Referrer-Policy` on the redirects.
 - Cost on the free plan: $0. (Whether the free plan asks for a card is UNVERIFIED.)
 - `.app` is HSTS-preloaded (ops doc); `curl` still gets `--proto '=https' --tlsv1.2`.
 
@@ -293,17 +306,18 @@ Not chosen:
   apex stays a plan option, not a fact.
 - **`raw.githubusercontent.com`.** Tracks a moving branch.
 
-**The endpoint is not a trust root for the artifacts.** `latest.json` and the redirects only point at GitHub Release
-assets; every byte that runs is verified (§8). But the **stub** comes from whichever origin the user chose.
+**The endpoint is not a trust root for the artifacts.** The redirects only point at GitHub Release assets, and every byte that runs
+is verified (§8). But the stub the user receives is whichever GitHub URL the Worker redirected to, so **a swapped redirect is a
+code-execution path** (§4 above): that is the Cloudflare account's weight.
 
-**Deploying it.** `cf` is the default tool (the repo has no Wrangler configuration, so the owner's rule picks `cf`);
-`npx wrangler` works on the same account and is allowed if a Wrangler config is ever added, at which point the owner's
-rule switches to it. **Keel decision (Q6, 2026-11-22, owner may veto):** Keel creates the `holdfast-get` Worker and the `get.`
-record with `cf` when IN-E1 is built, and releases deploy **from CI on a `v*` tag only**, from `infra/get-site/`. That needs
-a **scoped Cloudflare API token (Workers deploy for this one Worker, nothing else) stored as a secret of the protected
-release environment** (§9), which adds a stealable credential that can swap the stub. It is the reason for Q7 and for the
-tag controls in §9, and the deploy job reuses the tag guard (reachable from `main`, green `ci-required`). **This ADR
-itself creates no Cloudflare resource.**
+**Deploying it (Bulwark's block amended Keel's Q6).** `cf` is the default tool (the repo has no Wrangler configuration, so the
+owner's rule picks `cf`); `npx wrangler` works on the same account and is allowed if a Wrangler config is ever added, at which point
+the owner's rule switches to it. Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built, and
+**updates the redirect targets with `cf` from the owner's machine after each release. No Cloudflare token is stored in CI.** The
+reason: as far as known, Cloudflare API token permissions for Workers are **account-wide, not per Worker** (UNVERIFIED, checked in
+IN-E1), so a CI token able to redeploy `holdfast-get` could also touch every other Worker on this account, and anything that can
+rewrite the redirects can swap the stub. **If a CI deploy is ever kept, Q7 (a separate Cloudflare account) becomes a precondition of
+IN-E1**, not an option. **This ADR itself creates no Cloudflare resource.**
 
 ### 5. Windows
 
@@ -322,20 +336,27 @@ itself creates no Cloudflare resource.**
   present, WSL state, and PowerShell 7. If virtualization is off it explains the BIOS/UEFI setting in plain words
   instead of letting WSL fail with a hex code.
 - **What the .exe does:** per-user install into `%LOCALAPPDATA%\Programs\Holdfast` (no admin), state in
-  `%LOCALAPPDATA%\Holdfast`, then the runtime step. If WSL 2 is missing it elevates once and registers a
-  resume-after-reboot step. It creates a **Start-menu "Holdfast" shortcut** that runs `holdfast open`: start Docker
+  `%LOCALAPPDATA%\Holdfast`, then the runtime step. If WSL 2 is missing, the `.exe` **elevates only to run `wsl --install`, then exits**; the resume after the reboot is an
+  **unelevated `HKCU` RunOnce entry**. No elevated process ever runs a file from a user-writable path (Bulwark). It creates a **Start-menu "Holdfast" shortcut** that runs `holdfast open`: start Docker
   Desktop if it is stopped, wait for the engine, `up`, open the browser. (After a reboot Docker Desktop is often not
   running, so a bookmarked `localhost:47800` just refuses to connect; the shortcut and `holdfast open` fix that.)
   `/VERYSILENT` never installs Docker and exits with a code naming what is missing.
-- **PowerShell 7 and hard rule 10.** Stock Windows has only 5.1. **Keel decision (Q4, 2026-11-22, owner may veto):**
-  yes, with the narrowest amendment the rule allows, proposed as a CLAUDE.md change inside slice IN-W1 and Bulwark-gated: amend rule 10 to permit **one** bootstrap file, `installer/install.ps1`, written for 5.1 and 7, with a CI
-  test that it does nothing but get `pwsh` and hand off. Requirements (S6):
-  - it forces TLS 1.2 (`[Net.ServicePointManager]::SecurityProtocol`);
-  - if `winget` is missing it falls back to the PowerShell MSI from the PowerShell GitHub release, **hash-pinned** in
-    the stub;
-  - a CI job runs it under `powershell.exe` 5.1 on `windows-2025` (IN10);
-  - the size limit is **80 lines** everywhere (revision 1 said 60 here and 80 in the plan);
-  - a test proves it reads no secret, writes nothing outside a temp directory, and runs no repo content before verification.
+- **PowerShell 7 and hard rule 10.** Stock Windows has only 5.1. **Keel decision (Q4, 2026-11-22, owner may veto):** yes, with the
+  narrowest amendment, proposed inside slice IN-W1 and Bulwark-gated. **The text to propose for CLAUDE.md hard rule 10:**
+  > 10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. **One exception:** `installer/install.ps1`, under
+  > 80 lines and written for Windows PowerShell 5.1 and 7, whose only job is to install or locate `pwsh` 7 and hand over to it. CI runs
+  > it under 5.1 and fails if it gains any other behaviour.
+
+  Requirements on that file (Bulwark must-fix 7; S6):
+  - **Hand-over:** it runs **its own already-downloaded text** under `pwsh -NoProfile -File` from a **new temporary directory with a
+    current-user-only ACL**, and **never re-fetches** it (a second download is a second chance to swap it).
+  - **Banned everywhere** (`installer/`, the Inno script, and the bundle): `Set-ExecutionPolicy`, `-ExecutionPolicy Bypass` and
+    `-EncodedCommand`. A grep test over those paths fails the build on any occurrence.
+  - **TLS:** it **adds** TLS 1.2 with `-bor` to `[Net.ServicePointManager]::SecurityProtocol`, never assigning over the existing set.
+  - **Missing `winget`:** it falls back to the PowerShell MSI from the PowerShell GitHub release, **hash-checked and run from that same
+    temporary directory with no re-read** between the check and the run, with the hash pinned in the stub.
+  - A CI job runs it under `powershell.exe` 5.1 on `windows-2025` (IN10); the size limit is **80 lines**; a test proves it reads no
+    secret, writes nothing outside that directory, and runs no repository content before verification.
   Without the amendment the Windows one-liner is two lines (install pwsh, then run).
 - **One-line command (pwsh 7):** `irm https://get.holdfastfinance.app/install.ps1 | iex`, or the GitHub-URL form in §4.
   The stub body is a function called on its **last line**, so a truncated stream runs nothing (S1). `irm` does not set
@@ -372,7 +393,9 @@ itself creates no Cloudflare resource.**
   installer's licence line says Docker Desktop is free for personal use.
 - **Format (owner decision 2026-11-22): an unsigned `.pkg`, plus the Homebrew and terminal routes, first. No Apple
   enrolment yet.** The `.pkg` (built with `pkgbuild` and `productbuild`) installs `holdfast` and a small `Holdfast.app`
-  launcher (runs `holdfast open`). A `.dmg` is deferred: it only helps when it carries a drag-to-install app.
+  launcher (runs `holdfast open`). **The `.pkg` carries no preinstall or postinstall scripts** (it only lays files down; state is
+  created by the user's own `holdfast open`), enforced by a `pkgutil --expand` test (Bulwark M9). A `.dmg` is deferred: it only helps
+  when it carries a drag-to-install app.
 - **What an unsigned `.pkg` means for a user.** Gatekeeper blocks the double-click. The user goes to System Settings,
   Privacy & Security, "Open Anyway" (https://support.apple.com/en-us/102445, read 2026-11-22). The old control-click
   "Open" bypass was removed on macOS 15 (UNVERIFIED here), so the docs do not rely on it. Every release says "unsigned
@@ -411,7 +434,9 @@ itself creates no Cloudflare resource.**
 - **`install.sh`** (POSIX `sh`, shellcheck, no bashisms; the body is a function called on the last line): reads
   `/etc/os-release`, finds Docker or Podman, compares the floor, and on `--install-docker` follows Docker's documented
   repository steps for **Debian/Ubuntu (apt)**, **Fedora (dnf)** and **RHEL, CentOS Stream, Rocky and AlmaLinux (dnf)**
-  (Raspberry Pi OS 64-bit follows Debian). Anything else (Arch, openSUSE, Alpine, NixOS, NAS firmware) gets a precise
+  (Raspberry Pi OS 64-bit follows Debian). **It pins the fingerprint of Docker's GPG key** and refuses a repository key that does
+  not match (Bulwark L3). **Every consent prompt reads from `/dev/tty` and defaults to no**, so `curl | sh` cannot answer a prompt from
+  the piped stream (L2). Anything else (Arch, openSUSE, Alpine, NixOS, NAS firmware) gets a precise
   message and the manual-install link, which is ADR 0021's NAS statement.
 - Code under `${XDG_DATA_HOME:-$HOME/.local/share}/holdfast`, state under `${XDG_STATE_HOME:-$HOME/.local/state}/holdfast`
   (§2), `holdfast` linked into `~/.local/bin`. **PATH (S12):** `~/.local/bin` is not on `PATH` on stock macOS (zsh) and on
@@ -433,47 +458,67 @@ The one-liner is `stub | sh`. The stub runs nothing unverified beyond itself:
    version** and the SHA-256 of the `cosign` binary per OS and architecture pinned inside it. The whole body is a function
    invoked on the last line, so a truncated download runs nothing.
 2. It downloads `SHA256SUMS`, `SHA256SUMS.sigstore.json`, `CHANNEL` and `CHANNEL.sigstore.json` from the **GitHub Release**.
-3. It verifies both signatures (`cosign verify-blob --bundle ... --certificate-identity-regexp
-   '^https://github.com/holdfast-finance/holdfast/\.github/workflows/release\.yml@refs/tags/v'
-   --certificate-oidc-issuer https://token.actions.githubusercontent.com`, flags from
-   https://docs.sigstore.dev/cosign/verifying/verify/, read 2026-11-22), then checks the bundle and installers against
-   `SHA256SUMS`. A mismatch deletes the download and exits non-zero. There is **no `--insecure` flag** (a test greps for it).
-4. **Freeze attack (S3).** `latest.json` is untrusted and could point a first-time install at an old, validly signed,
-   vulnerable release. So the stub (a) refuses any version below its embedded **minimum**, raised on every security
-   release, and (b) accepts a version only if the signed `CHANNEL` asset names it as the current release for the channel.
-   `latest.json` becomes a convenience, never an authority.
-5. **Downgrade guard:** an existing install refuses a lower version unless `--version` is given explicitly.
+3. It verifies both signatures with `cosign verify-blob --bundle ...` and the **exact** identity, not a pattern:
+   `--certificate-identity https://github.com/holdfast-finance/holdfast/.github/workflows/sign-release.yml@refs/heads/main`,
+   `--certificate-oidc-issuer https://token.actions.githubusercontent.com`,
+   `--certificate-github-workflow-repository holdfast-finance/holdfast` and
+   `--certificate-github-workflow-trigger workflow_run` (flags from https://docs.sigstore.dev/cosign/verifying/verify/, read
+   2026-11-22). Any regex ever used instead must be fully escaped and anchored. The identity names `sign-release.yml` on **main**,
+   not `release.yml` on a tag (§9). It then checks the bundle and installers against `SHA256SUMS`. A mismatch deletes the download
+   and exits non-zero. There is **no `--insecure` flag** (a test greps for it), and **if Sigstore is unreachable the stub fails
+   closed** with a named message (a test blocks the network and expects exit 21, never a fallback).
+4. **Each stub installs exactly its own version, and never reads `latest.json`** (which no longer exists). The stub embeds its version
+   and the signed `CHANNEL` asset carries **the version, the commit SHA and the minimum installable version**. The stub **refuses a
+   `CHANNEL` that is not its own** (a different version or commit), so a validly signed old release cannot be substituted for a new one
+   or the reverse, and it refuses a version below the embedded minimum (raised on every security release). `holdfast update` resolves
+   the newest release from the **GitHub Releases API**, never from `get.`, and refuses anything below the minimum. The freeze attack
+   (S3) is thereby bounded by the minimum plus the user fetching a stub that names its own release.
+5. **Downgrade guard:** an existing install **refuses a lower version with or without `--version`**. The only way back is
+   `holdfast restore <pre-update backup>` onto the N-1 digests (§11), never an installer re-run.
 6. **Paranoid path**, first on the install page: download the bundle, `SHA256SUMS` and the bundle files with `gh release
    download` or a browser, run the verify commands by hand, then `./install.sh --local` (Windows: `Unblock-File`, §5).
 
 **Residual risks, said plainly:**
 - The stub comes from the origin the user chose. Cloudflare's account is the code-execution root for `get.` (§4); GitHub's
   organisation is the root for the GitHub-URL form.
-- The signing identity is "this workflow on a `v*` tag", and **agents can create tags**. §9 adds the controls (S2) and
-  states the remainder.
+- The signing identity is `sign-release.yml` on `main` (§9), so a tag can no longer choose the code that signs. Control of the owner
+  or organisation account can still mint a signed release; §9 states that remainder.
 - Privacy: the endpoint sees the requester's IP like any web server. Workers Logs off, no Web Analytics, and the app never
   calls it (ADR 0018 item 5).
 
 ### 9. Signing and provenance of the artifacts
 
-- **Images and `SHA256SUMS` are signed keyless with Sigstore from `release.yml`** (ADR 0018 item 6, "signed images before
+- **`SHA256SUMS`, `CHANNEL` and the image digests are signed keyless with Sigstore from `sign-release.yml` on `main`** (not from `release.yml`, see below) (ADR 0018 item 6, "signed images before
   the first beta"). Sigstore's public-good service is already named under rule 9 by ADR 0018.
-- **Who may create `v*` tags, and what the workflow refuses (S2).** With full autonomy any session with push rights could
-  tag a commit that changes `release.yml`, and Fulcio would certify it. So: a **tag ruleset** limits `v*` creation to Keel's
-  identity (**Keel decision N5, 2026-11-22**: only Keel creates `v*` tags). **Said plainly (R2-S4): today this is a process rule, not an
-  enforced one.** Every agent acts as the owner's GitHub account (`gh api user` returns the owner's login), so there is no
-  distinct "Keel identity" for a ruleset to allow, and a protected-environment required reviewer is either the owner (a gate
-  on every release, against full autonomy) or the same account approving itself. The ruleset becomes enforceable **when the
-  separate agent identity from ADR 0036 exists** (a GitHub App or machine user for tagging and signing, with "prevent
-  self-review" on the environment). Until then, tag control equals control of the owner's account, and the CI guards below
-  (reachable from `main`, green `ci-required`, the channel gate in §11) are the controls that actually bite; `release.yml` **refuses** unless the tagged commit is reachable from `main` and has a green
-  `ci-required` on its PR head; the signing job runs in a **protected environment** with a required reviewer. Residual
-  risk: a compromised Keel identity or GitHub org owner can still mint a validly signed release. That is the root of trust
-  we are choosing, and it is the same root as the GHCR images.
+- **Why a tag cannot guard itself (Bulwark must-fix 1).** A job triggered by a `v*` tag runs **the tagged commit's own `release.yml`**,
+  so any guard written inside it (reachable from `main`, green `ci-required`) is chosen by whoever made the tag: a tag on a commit
+  whose `release.yml` deletes the guard passes. So the design is split:
+  - **`release.yml` on the tag builds unsigned artifacts only.** It holds no credential and signs nothing.
+  - **Signing and every credentialed step** (the Sigstore signature, SignPath, the Homebrew tap bump, any `get.` change) live in
+    **`.github/workflows/sign-release.yml`**, triggered by **`workflow_run`** on the build workflow. `workflow_run` workflows run
+    **from the default branch**, so the code that signs is `main`'s, never the tag's. It **re-checks, from main**: the tag is
+    **annotated**, its commit is **reachable from `main`** with a green `ci-required` on its PR head, the IN15 **channel gate**
+    (§11) passed on that commit, and the **digests of the artifacts** it downloads equal the build job's recorded digests.
+  - The `release` **environment's deployment policy is the `main` branch only, never `v*` tags**, so a tag-triggered job cannot
+    reach its secrets. `main` has a **ruleset with no bypass actor**. **Immutable releases** are enabled so a published release's
+    assets cannot be swapped afterwards (availability on this plan is checked in IN-T1).
+  - **Keel decision N5 (2026-11-22): only Keel creates `v*` tags.** **Said plainly (R2-S4): that is a process rule today, not an
+    enforced one.** Every agent acts as the owner's GitHub account (`gh api user` returns the owner's login), so there is no distinct
+    "Keel identity" for a tag ruleset to allow, and a required reviewer on the environment is either the owner (a gate on every
+    release, against full autonomy) or the same account approving itself. The ruleset and "prevent self-review" become enforceable
+    **when the separate agent identity from ADR 0036 exists**. Until then the split above is what bites, because it does not depend
+    on who made the tag.
+  - **Residual risk, stated:** whoever controls the owner's GitHub account or the organisation can still change `sign-release.yml` on
+    `main` and mint a validly signed release. That is the root of trust we are choosing, and it is the same root as the GHCR images.
 - **Windows signing (SignPath) is a second signing path** with its own credential. Credentials for it (and for Apple, if
-  ever) live in the same protected environment, used only by tag jobs. This **re-introduces a stealable long-lived secret**,
+  ever) live only in the **main-only `release` environment** and are used only by `sign-release.yml`, never by a tag-triggered job. This **re-introduces a stealable long-lived secret**,
   which §9's earlier argument against a minisign key warned about: Authenticode requires it, so we accept it, scope it to
   one environment, and rotate it on any suspicion (S4).
+- **The Homebrew tap is a third code-execution root** (after the Cloudflare account and the GitHub organisation): `brew install` runs a
+  formula's Ruby from the tap. So the formula bump runs **only in `sign-release.yml` on `main`**, with a **fine-grained token scoped to
+  `holdfast-finance/homebrew-tap` with contents-write only**, held in the main-only environment. The tap's own `main` has a **ruleset
+  whose required check re-runs `cosign verify-blob` on `SHA256SUMS`** (with the §8 exact identity) and confirms that the formula's
+  `url` is a Holdfast release asset and its `sha256` is the signed one. A bump that fails the check cannot merge.
 - GitHub artifact attestations use the Sigstore public-good instance on public repositories
   (https://docs.github.com/en/actions/concepts/security/artifact-attestations, read 2026-11-22). The plan does not depend
   on them.
@@ -504,13 +549,22 @@ At run time nothing contacts these except `holdfast update --check`, which is us
 **What a backup archive is (N2, R2-B3).** One archive holds the `pg_dump`, the documents, and **the whole secret set**, meaning
 **every secret key in `.env.example`**, not only the `FERNET_KEY` ring: the ring (all kids), `SESSION_SECRET`, the Postgres
 role passwords, and **`IMPORT_ID_KEY`**, which is "never rotate" and whose loss makes every re-import look new (hard rule 6).
-A test asserts the archive's secret set equals `.env.example`'s secret keys, so a new secret cannot be forgotten. The archive is
+A test asserts the archive's secret set equals `.env.example`'s secret keys, so a new secret cannot be forgotten.
+The archive also carries **the install id** (§2): `keys` and `restore` refuse to act on volumes labelled with a different install id and
+name the volume (Gadfly round 3). The archive is
 encrypted (below), so it is safe to copy off the machine and unreadable without the passphrase.
 
 **The passphrase and the wrapped key (Keel N2 decision, 2026-11-22, owner may veto; shape from Gadfly R2-B3).**
-- At first run the user sets a **backup passphrase**. The recovery step *recommends* a generated, printed, high-entropy
-  recovery code instead of a chosen passphrase (a person forgets a chosen one; a printed one survives). Either is "the
-  passphrase" below, and neither is ever stored with a backup or beside it.
+- **The default is a generated recovery code** (at least 128 bits from the OS CSPRNG, shown once in groups for the user to print or
+  store). A **chosen passphrase is opt-in**, with a **strength floor that Bulwark sets in IN-B1**, because a person forgets a chosen
+  one and picks a weak one. Either is "the passphrase" below, and neither is ever stored with a backup or beside it.
+- **Key derivation and handling.** The wrapping key comes from a **memory-hard KDF (scrypt or Argon2id)**, with its parameters in the
+  archive header and a **CI-asserted minimum** (a header below it fails the test and restore warns). The passphrase is read **only
+  from a TTY or a secure prompt**, never from argv, an environment variable, a file, or any log: not the installer's, **not Inno's
+  `/LOG`**, not Task Scheduler's history, not launchd's. A test greps all of those for the test passphrase.
+- **At rest.** The backup folder is mode `0700` (Windows: a current-user ACL with inheritance removed) and archives are `0600`,
+  **re-checked on every run**. **No plaintext dump ever touches disk**: `pg_dump` and the documents are encrypted in the stream
+  before they are written (a test lists the folder and temp directories during a run and finds no plaintext).
 - Envelope encryption: a backup key pair is generated at first run. The **public half** stays in state so unattended backups
   encrypt without the passphrase. The **private half is wrapped by the passphrase** and kept in **two places, never one**:
   **inside the header of every archive** and **in the state directory**. A dead disk (state gone) still restores from any
@@ -540,6 +594,11 @@ backup, then restore.
 4. Keeps the previous bundle and image digests on disk (N-1).
 5. **Rollback is defined as `holdfast restore <pre-update backup>` onto the N-1 digests. It is never an image downgrade.**
 
+**Deletion paths are guarded (Bulwark M7).** Every code path that deletes (`uninstall`, `--purge`, `--purge-backups`, restore's
+replacement of state, retention pruning) resolves the real path first and **refuses** unless it is inside that install's own state
+directory, backup folder or labelled volumes: never the home directory, a drive root, a symlink target outside them, or a path
+containing `..`. IN15 tests each with hostile paths.
+
 **Which changes are one-way** (so rollback must be a restore): Alembic migrations that rewrite data; secret-envelope rewrites
 (legacy to `hf1` (F5c) if the release baseline predates it, and `hf1` to `hf2`, ADR 0015, PR #73), after which an older image
 cannot read the rows; and a **Postgres major bump** (`postgres:16-alpine` is pinned at `docker-compose.yml:91`, and a 16 to 17
@@ -548,8 +607,8 @@ notes list which of these it contains. The first channel release either already 
 `update` carries them.
 
 **No channel opens before there is an upgrade path (N1; Keel decision 2026-11-22, owner may veto; mechanism R2-S5).** The gate
-is **a CI check, not a word in the README**: `release.yml` has a `channel-gate` job, and every channel job needs it. It **refuses
-to publish or deploy any channel artifact** (stub, `.exe`, `.pkg`, the Homebrew formula bump, the `get.` deploy) unless the IN15
+is **a CI check, not a word in the README**: `sign-release.yml` (main-only, §9) runs the channel gate, and every channel step sits behind it. It **refuses
+to sign, publish or deploy any channel artifact** (stub, `.exe`, `.pkg`, the Homebrew formula bump, the `get.` deploy) unless the IN15
 upgrade-path test job (backup-first update, restore as rollback, reinstall-decrypts, delete-state restore) **passed on the
 release commit**. Until then the alpha stays on the clone path.
 
@@ -569,7 +628,8 @@ wizard) starts the stock Tailscale container, userspace mode, no host Tailscale,
   loopback. ADR 0021's "loopback only" check was done on Linux, so it **must be re-run on Docker Desktop for Windows (the
   owner's PC, IN-S0) and for macOS (when a Mac is available)** before phone access is called supported there.
 - **Windows with Docker CE in WSL 2:** `localhost` forwarding is on by default (UNVERIFIED); phone traffic never needs it.
-- No installer installs, configures or signs in to Tailscale. The in-app wizard does, with consent.
+- No installer installs, configures or signs in to Tailscale. The in-app wizard does, with consent, by **flipping a flag that the
+  sidecar wrapper watches** (ADR 0021): `api` never gets the Docker socket (Bulwark L8).
 
 ## Alternatives considered
 
@@ -618,6 +678,22 @@ moderation, Podman and Colima licences, rootless Podman below port 1024, `!overr
 `irm`, quarantine and `curl`, macOS 15's removed bypass, Apple Silicon runner nesting, Intel macOS runner retirement date
 (the `macos-15-intel` and `macos-26-intel` labels exist today; macOS 14 images retired 2026-11-02 per the runner-images
 README), Colima's Docker version, a Pi's memory floor, and whether SignPath accepts an alpha pre-release.
+
+## Bulwark and Gadfly round 3 (6a26020): dispositions
+
+| Item | Disposition |
+|---|---|
+| Must-fix 1 tag-triggered guards | **Accepted.** `release.yml` on the tag is unsigned-only; signing and credentials move to `sign-release.yml` on `workflow_run` from main with re-checks; environment policy is main only; main ruleset without bypass; immutable releases; residual risk stated (§9, IN-T1). |
+| Must-fix 2 cosign identity and freeze | **Accepted.** Exact identity and the two workflow flags; stubs install only their own version; `CHANNEL` has version, SHA and minimum; `latest.json` removed everywhere (§8, §4, IN-T2). |
+| Must-fix 3 Cloudflare | **Accepted.** Redirects only, no executable bytes, no token in CI, account-wide token scope UNVERIFIED, Q7 a precondition if CI deploy returns (§4, IN-E1). |
+| Must-fix 4 backup crypto | **Accepted.** Generated code default, passphrase opt-in with a floor, memory-hard KDF with a minimum, TTY-only entry and log greps, `0700`/`0600` re-checked, encryption in the stream (§11, IN-B1). |
+| Must-fix 5 downgrade | **Accepted.** Refused with or without `--version`; restore is the only way back (§8). |
+| Must-fix 6 Safari cookie | **Accepted.** ADR 0021 §12: Chrome or Firefox note until U-7 closes; a non-`Secure` local cookie stays conditional on U-7 evidence and is never an interim default. |
+| Must-fix 7 5.1 bootstrap | **Accepted.** Own-text hand-over from a locked temp directory, banned execution-policy and encoded-command patterns with a grep test, `-bor` TLS, hash-checked MSI, `.exe` elevates only for `wsl --install`, unelevated HKCU RunOnce; rule 10 text drafted (§5, IN-W1, IN10). |
+| Must-fix 8 tap root | **Accepted.** Third root named; bump only in `sign-release.yml`; scoped fine-grained token; tap ruleset re-runs `cosign verify-blob` (§9, IN13). |
+| M7 to M9, L2 to L10 | **Accepted** and put in the slice briefs: deletion guards (§11, IN15), keys service logging (IN3), no pkg scripts and no `/mac` `/win` before signing (§4, §6, IN14, IN11), `/dev/tty` prompts (§7, IN7), Docker GPG fingerprint (§7, IN8), cookie name per install (IN-A1), TCC-safe backup folder (§2, IN-B1), CAA wording (§4), flag-watching wizard (§12), `holdfast export` 0600 with an audit entry (IN-A2), Sigstore-unreachable test (§8, IN7, IN10). |
+| Gadfly R3 notes | **Accepted.** Receipt gate only in the release compose, written by a one-shot helper into the named volume; first run says whether the backup folder is cloud-synced; a retention rule with a test; install id in the archive; IN-A1 merges on Linux Playwright with a virtual authenticator (IN-B1, IN15, IN-A1). |
+| Bulwark's per-slice notes for IN-S0, IN0, IN1, IN-T*, IN-E*, IN17 and dependencies | The coordinator's message named these without their text, and no review file is in the tree. **Applied from the must-fixes they follow from** (below in the plan). If Bulwark's wording differs, its SHA re-check will say so. |
 
 ## Gadfly response, round 2 (b5aec38)
 
