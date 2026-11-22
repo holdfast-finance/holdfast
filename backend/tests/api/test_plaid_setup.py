@@ -436,6 +436,8 @@ async def test_interrupted_product_probe_stops_and_audits_calls(
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/institutions/get":
             return fake(request)
+        if failure == "offline" and json.loads(request.content)["products"] == ["transactions"]:
+            return fake(request)
         fake.requests.append(request)
         if failure == "unexpected":
             raise ValueError("free text that must not be audited")
@@ -448,6 +450,9 @@ async def test_interrupted_product_probe_stops_and_audits_calls(
 
     monkeypatch.setattr(plaid_setup, "open_client", open_client)
     app.state.settings.plaid_redirect_uri = REDIRECT
+    if failure == "offline":
+        app.state.settings.plaid_products = ["transactions", "auth", "investments"]
+        app.state.settings.plaid_redirect_uri = None
     if failure == "deadline":
         monkeypatch.setattr(plaid_setup, "CHECK_TIMEOUT_SECONDS", 0)
 
@@ -463,15 +468,19 @@ async def test_interrupted_product_probe_stops_and_audits_calls(
             assert steps(body)["keys_valid"]["reason"] == "plaid_unreachable"
         else:
             assert steps(body)["products"]["state"] == "blocked"
-            assert steps(body)["redirect_uri"]["state"] == "unchecked"
+            assert steps(body)["products"]["reason"] == "plaid_unreachable"
+            assert [p["state"] for p in body["products"]] == ["enabled", "error", "unchecked"]
 
-    assert fake.paths() == ["/institutions/get", "/link/token/create"]
+    link_calls = 2 if failure == "offline" else 1
+    assert fake.paths() == ["/institutions/get", *["/link/token/create"] * link_calls]
+    if failure == "offline":
+        assert [b["products"] for b in fake.link_bodies()] == [["transactions"], ["auth"]]
     [row] = await audit_rows(app, uuid.UUID(owner.household["id"]))
-    assert row.detail["calls"] == {"/institutions/get": 1, "/link/token/create": 1}
+    assert row.detail["calls"] == {"/institutions/get": 1, "/link/token/create": link_calls}
     assert (
         row.detail["state"]
         == {
-            "offline": "complete",
+            "offline": "incomplete",
             "unexpected": "incomplete",
             "deadline": "timed_out",
         }[failure]

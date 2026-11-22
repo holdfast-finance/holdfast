@@ -188,7 +188,7 @@ async def test_transport_failures_become_plaid_unavailable(raised: Exception, re
     assert SECRET not in str(info.value)
     # No chained httpx error: it would carry the request and its headers.
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__ is True
+    assert info.value.__context__ is None
 
 
 @pytest.mark.parametrize("content", [b"<html>502</html>", b"[1,2]", b"\xff\xfe"])
@@ -251,18 +251,18 @@ def test_credentials_do_not_render_their_values() -> None:
     assert SECRET not in text and CLIENT_ID not in text
 
 
-async def test_a_key_that_cannot_go_in_a_header_fails_without_quoting_it() -> None:
+@pytest.mark.parametrize("character", ["\n", " ", "\u00e9"])
+async def test_a_key_that_cannot_go_in_a_header_fails_without_quoting_it(character: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("nothing should be sent")
 
-    bad = PlaidCredentials(
-        env="sandbox", client_id=SecretToken(CLIENT_ID), secret=SecretToken("canary-s\u00e9cret")
-    )
+    key = f"canary-s{character}cret"
+    bad = PlaidCredentials(env="sandbox", client_id=SecretToken(CLIENT_ID), secret=SecretToken(key))
     async with PlaidClient(bad, transport=httpx.MockTransport(handler)) as plaid:
         with pytest.raises(PlaidUnavailable) as info:
             await plaid.post("/institutions/get", {})
     assert info.value.reason == "bad_credentials"
-    assert "\u00e9" not in str(info.value)
+    assert key not in str(info.value)
     assert info.value.__cause__ is None and info.value.__suppress_context__ is True
 
 
@@ -298,13 +298,39 @@ async def test_counts_stay_int() -> None:
     assert data["count"] == 3
 
 
-@pytest.mark.parametrize("error_type", [PlaidError, PlaidUnavailable])
+def assert_no_keys_in_traceback(error: BaseException, seen: set[BaseException]) -> None:
+    if error in seen:
+        return
+    seen.add(error)
+    tb = error.__traceback__
+    while tb is not None:
+        for value in tuple(tb.tb_frame.f_locals.values()):
+            if isinstance(value, httpx.Response):
+                rendered = repr((value.content, value.request.headers))
+            elif isinstance(value, httpx.Request):
+                rendered = repr(value.headers)
+            else:
+                rendered = repr(value)
+            assert CLIENT_ID not in rendered and SECRET not in rendered
+        tb = tb.tb_next
+    for chained in (error.__context__, error.__cause__):
+        if chained is not None:
+            assert_no_keys_in_traceback(chained, seen)
+
+
+@pytest.mark.parametrize("failure", ["rejected", "network", "timeout", "invalid_json", "array"])
 async def test_exception_traceback_locals_do_not_expose_keys(
-    error_type: type[PlaidError] | type[PlaidUnavailable],
+    failure: str,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if error_type is PlaidUnavailable:
+        if failure == "network":
             raise httpx.ConnectError("refused")
+        if failure == "timeout":
+            raise httpx.ConnectTimeout("timed out")
+        if failure == "invalid_json":
+            return httpx.Response(502, text=f"echo {CLIENT_ID} {SECRET}")
+        if failure == "array":
+            return httpx.Response(502, json=[CLIENT_ID, SECRET])
         return httpx.Response(
             400,
             json={
@@ -313,15 +339,13 @@ async def test_exception_traceback_locals_do_not_expose_keys(
             },
         )
 
+    error_type = PlaidError if failure == "rejected" else PlaidUnavailable
     async with client_for(handler) as plaid:
         with pytest.raises(error_type) as info:
             await plaid.institutions_get(country_codes=["US"])
-    tb = info.value.__traceback__
-    while tb is not None:
-        for value in tuple(tb.tb_frame.f_locals.values()):
-            rendered = repr(value)
-            assert CLIENT_ID not in rendered and SECRET not in rendered
-        tb = tb.tb_next
+    assert_no_keys_in_traceback(info.value, set())
+    assert info.value.__context__ is None
+    assert info.value.__cause__ is None
 
 
 async def test_https_proxy_from_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:

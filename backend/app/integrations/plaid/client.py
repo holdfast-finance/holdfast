@@ -13,6 +13,7 @@ only (hard rule 3).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from types import TracebackType
@@ -33,6 +34,7 @@ BASE_URLS: dict[PlaidEnv, str] = {
 API_VERSION = "2020-09-14"
 DEFAULT_TIMEOUT = httpx.Timeout(20, connect=10)
 _ID_MAX = 64
+_KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 
 log = structlog.get_logger(__name__)
 
@@ -44,6 +46,14 @@ class PlaidCredentials:
     env: PlaidEnv
     client_id: SecretToken
     secret: SecretToken
+
+
+def credentials_well_formed(credentials: PlaidCredentials) -> bool:
+    """Both header values must contain only printable ASCII, without spaces."""
+    return (
+        _KEY_SHAPE.fullmatch(credentials.client_id.reveal()) is not None
+        and _KEY_SHAPE.fullmatch(credentials.secret.reveal()) is not None
+    )
 
 
 class PlaidError(Exception):
@@ -141,11 +151,9 @@ class PlaidClient:
         ``Decimal``). Raises :class:`PlaidError` or :class:`PlaidUnavailable`."""
         # HTTPX encodes string header values as ASCII. Validate only the credentials here,
         # so errors from serializing the body or sending the request retain their own meaning.
-        if not (
-            self._credentials.client_id.reveal().isascii()
-            and self._credentials.secret.reveal().isascii()
-        ):
+        if not credentials_well_formed(self._credentials):
             raise self._unavailable(path, "bad_credentials") from None
+        reason = None
         try:
             response = await self._http.post(
                 path,
@@ -156,18 +164,20 @@ class PlaidClient:
                 },
             )
         except httpx.TimeoutException:
-            raise self._unavailable(path, "timeout") from None
+            reason = "timeout"
         except httpx.HTTPError:
-            # ``from None``: the chained httpx error holds the request, headers included.
-            raise self._unavailable(path, "network") from None
+            reason = "network"
+        if reason is not None:
+            # The httpx error holds request headers. Raise outside its handler.
+            raise self._unavailable(path, reason)
         try:
             data = json.loads(
                 response.content, parse_float=Decimal, parse_constant=_reject_constant
             )
-        except (ValueError, UnicodeDecodeError):
-            raise self._unavailable(path, "bad_response") from None
+        except ValueError:
+            data = None
         if not isinstance(data, dict):
-            del data
+            del data, response
             raise self._unavailable(path, "bad_response")
         if not response.is_success or "error_code" in data:
             error = PlaidError(
