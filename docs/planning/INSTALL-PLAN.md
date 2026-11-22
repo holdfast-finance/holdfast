@@ -1,7 +1,7 @@
 # Install-everywhere plan (revision 4)
 
 Owner: **Harbor** (drafts), **Keel** (schedules). Decision record: `docs/adr/0037-install-on-every-platform.md`
-(Proposed, revision 2; it answers Gadfly's review point by point). Nothing here is built. Sizes: S = 1 run,
+(Proposed, revision 4; it answers Gadfly's review point by point). Nothing here is built. Sizes: S = 1 run,
 M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each story gets a brief under
 `docs/planning/briefs/<ID>.md` when scheduled.
 
@@ -55,9 +55,10 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   The script needs only `pwsh` and Docker on the host, no `python3`, `make` or `git`. Output: a pass/fail table in `docs/ops/`, numbers and counts
   only. **Never on employer equipment** (PLAN Section 0). **It gates IN10 onward only.** IN0, IN1, IN-A1 and IN-B1 do not wait on owner time.
   **Rev 4:** the script runs unelevated, fetches only the pinned bundle digest, prints no secret and writes nothing outside a temp directory with a current-user ACL; it never installs Docker or WSL.
+  The LAN probe covers the host's IPv4 and IPv6 addresses, and the script records the WSL networking mode (NAT or mirrored); if the PC uses mirrored mode, the probe runs in that mode.
 - **IN0 Portability audit as a test** — S — Harbor/sonnet — Bulwark — none — `scripts/check-portability.py` fails CI on: a
   `bash` shebang in a script the installer ships, `sha256sum` or `sed -i` without a BSD fallback in shipped scripts, a host-path
-  bind mount in the release compose, a `build:` key in the release compose, a port other than the allowed loopback one. Each
+  bind mount in the release compose, a `build:` key in the release compose, a published port other than `127.0.0.1:47800`, including the short syntax with no host IP (`"47800:80"`, which binds every interface), a long-syntax entry with no `host_ip`, `0.0.0.0` or `[::]`/`::`, and any `network_mode: host`. Each
   violation is seeded once in a test and must fail.
   **Rev 4:** the audit also fails on any `Set-ExecutionPolicy`, `-ExecutionPolicy Bypass` or `-EncodedCommand` under `installer/`, the Inno script and the bundle, and on any mount of the Docker socket into `api` or `worker`.
 - **IN1 Release bundle and release compose** — M — Harbor/sonnet, contract by Lattice — Bulwark, Lattice — IN0 — `make bundle`
@@ -68,6 +69,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   volumes** (a test fails if a second set appears). **Coexistence test (R2-B1): a dev stack (project `holdfast`) and a release install run side by
   side, and `holdfast keys`, `restore` and `--purge` never select, read or delete an unlabelled `holdfast_*` volume.**
   **Rev 4:** the release compose has no Docker-socket mount anywhere; `IN1-draft` is built by the unsigned `release.yml` path only, so IN-S0 never receives a signed-looking artifact.
+  The phone overlay's Tailscale image is pinned `@sha256` inside the signed bundle like every other image, and every GitHub Action in `release.yml` and `sign-release.yml` is pinned by commit SHA (a test fails on a tag or branch ref).
 - **IN-A1 Local ingress (ADR 0021 PA-D2, pulled in, plus the setup-token rate limit from PA1)** — S — Harbor + Tide/sonnet — Bulwark — IN1 —
   Caddy's local site on `127.0.0.1:47800` (plain HTTP, `Host: localhost:47800` only), setup on the local ingress only, token exchange with
   `replaceState`, the local rate-limit family, **and the setup-token rate-limit scope that ADR 0021 puts in PA1 (a scope keyed on the setup
@@ -87,7 +89,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   last good backup (amber 2 days, red 7); (d) a read-only **backup receipt** reaches `api`, and the **first import is refused** without a receipt
   from the last 24 hours; (e) **the archive holds the whole secret set: every secret key in `.env.example` including `IMPORT_ID_KEY`**, encrypted
   by envelope encryption; the **passphrase-wrapped private key lives in every archive's header and in state, never only one**; `holdfast backup
-  rekey`; a **periodic passphrase check** in `holdfast open`; the recovery step recommends a generated recovery code; (f) a backup **holds a lock that
+  rekey`; a **periodic passphrase check** in `holdfast open`; the recovery step defaults to a generated recovery code; (f) a backup **holds a lock that
   blocks `rotate-keys`**, captures the ring **after the dump with all kids kept**; restore runs ADR 0015's residual scan and **refuses if a kid is
   missing**, and swaps `.env` atomically keeping `.env.prev`. The chosen primitive gets the maintenance and AGPL-compatibility check. Acceptance
   tests (each can fail): wrong passphrase fails, right one reproduces the data; **delete state, restore from an archive and the passphrase alone**;
@@ -105,6 +107,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   the first import exists **only in the release compose** (not the dev or clone stack), and the receipt is written into the named volume by a **one-shot
   helper container**. First run **says whether the backup folder is cloud-synced** and offers a local-only folder. A **retention rule** (keep the newest N and
   the last pre-update backup) has a test.
+  **Decision to record in this brief:** backup encryption runs either **on the host** (another hash-pinned binary per OS) or **in a container that takes the passphrase on stdin**; Lattice and Bulwark choose, and the brief records the choice and why.
 - **IN2 Named documents volume (no host chown)** — S — Harbor + Tide/sonnet — Bulwark — IN1 — the stack stores and reads a synthetic
   document as uid 10001 on a fresh volume with no `chown` helper and no bind mount; a restart keeps it. (Fallback if Bulwark objects:
   bind mount with `:z` and `:U`; spike IN-L-S2.)
@@ -112,7 +115,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   shim creates state's `.env` with the permissions of ADR 0037 §2 (POSIX `umask 077`, Windows an ACL on the directory via `icacls`, asserted in
   Pester). **Refuses to write when state holds `.env` or when volumes carrying this install's label exist.** It fills **every secret key in
   `.env.example`** (a test derives the list from the file, not a hard-coded count; today that includes `IMPORT_ID_KEY`). A canary test greps the job
-  log for the generated values. The **recovery step** has the user set the backup passphrase (or accept a generated recovery code) and confirm they
+  log for the generated values. The **recovery step** has the user accept the generated recovery code (default) or opt in to a chosen passphrase that meets the floor and confirm they
   stored it, and says plainly that a lost one makes backups unrecoverable. `make keys` and `dev.ps1 keys` keep writing the repo-root `.env` for
   contributors; a parity test asserts they and `holdfast keys` **share the generator**, not the destination.
   **Rev 4 (M8):** the keys service runs with **`logging: driver: none`** or is invoked with **`exec -T`** so its output never lands in container logs, and a **canary test greps `docker logs`** for the generated values.
@@ -224,10 +227,9 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   file, `installer/install.ps1`, whose only job is to install or locate `pwsh` 7 and hand over. Acceptance for (b): Bulwark signs off the text, and
   the IN10 test that the file does nothing else fails if the file gains any other behaviour. If Bulwark or the owner rejects it, IN10 falls back to
   the two-step form.
-  **Rev 4:** the text proposed for CLAUDE.md hard rule 10 is Bulwark's: "10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. **One exception:** `installer/install.ps1`, under 80 lines and written for Windows PowerShell 5.1 and 7, whose only job is to install or locate `pwsh` 7 and hand over to it. CI runs it under 5.1 and fails if it gains any other behaviour." The CI-tested constraints are in IN10.
+  **Rev 4:** the text proposed for CLAUDE.md hard rule 10 is, exactly: "10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. One exception: `installer/install.ps1` may also run under Windows PowerShell 5.1, and only to find or install `pwsh` 7 and then re-run its own already-downloaded text under `pwsh`. Under 5.1 it fetches nothing but a hash-pinned PowerShell MSI (when `winget` is absent), runs no other code before signature verification, never changes the execution policy, elevates only for that MSI, writes only to its own temp directory, and stays under 80 lines. CI tests enforce each of these under `powershell.exe` 5.1." The CI-tested constraints are in IN10.
 - **IN-W2 SignPath signing** — M — Harbor/sonnet — Bulwark — IN11 — apply to SignPath Foundation, **asking whether `v0.0.0-alpha` meets
-  "released"** and stating that no Cloud-only code ships in a signed file; then the signing job runs in the protected environment on
-  tag jobs. `Get-AuthenticodeSignature` in CI is `Valid` with the right signer; a test fails if the signed file list differs from an
+  "released"** and stating that no Cloud-only code ships in a signed file; then signing runs only in `sign-release.yml` on `main` in the main-only `release` environment (IN-T1), never in a tag-triggered job; any SignPath per-request approval is a self-approval by the shared account until ADR 0036's identity exists, and the slice records which it is. `Get-AuthenticodeSignature` in CI is `Valid` with the right signer; a test fails if the signed file list differs from an
   allowlist or if an unsigned build is attached to a Release that claims signed. Until approved the `.exe` is an unsigned preview.
 - **IN-W3 Windows acceptance** — M — Sounding/sonnet — Keel — IN-W1, IN-A1, IN-B1 — the PHASE-0 blocked item closes: the installer and
   `dev.ps1 keys/up/migrate` run on the owner's personal PC with Docker Desktop; passkey works in Chrome and Edge; a Docker Desktop reset
@@ -268,11 +270,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   and volumes; install, create data, uninstall, reinstall, and an old encrypted row still decrypts and the old Postgres password still
   works**; `--purge` needs the typed household name; neither touches Docker or Tailscale.
   **Rev 4:** (M7) **deletion-path guards**: `uninstall`, `--purge`, `--purge-backups`, restore's state replacement and retention pruning resolve the real path and refuse anything outside that install's state, backup folder or labelled volumes (home directory, a drive root, a symlink target outside, `..`), with a test per hostile path; the **install id is inside the archive**, and `keys` and `restore` **refuse volumes from another install id, naming the volume** (test).
+  **Deletion guards, base paths:** the base paths are validated first: non-empty, absolute, last component `holdfast` or `Holdfast` (the backup folder: the path recorded in `install.json`), and owned by the user; POSIX scripts run `set -eu`; tests include unset `XDG_*`, an empty `HOME` and `HOME=/`.
 - **IN16 Phone access per platform** — S — Harbor/sonnet — Bulwark — IN-A2, IN-W3, IN-M3 — the sidecar overlay starts on Linux and Docker
   Desktop (Windows now, macOS when available) with ADR 0021's serve-config test; `holdfast phone off` returns to loopback only.
 - **IN17 Install docs, release notes, support** — S — Beacon/sonnet — Harbor — IN7 — `docs/setup/install.md` per OS: the one-liners (both
   origins), the paranoid path, verify commands, the "unsigned preview" banner, where data lives, how to back up, uninstall. GitHub Issues templates (N4, Keel decision)
-  ask for a log with a redaction warning. A link-check job passes and a test asserts every command in the page appears in a CI job.
+  ask for a log with a redaction warning that names what never to paste: the backup passphrase, the recovery code, any `.env` line, `install.json`, or a setup token or `#t=` URL; the install docs never tell a user to paste `.env` or `install.json`. A link-check job passes and a test asserts every command in the page appears in a CI job.
   **Rev 4:** the page shows the exact cosign identity and flags and the stub hashes **from github.com**, never lists `/win` or `/mac` before signing, says the `.pkg` and `.exe` are unsigned previews until then, and states the residual root-of-trust risk (owner or organisation account control).
 
 ## macOS without a Mac
@@ -350,7 +353,7 @@ hardware is a personal Windows PC and no Mac.
 | Q10 | Podman after the first usable run; Raspberry Pi (arm64) after Podman | IN-L-S1, slice order |
 | Q11 | Keel creates the tap repo in the org when the Homebrew slice is built; winget later | IN13, IN-W4 |
 | N1 | No channel (stub, `.exe`, `.pkg`, tap) before an upgrade path exists, enforced by a `channel-gate` CI job tied to the IN15 test on the release commit | IN-CG, IN15 |
-| N2 | Key ring in the per-OS state directory; host backups include the whole secret set (including `IMPORT_ID_KEY`), encrypted with a passphrase set at first run (a printed recovery code recommended) and never stored with the backup; the wrapped key sits in every archive and in state | IN3, IN-B1, IN15 |
+| N2 | Key ring in the per-OS state directory; host backups include the whole secret set (including `IMPORT_ID_KEY`), encrypted with a passphrase set at first run (a generated recovery code by default) and never stored with the backup; the wrapped key sits in every archive and in state | IN3, IN-B1, IN15 |
 | N4 | GitHub Issues with templates (redaction warning) | IN17 |
 | N5 | Only Keel creates `v*` tags: a **process rule today**, enforceable by ruleset once ADR 0036's separate agent identity exists (all agents share the owner's GitHub account now) | IN-T1 |
 

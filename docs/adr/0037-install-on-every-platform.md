@@ -343,9 +343,12 @@ IN-E1**, not an option. **This ADR itself creates no Cloudflare resource.**
   `/VERYSILENT` never installs Docker and exits with a code naming what is missing.
 - **PowerShell 7 and hard rule 10.** Stock Windows has only 5.1. **Keel decision (Q4, 2026-11-22, owner may veto):** yes, with the
   narrowest amendment, proposed inside slice IN-W1 and Bulwark-gated. **The text to propose for CLAUDE.md hard rule 10:**
-  > 10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. **One exception:** `installer/install.ps1`, under
-  > 80 lines and written for Windows PowerShell 5.1 and 7, whose only job is to install or locate `pwsh` 7 and hand over to it. CI runs
-  > it under 5.1 and fails if it gains any other behaviour.
+  > 10. Windows scripts target **PowerShell 7** (`pwsh`), not Windows PowerShell 5. One exception: `installer/install.ps1`
+  > may also run under Windows PowerShell 5.1, and only to find or install `pwsh` 7 and then re-run its own
+  > already-downloaded text under `pwsh`. Under 5.1 it fetches nothing but a hash-pinned PowerShell MSI (when `winget` is
+  > absent), runs no other code before signature verification, never changes the execution policy, elevates only for that
+  > MSI, writes only to its own temp directory, and stays under 80 lines. CI tests enforce each of these under
+  > `powershell.exe` 5.1.
 
   Requirements on that file (Bulwark must-fix 7; S6):
   - **Hand-over:** it runs **its own already-downloaded text** under `pwsh -NoProfile -File` from a **new temporary directory with a
@@ -376,7 +379,7 @@ IN-E1**, not an option. **This ADR itself creates no Cloudflare resource.**
     code, not a second licence. Gadfly agrees, but the ruling is SignPath's. The application states that **no Cloud-only
     proprietary code ships in any signed artifact** (the installer, `holdfast.ps1`, the bundle's scripts), and CI checks
     that the signed file list matches an allowlist.
-  - Signing runs in a protected GitHub environment on tag jobs only (§9). Until SignPath approves, the `.exe` is an
+  - Signing runs only in `sign-release.yml` on `main`, in the main-only `release` environment (§9), never in a tag-triggered job. If SignPath's signing policy requires a per-request approval, the approver is the same shared owner account, so it is a self-approval and not a second person; it becomes a real control only with ADR 0036's separate identity (the same terms as §9, R2-S4). Until SignPath approves, the `.exe` is an
     **unsigned preview**.
   - Azure Artifact Signing (price UNVERIFIED, about $10 a month by my recall; individuals only in the US or Canada) stays
     the paid fallback only if SignPath refuses.
@@ -597,7 +600,7 @@ backup, then restore.
 **Deletion paths are guarded (Bulwark M7).** Every code path that deletes (`uninstall`, `--purge`, `--purge-backups`, restore's
 replacement of state, retention pruning) resolves the real path first and **refuses** unless it is inside that install's own state
 directory, backup folder or labelled volumes: never the home directory, a drive root, a symlink target outside them, or a path
-containing `..`. IN15 tests each with hostile paths.
+containing `..`. The base paths are validated first: non-empty, absolute, last component `holdfast` or `Holdfast` (the backup folder: the path recorded in `install.json`), and owned by the user; POSIX scripts run `set -eu`; tests include unset `XDG_*`, an empty `HOME` and `HOME=/`. IN15 tests each with hostile paths.
 
 **Which changes are one-way** (so rollback must be a restore): Alembic migrations that rewrite data; secret-envelope rewrites
 (legacy to `hf1` (F5c) if the release baseline predates it, and `hf1` to `hf2`, ADR 0015, PR #73), after which an older image
@@ -621,8 +624,9 @@ decrypts existing data (§2).
 
 ### 12. Phone access (ADR 0021) per platform
 
-The sidecar is a **compose overlay inside the same bundle**, identical on every OS: `holdfast phone on` (or the in-app
-wizard) starts the stock Tailscale container, userspace mode, no host Tailscale, no TUN, no `NET_ADMIN`. Differences:
+The sidecar is a **compose overlay inside the same bundle**, identical on every OS: `holdfast phone on` brings up the
+overlay with the stock Tailscale container, userspace mode, no host Tailscale, no TUN, no `NET_ADMIN`; the in-app wizard only flips
+ADR 0021's flag (below). Differences:
 - **Linux:** needs Docker ≥ 28.3.3. Under rootless Podman the sidecar needs no extra capability (UNVERIFIED, IN-L-S1).
 - **Windows and macOS (Docker Desktop, Colima):** containers run in a VM and the runtime forwards published ports to host
   loopback. ADR 0021's "loopback only" check was done on Linux, so it **must be re-run on Docker Desktop for Windows (the
