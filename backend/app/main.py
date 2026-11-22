@@ -97,7 +97,7 @@ def build_api_router(settings: Settings) -> APIRouter:
 def create_redis(settings: Settings) -> Redis:
     """Build the Redis client. No connection is opened until first use."""
     client: Redis = Redis.from_url(
-        settings.redis_url.get_secret_value(),
+        settings.redis_dsn,
         socket_connect_timeout=CONNECT_TIMEOUT_SECONDS,
         socket_timeout=CONNECT_TIMEOUT_SECONDS,
     )

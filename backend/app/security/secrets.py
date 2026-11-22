@@ -60,7 +60,8 @@ def get_secret(
     if settings.app_deployment == "hosted":
         if household_value_enc is None:
             raise SecretNotFound
-        value = crypto.open(household_value_enc, key=settings.fernet_key)
+        ctx = crypto.make_context(household_id, "household_setting", "value_enc", name)
+        value = crypto.open(household_value_enc, ctx, key=settings.fernet_key)
         if not value.reveal().strip():
             raise SecretNotFound
         return value

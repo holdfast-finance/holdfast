@@ -623,7 +623,7 @@ class AuthService:
             if user.totp_enabled:
                 raise ApiError("conflict", "Codes are already on. Turn them off first.")
             secret = totp.new_secret()
-            user.totp_secret_enc = crypto.seal(SecretToken(secret))
+            user.totp_secret_enc = crypto.seal_unbound(SecretToken(secret))
             await self._audit(s, principal, "auth.totp.setup")
         return TotpSetupOut(otpauth_uri=totp.provisioning_uri(secret, user.email), secret=secret)
 

@@ -17,9 +17,12 @@ The background import job runs household-wide, like a sync job (the caller passe
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import groupby
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,6 +34,8 @@ from app.models import Account, Document, ImportRun, Transaction
 from app.services.ledger_service import LedgerWriter, NewTransaction
 
 MASK_LEN = 4
+FINGERPRINT_CHUNK = 10_000
+OVERLAP_WINDOW_DAYS = 3  # the ADR 0035 window for matching rows of two sources
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,8 @@ class BlockResult:
     rows_duplicate: int
     created: bool  # False: this file was already imported; nothing was written
     reason: str | None = None
+    # Rows that may already be in this account from another file (``possible_overlap``).
+    rows_overlap: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,8 @@ class ImportResult:
     document_id: uuid.UUID
     blocks: tuple[BlockResult, ...]
     balances_only: bool = False
+    # The same bytes were imported earlier into a different account; nothing was written.
+    in_other_account: bool = False
 
     @property
     def rows_inserted(self) -> int:
@@ -94,9 +103,49 @@ def stored_review_reason(run: ImportRun) -> str | None:
     return run.review_reason or infer_review_reason(run)
 
 
-def external_account_key(statement: ParsedStatement, block: ParsedBlock) -> str:
-    """Stable id of an imported account: profile, last four digits, block hash. No full number."""
-    return f"{statement.profile_id}:{block.account_last4 or 'none'}:{block.key}"
+@dataclass(frozen=True)
+class AccountTarget:
+    """Where a CSV or OFX goes (a PDF passes none: its account follows its profile).
+
+    ``account_id`` names an existing import account the uploader may write; otherwise a new
+    account is made and is the uploader's own (private), or joint only if ``joint`` is set.
+    ``new_token`` separates new accounts of a source that carries no account identity (a CSV).
+    ``kind_from_file`` means the file states bank vs card (OFX), so an existing account of the
+    other type is refused.
+    """
+
+    account_id: uuid.UUID | None = None
+    joint: bool = False
+    new_token: str | None = None
+    kind_from_file: bool = False
+    declared_kind: str | None = None  # the user's bank/card choice for a CSV
+
+
+class AccountTargetError(RuntimeError):
+    """The requested target can't be used. ``reason`` is a fixed code, never content."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def external_account_key(
+    statement: ParsedStatement,
+    block: ParsedBlock,
+    *,
+    person_id: uuid.UUID | None = None,
+    target: AccountTarget | None = None,
+) -> str:
+    """Stable id of an imported account: profile, last four digits, block key. No full number.
+
+    A CSV/OFX account (a ``target`` is given) also carries its owner, so two people never share
+    one, and a CSV its own token, since it has no account identity.
+    """
+    key = f"{statement.profile_id}:{block.account_last4 or 'none'}:{block.key}"
+    if target is None:
+        return key
+    owner = "joint" if target.joint or person_id is None else str(person_id)
+    return f"{key}:{owner}" + (f":{target.new_token}" if target.new_token else "")
 
 
 async def _document(
@@ -146,8 +195,36 @@ async def _account(
     statement: ParsedStatement,
     block: ParsedBlock,
     person_id: uuid.UUID | None,
+    target: AccountTarget | None = None,
+    household_wide: bool = False,
 ) -> Account:
-    key = external_account_key(statement, block)
+    if target is not None and target.account_id is not None:
+        chosen = (
+            await s.execute(
+                select(Account).where(
+                    Account.id == target.account_id,
+                    Account.household_id == household_id,
+                    Account.source == "import",
+                )
+            )
+        ).scalar_one_or_none()
+        owned_elsewhere = (
+            chosen is not None
+            and chosen.owner_person_id is not None
+            and chosen.owner_person_id != person_id
+            and not household_wide
+        )
+        if chosen is None or owned_elsewhere:
+            # One answer for "no such account" and "someone else's": no existence oracle.
+            raise AccountNotVisibleError("imported account is not visible to this session")
+        wanted = statement.kind if target.kind_from_file else target.declared_kind
+        if wanted is not None and (chosen.type == "credit") != (wanted == "card"):
+            raise AccountTargetError("account_kind_mismatch")
+        return chosen
+    if target is not None and person_id is None and not target.joint and not household_wide:
+        raise AccountTargetError("joint_not_chosen")
+    joint = target is not None and (target.joint or person_id is None)
+    key = external_account_key(statement, block, person_id=person_id, target=target)
     where = (
         Account.household_id == household_id,
         Account.source == "import",
@@ -169,8 +246,8 @@ async def _account(
             type="credit" if statement.kind == "card" else "depository",
             # A person importing owns the account and it starts private (ADR 0008); the
             # household-wide job (no person) creates a joint, shared account.
-            owner_person_id=person_id,
-            visibility="private" if person_id else "shared",
+            owner_person_id=None if joint else person_id,
+            visibility="private" if person_id and not joint else "shared",
         )
         .on_conflict_do_nothing(
             index_elements=["household_id", "external_account_id"],
@@ -193,6 +270,7 @@ async def import_statement(
     *,
     person_id: uuid.UUID | None = None,
     household_wide: bool = False,
+    target: AccountTarget | None = None,
 ) -> ImportResult:
     """Persist ``statement``. One database transaction: a failure leaves nothing behind.
 
@@ -201,12 +279,22 @@ async def import_statement(
     """
     async with scoped_session(factory, household_id, person_id, household_wide=household_wide) as s:
         doc = await _document(s, household_id, meta, statement.profile_id, person_id)
-        elsewhere = await _runs_under_other_profile(s, doc.id, statement.profile_id)
+        # A CSV/OFX has a chosen account, so the same bytes sent to another account must not be
+        # imported twice: any earlier run of the document wins.
+        elsewhere = await _runs_under_other_profile(
+            s, doc.id, None if target is not None else statement.profile_id
+        )
         if elsewhere:
             # The same bytes were already imported under another profile. Their accounts are keyed
             # by profile, so importing again would copy every row into a second account and
             # double-count it. Report the earlier runs and write nothing.
-            return ImportResult(doc.id, tuple(elsewhere))
+            return ImportResult(
+                doc.id,
+                tuple(elsewhere),
+                in_other_account=await _in_other_account(
+                    s, household_id, elsewhere, statement, person_id, target
+                ),
+            )
         if statement.status == "balances_only":
             # Nothing was reconciled and no transactions exist, so it is never `parsed`. Flag it
             # for a person (hard rule 6): there is no run to carry the flag, so set the document's
@@ -215,9 +303,15 @@ async def import_statement(
             doc.import_review_latched = True
             await s.flush()
             return ImportResult(doc.id, (), balances_only=True)
+        if target is not None and target.account_id is not None and len(statement.blocks) != 1:
+            raise AccountTargetError("target_needs_single_account")
         results: list[BlockResult] = []
         for block in statement.blocks:
-            results.append(await _import_block(s, household_id, doc, statement, block, person_id))
+            results.append(
+                await _import_block(
+                    s, household_id, doc, statement, block, person_id, target, household_wide
+                )
+            )
         # A flagged run latches the document in the database (trigger), so decide once, after
         # every block, from fresh state: never write `parsed` over a latch.
         await s.refresh(doc)
@@ -228,8 +322,40 @@ async def import_statement(
         return ImportResult(doc.id, tuple(results))
 
 
+async def _in_other_account(
+    s: AsyncSession,
+    household_id: uuid.UUID,
+    earlier: list[BlockResult],
+    statement: ParsedStatement,
+    person_id: uuid.UUID | None,
+    target: AccountTarget | None,
+) -> bool:
+    """True if a CSV/OFX sent to a chosen account was imported before into another one."""
+    if target is None:
+        return False
+    if target.account_id is not None:
+        return any(r.account_id != target.account_id for r in earlier)
+    wanted = {
+        external_account_key(statement, b, person_id=person_id, target=target)
+        for b in statement.blocks
+    }
+    keys = (
+        (
+            await s.execute(
+                select(Account.external_account_id).where(
+                    Account.household_id == household_id,
+                    Account.id.in_([r.account_id for r in earlier]),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return any(k not in wanted for k in keys)
+
+
 async def _runs_under_other_profile(
-    s: AsyncSession, document_id: uuid.UUID, profile_id: str
+    s: AsyncSession, document_id: uuid.UUID, profile_id: str | None
 ) -> list[BlockResult]:
     """The document's finished runs when none were made under ``profile_id``; else empty."""
     runs = (
@@ -247,7 +373,7 @@ async def _runs_under_other_profile(
         .scalars()
         .all()
     )
-    if not runs or any(r.profile == profile_id for r in runs):
+    if not runs or (profile_id is not None and any(r.profile == profile_id for r in runs)):
         return []
     return [
         BlockResult(
@@ -289,22 +415,27 @@ async def _unexplained_duplicates(
     """
     if not fingerprints:
         return 0
-    rows = (
-        await s.execute(
-            select(
-                Transaction.posted_date,
-                Transaction.import_run_id,
-                ImportRun.document_id,
-                ImportRun.period_start,
-                ImportRun.period_end,
-            )
-            .outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
-            .where(
-                Transaction.account_id == account_id,
-                Transaction.import_fingerprint.in_(fingerprints),
-            )
+    rows: list[Any] = []
+    # asyncpg allows 32767 bind parameters per statement: look up in chunks.
+    for i in range(0, len(fingerprints), FINGERPRINT_CHUNK):
+        rows.extend(
+            (
+                await s.execute(
+                    select(
+                        Transaction.posted_date,
+                        Transaction.import_run_id,
+                        ImportRun.document_id,
+                        ImportRun.period_start,
+                        ImportRun.period_end,
+                    )
+                    .outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
+                    .where(
+                        Transaction.account_id == account_id,
+                        Transaction.import_fingerprint.in_(fingerprints[i : i + FINGERPRINT_CHUNK]),
+                    )
+                )
+            ).all()
         )
-    ).all()
     mine = _window(run.period_start, run.period_end)
     bad = len(fingerprints) - len(rows)  # skipped but not found: cannot explain
     for posted, run_id, doc_id, p_start, p_end in rows:
@@ -321,6 +452,56 @@ async def _unexplained_duplicates(
     return bad
 
 
+async def _possible_overlap(
+    s: AsyncSession,
+    account_id: uuid.UUID,
+    document_id: uuid.UUID,
+    rows: list[tuple[date, Decimal]],
+) -> int:
+    """How many just-inserted rows have a live row of another document in the account with the
+    same amount within ``OVERLAP_WINDOW_DAYS``.
+
+    The fingerprint also compares the description, which two sources word differently, so a bank
+    CSV row and the PDF row for the same purchase both get stored. Matching is order preserving
+    per amount (each existing row pairs at most once), so equal same-day amounts count right.
+    Nothing is removed: a person looks at the rows.
+    """
+    if not rows:
+        return 0
+    window = timedelta(days=OVERLAP_WINDOW_DAYS)
+    existing = (
+        await s.execute(
+            select(Transaction.posted_date, Transaction.amount)
+            .join(ImportRun, ImportRun.id == Transaction.import_run_id)
+            .where(
+                Transaction.account_id == account_id,
+                ImportRun.document_id != document_id,
+                Transaction.superseded_by_id.is_(None),
+                Transaction.posted_date >= min(d for d, _ in rows) - window,
+                Transaction.posted_date <= max(d for d, _ in rows) + window,
+            )
+        )
+    ).all()
+
+    def grouped(pairs_: Iterable[tuple[date, Decimal]]) -> dict[Decimal, list[date]]:
+        ordered = sorted(pairs_, key=lambda p: (p[1], p[0]))
+        return {a: [d for d, _ in grp] for a, grp in groupby(ordered, key=lambda p: p[1])}
+
+    by_amount = grouped((posted, amount) for posted, amount in existing)
+    mine = grouped(rows)
+    pairs = 0
+    for amount, dates in mine.items():
+        theirs = by_amount.get(amount, [])
+        j = 0
+        for ours in dates:
+            while j < len(theirs) and theirs[j] < ours - window:
+                j += 1
+            if j < len(theirs) and theirs[j] <= ours + window:
+                pairs += 1
+                j += 1
+    return pairs
+
+
 async def _import_block(
     s: AsyncSession,
     household_id: uuid.UUID,
@@ -328,8 +509,10 @@ async def _import_block(
     statement: ParsedStatement,
     block: ParsedBlock,
     person_id: uuid.UUID | None,
+    target: AccountTarget | None = None,
+    household_wide: bool = False,
 ) -> BlockResult:
-    acct = await _account(s, household_id, statement, block, person_id)
+    acct = await _account(s, household_id, statement, block, person_id, target, household_wide)
     prior = (
         (
             await s.execute(
@@ -382,6 +565,7 @@ async def _import_block(
     ledger = LedgerWriter(s, household_id)
     inserted = 0
     skipped: list[str] = []
+    added: list[tuple[date, Decimal]] = []
     for t in block.txns:
         new = NewTransaction(
             account_id=acct.id,
@@ -394,6 +578,7 @@ async def _import_block(
         )
         if await ledger.insert_transaction(new, skip_duplicates=True) is not None:
             inserted += 1
+            added.append((t.posted_date, t.amount))
         else:
             skipped.append(t.fingerprint)
 
@@ -410,6 +595,11 @@ async def _import_block(
     reason = rec.reason if rec.status != "reconciled" else None
     if rec.status == "reconciled" and unexplained:
         reason = "unexplained_duplicates"
+    overlap = 0
+    if target is not None and target.account_id is not None:
+        overlap = await _possible_overlap(s, acct.id, doc.id, added)
+        if overlap:
+            reason = f"{reason},possible_overlap" if reason else "possible_overlap"
     run.reconcile_status = "needs_review" if reason or rec.status != "reconciled" else "reconciled"
     flagged = run.reconcile_status == "needs_review"
     run.review_reason = (reason or UNKNOWN_REASON) if flagged else None
@@ -425,4 +615,5 @@ async def _import_block(
         run.rows_duplicate,
         created=True,
         reason=run.review_reason,
+        rows_overlap=overlap,
     )

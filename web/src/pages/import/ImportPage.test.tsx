@@ -37,7 +37,7 @@ const fail = (key: UploadErrorKey) => {
 }
 
 async function upload(file: File) {
-  await userEvent.upload(await screen.findByLabelText('Statement PDF'), file)
+  await userEvent.upload(await screen.findByLabelText(/statement file/i), file)
   await userEvent.click(screen.getByRole('button', { name: 'Import statement' }))
 }
 
@@ -57,7 +57,7 @@ describe('Import page: runs and the review queue', () => {
     open()
     const review = await queue()
     expect(within(review).getByText('Sample travel card')).toBeInTheDocument()
-    // opening -410.00 + -200.00 = -610.00 against a closing of -655.25.
+    // opening -380.00 + -200.00 = -580.00 against a closing of -625.25.
     expect(within(review).getByText('-$45.25')).toBeInTheDocument()
     // The savings statement has no opening balance.
     expect(within(review).getAllByText('Not found').length).toBeGreaterThan(0)
@@ -280,11 +280,11 @@ describe('Import page: accepting a flagged statement', () => {
 })
 
 describe('Import page: uploading', () => {
-  it('offers a keyboard-focusable PDF picker and describes household storage', async () => {
+  it('offers a keyboard-focusable statement picker and describes household storage', async () => {
     open()
-    const picker = await screen.findByLabelText('Statement PDF')
-    expect(picker).toHaveAttribute('accept', 'application/pdf,.pdf')
-    expect(screen.getByText(/stored with your household's documents/)).toBeVisible()
+    const picker = await screen.findByLabelText(/statement file/i)
+    expect(picker).toHaveAttribute('accept', 'application/pdf,.pdf,.csv,text/csv,.ofx,.qfx')
+    expect(screen.getByText(/Stored with your household's documents/)).toBeVisible()
     picker.focus()
     expect(picker).toHaveFocus()
   })
@@ -305,6 +305,20 @@ describe('Import page: uploading', () => {
         within(screen.getByRole('region', { name: 'Recent imports' })).getAllByRole('listitem'),
       ).toHaveLength(7)
     })
+  })
+
+  it('shows the notice when a CSV or OFX went into its own account', async () => {
+    respond(() =>
+      HttpResponse.json({
+        ...importFile('march.csv', 'ok'),
+        file_kind: 'csv',
+        notice: 'This file went into its own new account. It may repeat transactions.',
+      }),
+    )
+    open()
+    await upload(pdf('march.csv'))
+    const res = await result()
+    expect(await within(res).findByRole('note')).toHaveTextContent(/its own new account/)
   })
 
   it('flags a statement, maps known reasons to plain copy and shows unknown codes verbatim', async () => {
@@ -363,6 +377,141 @@ describe('Import page: uploading', () => {
     expect(within(res).getByText(/does not appear in your imports list yet/)).toBeInTheDocument()
   })
 
+  it('accepts a CSV or OFX export and refuses other file types before sending', async () => {
+    let posted = 0
+    respond(() => {
+      posted += 1
+      return HttpResponse.json({})
+    })
+    open()
+    const user = userEvent.setup({ applyAccept: false })
+    const picker = await screen.findByLabelText(/statement file/i)
+    await user.upload(picker, new File(['x'], 'notes.txt', { type: 'text/plain' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not a PDF, CSV or OFX\/QFX/)
+    for (const file of [
+      new File(['x'], 'march.csv', { type: 'text/csv' }),
+      new File(['x'], 'export', { type: 'text/csv' }), // the MIME type alone is enough
+      new File(['x'], 'bank.QFX', { type: '' }),
+      new File(['x'], 'bank.ofx', { type: '' }),
+    ]) {
+      await user.upload(picker, file)
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Import statement' })).toBeEnabled()
+    }
+    await user.upload(
+      picker,
+      new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'big.csv', { type: 'text/csv' }),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/over the 10 MiB upload limit/)
+    await user.upload(
+      picker,
+      new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'big.ofx', { type: '' }),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/over the 5 MiB upload limit/)
+    // A PDF may be larger than a text file, up to its own limit.
+    await user.upload(
+      picker,
+      new File([new Uint8Array(MAX_UPLOAD_BYTES)], 'ok.pdf', { type: 'application/pdf' }),
+    )
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.upload(
+      picker,
+      new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'bigger.pdf', {
+        type: 'application/pdf',
+      }),
+    )
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.upload(
+      picker,
+      new File([new Uint8Array(MAX_UPLOAD_BYTES + 1)], 'huge.pdf', { type: 'application/pdf' }),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/over the 20 MiB upload limit/)
+    expect(posted).toBe(0)
+  })
+
+  it('lets a CSV choose an existing account or a new bank or card account', async () => {
+    let body = ''
+    server.use(
+      http.post('*/api/imports/statements', async ({ request }) => {
+        body = await request.text()
+        return HttpResponse.json(importFile('march.csv', 'ok'))
+      }),
+    )
+    open()
+    const user = userEvent.setup()
+    const picker = await screen.findByLabelText(/statement file/i)
+    await user.upload(picker, new File(['x'], 'march.csv', { type: 'text/csv' }))
+    expect(await screen.findByLabelText('Add this file to')).toBeVisible()
+    expect(
+      await screen.findByRole('option', { name: /Everyday checking ending 1111/ }),
+    ).toBeInTheDocument()
+    // A new CSV account must say bank or card.
+    await user.click(screen.getByRole('radio', { name: 'Card' }))
+    await user.click(screen.getByRole('button', { name: 'Import statement' }))
+    await screen.findByRole('region', { name: 'Import result' })
+    expect(body).toMatch(/name="account"\r\n\r\nnew\r\n/)
+    expect(body).toMatch(/name="account_kind"\r\n\r\ncard\r\n/)
+  })
+
+  it('says how many added rows may already be in the account from another file', async () => {
+    respond(() => {
+      const base = importFile('march.csv', 'ok')
+      const block = base.blocks[0]
+      if (!block) throw new Error('mock has a block')
+      return HttpResponse.json({
+        ...base,
+        blocks: [
+          {
+            ...block,
+            rows_overlap: 2,
+            reconcile_status: 'needs_review',
+            reason: 'possible_overlap',
+          },
+        ],
+      })
+    })
+    open()
+    await upload(new File(['x'], 'march.csv', { type: 'text/csv' }))
+    const res = await result()
+    expect(
+      await within(res).findByText(/2 of the added rows may already be in this account/),
+    ).toBeVisible()
+    expect(
+      within(res).getByText(/^Some rows may already be in this account from another file/),
+    ).toBeVisible()
+  })
+
+  it('shows the notice in the result and announces it', async () => {
+    respond(() => HttpResponse.json(importFile('march.csv', 'ok')))
+    open()
+    const user = userEvent.setup()
+    await user.upload(
+      await screen.findByLabelText(/statement file/i),
+      new File(['x'], 'march.csv', { type: 'text/csv' }),
+    )
+    await user.click(screen.getByRole('button', { name: 'Import statement' }))
+    const res = await result()
+    expect(await within(res).findByRole('note')).toHaveTextContent(/own new account/)
+    expect(uploadStatus()).toHaveTextContent(/own new account/)
+  })
+
+  it('answers a 413 with the limits for each kind of file', async () => {
+    server.use(http.post('*/api/imports/statements', () => new HttpResponse(null, { status: 413 })))
+    open()
+    await upload(pdf('x.pdf'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /over the upload limit \(20 MiB for PDF, 10 MiB for CSV, 5 MiB for OFX and QFX\)/,
+    )
+  })
+
+  it('names the file input by its visible text and ties it to the description', async () => {
+    open()
+    const input = await screen.findByLabelText(/choose a statement file/i)
+    const describedBy = input.getAttribute('aria-describedby') ?? ''
+    const desc = document.getElementById(describedBy.split(' ')[0] ?? '')
+    expect(desc).toHaveTextContent(/PDF up to 20 MiB\. CSV up to 10 MiB, OFX\/QFX up to 5 MiB/)
+  })
+
   it('refuses an oversize file before sending it', async () => {
     let posted = false
     respond(() => {
@@ -371,7 +520,7 @@ describe('Import page: uploading', () => {
     })
     open()
     await userEvent.upload(
-      await screen.findByLabelText('Statement PDF'),
+      await screen.findByLabelText(/statement file/i),
       pdf('big.pdf', MAX_UPLOAD_BYTES + 1),
     )
     expect(await screen.findByRole('alert')).toHaveTextContent(/over the 20 MiB upload limit/)

@@ -44,6 +44,11 @@ function Block({
           />
         </>
       )}
+      {block.rows_overlap ? (
+        <p className="text-xs text-warning-text">
+          {`${String(block.rows_overlap)} of the added rows may already be in this account from another file.`}
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         {block.created
           ? `${String(block.rows_inserted)} of ${String(block.rows_parsed)} rows added${
@@ -109,6 +114,12 @@ export function ResultView({
         <p className="flex items-start gap-2 text-sm text-muted-foreground">
           <Info aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
           This exact file is already in Holdfast. That is fine; your data is unchanged.
+        </p>
+      )}
+      {result.notice && (
+        <p role="note" className="flex items-start gap-2 text-sm text-warning-text">
+          <Info aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+          {result.notice}
         </p>
       )}
       {result.balances_only && (

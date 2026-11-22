@@ -55,6 +55,8 @@ _SEPARATED_CARD = re.compile(
 )
 MIN_ID_KEY_BYTES = 16
 _MAX_INTEGER_DIGITS = 12  # NUMERIC(14,2)
+# Control characters (C0, DEL, C1) never belong in a description: they become spaces.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def resolve_encoding(name: str) -> str | None:
@@ -150,7 +152,7 @@ class ExportRows:
     ) -> None:
         amount = _zero_clean(amount)
         balance = None if balance is None else _zero_clean(balance)
-        description = mask_identifiers(" ".join(description.split()))
+        description = mask_identifiers(" ".join(_CONTROL_CHARS.sub(" ", description).split()))
         key = (posted, str(quantize_cents(amount)), normalize_description(description))
         self._ordinals[key] += 1
         ordinal = self._ordinals[key]
