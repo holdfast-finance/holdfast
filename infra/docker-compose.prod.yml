@@ -15,6 +15,9 @@ services:
   migrate:
     environment:
       APP_ENV: prod
+  rotate-keys:
+    environment:
+      APP_ENV: prod
 
   caddy:
     image: holdfast-caddy:local

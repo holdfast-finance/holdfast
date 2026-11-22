@@ -13,6 +13,7 @@ only (hard rule 3).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from types import TracebackType
@@ -33,6 +34,7 @@ BASE_URLS: dict[PlaidEnv, str] = {
 API_VERSION = "2020-09-14"
 DEFAULT_TIMEOUT = httpx.Timeout(20, connect=10)
 _ID_MAX = 64
+_KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 
 log = structlog.get_logger(__name__)
 
@@ -44,6 +46,14 @@ class PlaidCredentials:
     env: PlaidEnv
     client_id: SecretToken
     secret: SecretToken
+
+
+def credentials_well_formed(credentials: PlaidCredentials) -> bool:
+    """Both header values must contain only printable ASCII, without spaces."""
+    return (
+        _KEY_SHAPE.fullmatch(credentials.client_id.reveal()) is not None
+        and _KEY_SHAPE.fullmatch(credentials.secret.reveal()) is not None
+    )
 
 
 class PlaidError(Exception):
@@ -118,6 +128,7 @@ class PlaidClient:
             transport=transport,
             timeout=timeout,
             follow_redirects=False,
+            trust_env=False,
             headers={"Plaid-Version": API_VERSION, "User-Agent": "holdfast"},
         )
 
@@ -138,29 +149,35 @@ class PlaidClient:
     async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """POST ``body`` to ``path`` and return the decoded object (numbers with a fraction are
         ``Decimal``). Raises :class:`PlaidError` or :class:`PlaidUnavailable`."""
-        headers = {
-            # The only place the keys leave their wrappers.
-            "PLAID-CLIENT-ID": self._credentials.client_id.reveal(),
-            "PLAID-SECRET": self._credentials.secret.reveal(),
-        }
-        try:
-            response = await self._http.post(path, json=body, headers=headers)
-        except httpx.TimeoutException:
-            raise self._unavailable(path, "timeout") from None
-        except httpx.HTTPError:
-            # ``from None``: the chained httpx error holds the request, headers included.
-            raise self._unavailable(path, "network") from None
-        except (UnicodeError, ValueError):
-            # A key with a character that cannot go in a header (a stray non-ASCII byte from a
-            # copy-paste). The original error quotes the offending character, so drop it.
+        # HTTPX encodes string header values as ASCII. Validate only the credentials here,
+        # so errors from serializing the body or sending the request retain their own meaning.
+        if not credentials_well_formed(self._credentials):
             raise self._unavailable(path, "bad_credentials") from None
+        reason = None
+        try:
+            response = await self._http.post(
+                path,
+                json=body,
+                headers={
+                    "PLAID-CLIENT-ID": self._credentials.client_id.reveal(),
+                    "PLAID-SECRET": self._credentials.secret.reveal(),
+                },
+            )
+        except httpx.TimeoutException:
+            reason = "timeout"
+        except httpx.HTTPError:
+            reason = "network"
+        if reason is not None:
+            # The httpx error holds request headers. Raise outside its handler.
+            raise self._unavailable(path, reason)
         try:
             data = json.loads(
                 response.content, parse_float=Decimal, parse_constant=_reject_constant
             )
-        except (ValueError, UnicodeDecodeError):
-            raise self._unavailable(path, "bad_response") from None
+        except ValueError:
+            data = None
         if not isinstance(data, dict):
+            del data, response
             raise self._unavailable(path, "bad_response")
         if not response.is_success or "error_code" in data:
             error = PlaidError(
@@ -170,6 +187,8 @@ class PlaidClient:
                 error_code=_code(data.get("error_code"), "UNKNOWN"),
                 request_id=_request_id(data.get("request_id")),
             )
+            # The raw payload can echo credentials in its free text.
+            del data, response
             log.warning(
                 "plaid_error",
                 path=path,

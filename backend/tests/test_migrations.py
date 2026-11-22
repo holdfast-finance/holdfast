@@ -36,7 +36,7 @@ def _extensions(database_url: str) -> set[str]:
 
 def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0009_import_run_review_reason"]
+    assert script.get_heads() == ["0010_list_household_ids"]
 
 
 @pytest.mark.services

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # GET /api/test/setup-token (with E2E_HOOKS=true). "prod" can never expose it
     # (see app.api.routes_testing).
     app_env: Literal["dev", "test", "prod"] = "dev"
+    # Where credentials come from (ADR 0015): "self_host" reads the environment, "hosted" reads the
+    # per-household encrypted settings row. Exactly one source per mode, never both. Any other
+    # value fails startup.
+    app_deployment: Literal["self_host", "hosted"] = "self_host"
     # Second switch for the e2e hooks: /api/test/* is mounted only when APP_ENV=test *and*
     # E2E_HOOKS=true, so a stray APP_ENV=test alone never exposes the setup token.
     e2e_hooks: bool = False
