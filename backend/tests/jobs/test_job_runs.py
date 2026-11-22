@@ -1390,14 +1390,19 @@ async def test_a_locked_reference_answers_busy_after_the_lock_timeout(
         # Another transaction (a sync, say) holds the row FOR UPDATE.
         await holder.execute(select(Account.id).where(Account.id == item).with_for_update())
         started = loop.time()
+        # wait_for: without the lock timeout, enqueue would wait on the holder forever. Then this
+        # fails with TimeoutError instead of hanging the suite.
         with pytest.raises(ApiError) as info:
-            await enqueue(
-                deps.factory,
-                q,
-                effect,
-                ItemPayload(household_id=hid, item_id=item),
-                **_as(hid),
-                idempotency_key="busy",
+            await asyncio.wait_for(
+                enqueue(
+                    deps.factory,
+                    q,
+                    effect,
+                    ItemPayload(household_id=hid, item_id=item),
+                    **_as(hid),
+                    idempotency_key="busy",
+                ),
+                timeout=10,
             )
         waited = loop.time() - started
         # A read-only reference takes no lock, so it isn't held up.

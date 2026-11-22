@@ -6,6 +6,8 @@ import uuid
 from datetime import date
 from typing import Literal
 
+from pydantic import Field
+
 from app.schemas.common import DecimalStr, Model, MoneyStr
 
 AccountVisibility = Literal["private", "shared", "summary_only"]
@@ -13,6 +15,7 @@ AccountType = Literal["depository", "credit", "loan", "investment", "other"]
 AccountSource = Literal["plaid", "simplefin", "import", "manual"]
 ReconcileStatus = Literal["pending", "reconciled", "needs_review", "accepted"]
 Direction = Literal["inflow", "outflow"]
+CategorySource = Literal["user", "rule", "plaid", "ml"]
 
 
 class AccountOut(Model):
@@ -52,6 +55,22 @@ class TransactionOut(Model):
     # Reconciliation of the import run that created the row; null for rows not from an import.
     import_reconcile_status: ReconcileStatus | None
     needs_review: bool
+    # Derived on read from the merchant name or description (ADR 0026); not stored.
+    merchant_key: str | None
+    category_id: uuid.UUID | None
+    category_source: CategorySource | None
+    has_splits: bool = Field(
+        description="True when the row has split parts. Category filters and summaries use the "
+        "parent row's category only; a split parent is not matched by its parts."
+    )
+    # Whether this reader may change the row: the account has no owner, or the reader owns it.
+    # Never derived from `visibility`. False for a principal with no person.
+    can_edit: bool
+
+
+class CategoryChoiceIn(Model):
+    # Null clears the category as a choice (source stays "user"); release hands it back instead.
+    category_id: uuid.UUID | None
 
 
 class TransactionPage(Model):

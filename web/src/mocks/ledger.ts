@@ -164,6 +164,11 @@ export function seedLedger({
       is_transfer: isTransfer,
       import_reconcile_status: null,
       needs_review: description === 'Fernwood Bookshop',
+      merchant_key: null,
+      category_id: null,
+      category_source: null,
+      has_splits: false,
+      can_edit: true,
     }
   })
   db.accounts = ACCOUNTS.map((a) => {

@@ -1021,7 +1021,13 @@ v1.104.7, Docker 29.9.3, Fedora 43).
      install and fails closed.
 2. **Accepted.** Additionally needs U-6 to U-10, the owner rows. They gate only the stories that
    depend on them:
-   - U-6 and U-7 gate PA-D2 (the localhost-first stack)
+   - U-6 and U-7 gate the **per-browser support claim** for the PC app (Firefox; Safari and Chrome on macOS; Edge on
+     Windows), **not PA-D2's merge** (amended 2026-11-22 for ADR 0037, Gadfly R2-B2). PA-D2 merges on Bulwark's
+     verdict with Chrome, Firefox and Edge checked on the owner's Windows PC and Linux. The **Safari half of U-7
+     needs a Mac** and gates only the macOS channel's browser claim. **Until U-7 closes, the macOS docs say "use Chrome or
+     Firefox".** The non-`Secure` local-origin cookie (Bulwark's other fallback in "Local ingress") **stays conditional on U-7
+     evidence and is never an interim default** (Bulwark, 2026-11-22). The setup-token
+     rate-limit scope in PA1 is delivered with PA-D2 by ADR 0037's slice IN-A1.
    - U-8, U-9 and U-10 gate PA-D3 (the phone wizard)
    - all of them gate PA-D8 (real-device acceptance)
 
@@ -1146,7 +1152,7 @@ The results are in `docs/adr/reviews/0021-pa0-spike.md` and are summarized in §
 | PA-D3 | In-app "Connect your phone" (gated by U-8, U-9, U-10): flag write, step-up-only `AuthURL`, organization-domain test from recorded `CurrentTailnet.Name` values, `CertDomains` / MagicDNS gating, tailnet binding + typed confirmations, shared-tailnet warning, pairing QR + PC approval (Tide + Prism) | M |
 | PA-D4 | `holdfast recover` (local ingress only, runs as `api`'s UID) (Tide, Bulwark) | S |
 | PA-D5 | Settings → Phone access, expiry banners, HTTPS-off, control-unreachable and tripwire states (U-11), PWA offline copy (Prism) | S |
-| PA-D6 | Installer `install.sh` / `install.ps1`, `holdfast` wrapper, Docker floor 28.3.3 with numeric compare, refusal of `up`/`update` only, printed upgrade path, NAS detection message, `backup`/`export`/`recover` below the floor, update rule for the sidecar, digest-pinned compose (Harbor) | M |
+| PA-D6 | **Superseded by ADR 0037 and `docs/planning/INSTALL-PLAN.md` (IN7, IN10, IN15 and IN-A2); PA-D2 is pulled into that plan as IN-A1.** Original scope: Installer `install.sh` / `install.ps1`, `holdfast` wrapper, Docker floor 28.3.3 with numeric compare, refusal of `up`/`update` only, printed upgrade path, NAS detection message, `backup`/`export`/`recover` below the floor, update rule for the sidecar, digest-pinned compose (Harbor) | M |
 | PA-D7 | Docs: per-OS guide with the §7 counts, Debian Docker step, node sharing for members, ACL snippet, Funnel attribute removal, outage behaviour, non-commercial note, backup/restore, revocation, manual paths (Beacon) | S |
 | PA-D8 | Real-device acceptance on Linux, macOS and Windows hosts, iOS and Android (Sounding; owner devices) | M |
 | PA-D9 | Host-Serve manual path: loopback-published PROXY listener + documented `tailscale serve` command (fixes the owner's host) (Harbor) | S |
