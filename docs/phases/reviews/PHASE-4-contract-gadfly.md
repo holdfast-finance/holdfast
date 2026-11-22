@@ -206,3 +206,181 @@ real data uses them. Ship `any` only. Adding scope later is an additive migratio
 heartbeat test are all timed on free-tier runners. Put them in a non-required benchmark job that
 records the numbers. The required tests should assert bounded work instead: no N+1 queries, and one
 `UPDATE` per apply.
+
+---
+
+## Round 2 (f651389)
+
+I checked Revision 2 of the contract and its section 11 answers against the merged code:
+- `statement_import._account`
+- the `IMPORT_RUN_WRITE` predicate in migration 0005
+- the 0002 account predicates
+- `services/jobs.enqueue`
+- `LedgerWriter._lock_group` and `unmark_transfer`
+- `household.py`
+
+**Verdict: REWORK-small.** Most items are closed. The remaining four blockers are local edits:
+- A1's real-data workflow
+- one acceptance criterion that can't pass
+- the go-ahead claim for live migrations
+- one stuck half-accepted move
+
+### Earlier blockers, checked against the code
+
+| Item | Status | Why |
+|---|---|---|
+| Pass 1 B1, cross-owner moves | **Partly closed** | Links and auto-marking close the hinted case. A half-accepted move between two private accounts still sticks (R2-B4) |
+| Pass 1 B2, supersession carry-over | Closed on paper | `supersede_transaction` and the re-point trigger are specified and tested. Phase 4 has no caller. A series split remains (R2-S2) |
+| Pass 1 B3, regex gate | Closed | `compile_pattern` refuses every input until C3d. The `ast` test covers `rules.py`, which still imports `re` today, so C3c must delete that import |
+| Pass 1 B4, C7 evidence | **Partly closed** | Criterion 2(d) contradicts 7.4 (R2-B2) |
+| Pass 2 B1, ownership | **Partly closed** | A1 now exists, but it locks the bookkeeper out of imports (R2-B1) |
+| Pass 2 B2, dropped pairs | Closed | `pairs` and `links` in a person's view become `likely` edges, and C4b names the test |
+| Pass 2 B3, orphaned leg | Closed | The delete trigger, plus `unmark_transfer` with one surviving leg. Residual in R2-S1 |
+| Pass 2 B4, real data | **Partly closed** | 7.5 is good. "Nothing waits on the owner" is unproven (R2-B3) |
+| Pass 2 B5, races | Closed | Lock then re-check, and `FOR UPDATE` plus a re-plan. State that the rejection check is a separate statement run after `_lock_group` returns. Only a new statement gets a fresh READ COMMITTED snapshot |
+
+### Round 2 blockers
+
+**R2-B1. Giving an account to the other person locks the uploader out of it (5.0, 6 item 0).**
+- In this household one person uploads every statement.
+- After `PATCH owner: <spouse>`, the uploader can't import that account's statements again. Two
+  policies refuse it:
+  - `LedgerWriter.insert_transaction` needs `ACCOUNT_DETAIL_WRITABLE` (owner or joint).
+  - `IMPORT_RUN_WRITE` (0005) also needs a writable account.
+  - With `private`, the earlier `_account` lookup already raises `AccountNotVisibleError`.
+- Runs already in `needs_review` on that account get stuck for both people:
+  - The new owner can't accept them, because `d.person_id` is the uploader's.
+  - The uploader can't accept them, because the account isn't theirs to write.
+- If the new owner has no login, `private` hides the account from every person. Only a
+  household-wide session can reach it, and the API has none.
+
+Change:
+- A1 refuses `owner: <person>` when that person has no login.
+- The sheet says plainly: "You won't be able to import statements for this account."
+- The sheet recommends **Joint** to a household's sole bookkeeper.
+- Record the long-term fix as a follow-up: a household-owner import path through the existing
+  `import_statement(household_wide=True)`.
+- A1 test: give the account away, then upload as the giver. The upload is refused with a clear
+  error, not a 500.
+
+**R2-B2. Criterion 2(d) can't pass as the simulation is written (0 criterion 2, 7.4).**
+- The generator plants unhinted transfers, which become suggestions.
+- The simulation (7.4 steps 1–5) never accepts or rejects a suggestion.
+- Their outflows therefore count as spend, and the "spend total equals truth exactly" check fails
+  every time. The alternative is that Sounding quietly redefines the truth.
+
+Change: add simulation step 6. Each person accepts every review card whose truth is a transfer and
+rejects the rest. Measure (d) after step 6. Also report it after the refresh in step 5, without
+clicks.
+
+**R2-B3. "Nothing waits on the owner" isn't backed by the record (7.5, 9).**
+- `CHECKPOINT-2026-11-21.md` says the live instance is pre-#47 and "Do not do it without" an owner
+  go-ahead. Nothing on `main` records an upgrade or a dump.
+- CLAUDE.md puts real data in the owner queue. Phase 4 then adds three migrations to that database.
+
+Change: write the evidence into 7.5:
+- the date of the upgrade
+- `alembic current` on the instance
+- the dump's existence (path class only)
+- the owner's go-ahead, and whether it is a standing one for Phase 4 migrations
+
+Without a standing go-ahead, each of M1, M3 and M4 is an owner-queue item.
+
+**R2-B4. A half-accepted move between two private accounts never reaches the second person (4.1
+step 2, 3.3 `transfer_suggestion` read policy).**
+- `other_side_marked` is a suggestion, and its read policy needs both legs detail-visible.
+- Take a move from B's private checking to A's shared card. B sees both legs and accepts, so B's
+  leg is marked and a `person` link is inserted. A can't see B's checking, so A never gets the
+  offer. A's card inflow stays counted for good.
+- Criterion 2(b) still passes, because B was offered the card.
+
+Change:
+- For `reason = 'other_side_marked'` only, the policy needs only the reader's own leg to be visible.
+- The card shows the reader's leg and the line "Another household member marked the other side".
+- This is the leak ADR 0027 already accepts for job links.
+- C4c test: B accepts and A gets the offer.
+
+### Round 2 should-fixes
+
+**R2-S1. The delete trigger undoes people's pairs; links keep them (3.3 `transaction_dissolve_orphan`
+against 4.1 step 0(a)).**
+- The trigger always clears the surviving leg. Step 0(a) clears the survivor only for `job` links.
+- So when a person's manual pair loses a leg (re-import, Plaid `removed`), the survivor goes back
+  to spending, while a person's link survives the same event. That contradicts "never changes a
+  mark a person made".
+
+Fix: groups don't record their origin, so pick one rule and state it in ADR 0027. Either:
+- the survivor of any deleted leg becomes a single leg and stays marked, or
+- record pair origin the way links do.
+
+**R2-S2. Plaid supersession will still split confirmed series (D13, ADR 0028).**
+- `merchant_key` prefers `merchant_name`. Statement rows have none, and Plaid rows do. So
+  re-pointed members land in a different detector group from the older statement-only members of
+  the same bill.
+- The bill then forms two series, and the lapsed-merge rule needs equal keys, so it doesn't fire.
+- The stored id, and with it `confirmed` and the label, follows the larger overlap. That's usually
+  the long statement history, which drifts to "possibly cancelled". The live bill comes back as a
+  new `auto` series.
+- The "supersede every member" test passes. A partial supersession over Plaid's 24-month window
+  would fail.
+
+Fix: when a stored series' members split across detections, the id and the state follow the
+detection that holds the **newest** member. Add a test: supersede the newest 12 of 30 members under
+a new key.
+
+**R2-S3. The rejected undo for retroactive apply rests on a false premise (10, 11.1 S5).**
+- The answer says every overwritten value can be re-derived. On statement-only data the overwritten
+  value is almost always "uncategorised" (`category_source IS NULL`), and nothing can restore it:
+  - `release` works only on `user` rows.
+  - Setting a row to null makes it a `user` clear.
+- One bad "Save and apply to 2,000" can only be repaired by hand or by a counter-rule.
+
+Fix, with no new table: add `POST /rules/{id}/clear`. It previews first, then sets category,
+source and `category_rule_id` to NULL `WHERE category_rule_id = :id AND category_source = 'rule'`,
+through `LedgerWriter`, with an audit row. `category_rule_id` already records which rule set each
+row. Plaid-sourced priors are lost, but they're 0% of real data and re-derivable from the PFC.
+
+**R2-S4. Wave 0 runs C3b and A1 in parallel, but they own the same files (7.1, 7.6).**
+- Both own `services/ledger_service.py` and `tests/ledger/test_ledger_service.py`.
+- Both are Ledger-owned and Bulwark-gated.
+
+Fix: order them (A1, then C3b) or split the file ownership.
+
+**R2-S5. Small contradictions.**
+- 5.0 says "Any member may change a joint account's visibility". The 422 refuses `visibility` on a
+  joint account.
+- The joint-claim role check exists only in the service. `account_guard_ownership` still lets any
+  member re-own a joint account. State this as a residual, or check `app_user.role` in M3.
+- The healing re-push in `services.jobs.enqueue` (a duplicate while `queued`) must carry
+  `_defer_until` as well. Without it, a re-push after a Redis blip runs mid-bucket and misses that
+  bucket's later uploads.
+
+### Rejections
+
+| Rejection | Holds? | Why |
+|---|---|---|
+| Merging M3 and M4 | **Holds** | The cost is one more token handoff. Keeping each RLS review whole is worth that. M4 depends only on M3's re-point function |
+| Recurring before transfers | **Weak, but acceptable** | The only harm named is a hollow confirmed series once pairing lands. One line in ADR 0028 removes it: "a series whose live members are all `is_transfer` is deleted whatever its state". Then recurring could follow a job-skeleton slice (the C4d framework without steps 0–2), and M4 would no longer wait behind M3, the largest Bulwark gate. Keep the order if transfers stay on schedule. Otherwise swap, with that line |
+| Undo record for retroactive apply | **Doesn't hold as argued** | See R2-S3. The table can stay out, but a "clear this rule's categories" action is needed |
+| Per-account opt-out from another person's rule | **Holds** | In a two-adult household, setting the row (user wins) or writing a higher-priority rule is enough. The residual is a priority war, which isn't a Phase 4 problem |
+
+### Shortest path to one working screen on the owner's real data
+
+The shortest path is **C3c → C6a → W1 → redeploy the live instance from `main`**:
+- three PRs, then one deploy
+- **no migration**: `category_rule_id` arrives with C3e
+- the result is manual categorisation on the Activity tab
+
+The waves reach it in wave 2, but not first:
+- C6a waits on A1 only because they share files (`schemas/ledger.py`, `services/ledger.py`). A1 is
+  a Bulwark-gated write endpoint, so if it slips, W1 slips.
+- **No wave updates the live instance.** Merging to `main` doesn't put anything in front of the
+  owner, and 7.5 rebuilds only the restore copy. As written, the owner sees no Phase 4 screen until
+  the phase is accepted.
+
+Fix:
+- Drop C6a's dependency on A1. A1 rebases, because the conflicts are additive fields.
+- Add a "live redeploy" step, dump first, after W1 (no migration) and after W2 (M1, rehearsed).
+  It's either covered by the go-ahead in R2-B3 or sent to the owner queue.
+
+The first screen with real value is rules (W2, wave 3). It needs M1 on the live instance.

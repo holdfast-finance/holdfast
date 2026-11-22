@@ -1,7 +1,7 @@
 # 0027. Transfer pairs need one owner, moves between owners are links, and "not a transfer" is stored
 
 - Status: Accepted
-- Date: 2026-11-21 (revised the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel
 
 ## Context
@@ -41,9 +41,13 @@ Review of the first draft added these points:
    - The link records the pair of legs. It's readable when both legs are detail-visible (ADR 0026
      point 5).
    - It has an `origin`:
-     - `job`: step 1 found a cross-owner edge that meets the same evidence bar as auto-pairing
-       (both legs hinted, or a mask hint), and marked both legs.
-     - `person`: someone accepted a cross-owner suggestion, marking the legs they may write.
+     - `job`: step 1 found a cross-owner edge and marked both legs. **For `links` (different
+       owners), each leg must carry a hint in its own description: transfer or payment wording, or
+       the other account's mask. Evidence on one leg never marks another person's leg** (Bulwark).
+       That's stricter than auto-pairing, where one leg's mask hint is enough.
+     - `person`: someone accepted a cross-owner suggestion, marking the legs they may write. A link
+       also becomes `person` when a person marks one of a `job` link's legs (a guarded single-column
+       update), so the job never undoes a person's mark. Only household-wide code deletes links.
    - Each leg's writers can unmark their own leg.
    - **Undoing a leg:**
      - A person who can see the link and unmarks a leg writes a `pair` rejection for the edge.
@@ -51,11 +55,19 @@ Review of the first draft added these points:
      - At the next refresh, a `job` link with an unmarked leg becomes a `pair` rejection, and the
        job undoes its own mark on the other leg.
 
-     The rule: **the job never keeps a mark of its own whose evidence was rejected or deleted, and
-     never changes a mark a person made.**
-   - A `person` link with one leg still unmarked is a half-accepted move. The person who can write
-     that leg is offered it (`other_side_marked`), and the review list hides a card only when every
-     leg the reader can write is already a transfer.
+     The rules:
+     - **The job never keeps a mark of its own whose evidence was rejected.**
+     - **A mark whose counterpart row was deleted is cleared, whoever made it,** for links and pairs
+       alike (point 9).
+     - **Otherwise the job never changes a mark a person made.**
+   - A `person` link with one leg still unmarked is a half-accepted move.
+     - Each person who can write that leg gets a **leg offer**: a row naming only their own leg,
+       created household-wide at step 0, because they may not be able to see the other leg or the
+       link.
+     - Accepting the offer marks their leg. Declining it becomes a `pair` rejection at the next step
+       0 (Gadfly R2-B4).
+     - The review list hides a suggestion card only when every leg the reader can write is already a
+       transfer.
    - **Residual, stated:** an *unhinted* move between two accounts that no single person can see
      both of (two private accounts) is never shown to anyone. Both legs stay counted until each
      owner marks their side. C7 reports how many of these exist.
@@ -66,6 +78,7 @@ Review of the first draft added these points:
      - a person unmarks a linked leg whose link they can see
      - step 0 finds a `job` link with an unmarked leg (`rejected_by_person_id` NULL, `job_run_id` in
        the audit)
+     - step 0 finds a declined leg offer (`rejected_by_person_id` = the person who declined)
    - `leg`: this row is never a transfer. It's written only when a person picks "Never a
      transfer". Plain unmarking of a single leg no longer writes one, because that made one wrong
      click permanent.
@@ -82,34 +95,57 @@ Review of the first draft added these points:
    `apply_transfer_link` raise unless `user_id` is set, or the session is household-wide **and**
    `job_run_id` is set. The audit detail of every automatic pair or link carries `job_run_id`.
 7. **Locks decide races.**
-   - Every writer of a rejection or a link first locks the transactions it names that the session
+   - **Owners first** (Bulwark): before `_lock_group`, every pair and link writer, manual and
+     automatic, takes `SELECT … FOR SHARE` on both legs' account rows, in id order. `_check_pair`
+     reads the owners from those locked rows. An ownership change takes `FOR UPDATE` on the account
+     first, so a pair can't commit against an owner change in flight.
+     - A person can lock only accounts they may write, because account RLS applies to row locks. A
+       pair needs both locked. A person's link locks their own account only, because a link is
+       valid between any owners.
+   - Every writer of a rejection or a link then locks the transactions it names that the session
      can write (`_lock_group`, id order).
    - The automatic writers lock both legs, then re-check under the lock: live, not pending, not
      already a transfer, and no `pair` rejection for the edge or `leg` rejection for either leg.
-   - Under READ COMMITTED the re-check sees any rejection that committed while the job waited.
+   - The re-check is a separate statement, run after the lock returns. Under READ COMMITTED it
+     sees any rejection that committed while the job waited.
    - A rejection that arrives later finds the legs already paired. It returns 409 and the person
      unmarks.
 8. **Ownership changes dissolve first** (A1).
-   - `PATCH /accounts/{id}` dissolves every pair touching the account in the same unit of work, and
+   - In Phase 4, `PATCH /accounts/{id}` can only make an account joint, or let the household owner
+     claim a joint account.
+     - Handing an account to another person needs a household-wide reassignment (ADR 0008), so it
+       waits for its own ADR.
+     - The household-owner check for a claim is service-only, and the database lets any member
+       claim. That's a stated residual.
+   - From C4c, the PATCH dissolves every pair touching the account in the same unit of work, and
      only then changes the owner. Each pair becomes two single legs, both still excluded, with no
-     rejection. Once links exist, the pair also becomes a `person` link, so the counterpart
-     survives.
+     rejection, plus a `person` link, so the counterpart survives. Before C4c no pair can exist, so
+     A1 refuses an owner change if one does.
    - A trigger, `account_guard_transfer_owner`, refuses an owner change while any row on the
      account still has a `transfer_group_id`. So the invariant holds in the database, not only in
      the service.
    - Claiming a joint account for one person needs the household-owner role, because it takes
      write access away from the other members.
 9. **Deleting or superseding a leg keeps its partner whole.**
-   - An `AFTER DELETE` trigger clears a deleted leg's partner (`is_transfer`, `transfer_group_id`).
-     That's safe because both legs have one owner. The trigger refuses the delete if the partner
-     survives the update. `unmark_transfer` accepts a group with one surviving leg.
-   - A link's leg column is set NULL when its row is deleted, and the next refresh undoes a `job`
-     mark on the survivor.
-   - Superseding (`LedgerWriter.supersede_transaction`, the only writer of `superseded_by_id`)
-     moves transfer state, a user category and splits to the successor. An `AFTER UPDATE` trigger
-     re-points rejections, links and recurring members to it in the same unit of work, even ones
-     the superseding session can't see. Supersession never leaves an account (0005), so
-     visibility doesn't change.
+   - **One rule for a deleted leg** (Gadfly R2-S1). The survivor is unpaired or unmarked, whoever
+     made the pair or the link, with no rejection, and the next refresh may pair it again. That's
+     the Phase 2 rule for `remove_external`.
+     - An `AFTER DELETE` trigger clears a deleted pair leg's partner. That's safe because both legs
+       have one owner. It refuses the delete if any row still has the group id afterwards.
+     - A link's leg column is set NULL when its row is deleted, and step 0 unmarks the survivor.
+     - `unmark_transfer` accepts a group with one surviving leg.
+   - **Superseding is the Phase 2 clause**, `LedgerWriter.supersede(loser_id, winner_id)`
+     (`PHASE-2-contract.md` §3.3). It moves transfer state, category, splits, tax, receipt and
+     notes. Phase 4 adds:
+     - step 7: rejections and links naming the loser are rewritten to the winner
+     - step 8: recurring members
+     - step 9: suggestions and leg offers are deleted
+
+     All in the writer's unit of work. Those steps can only move what the session sees. So outside
+     a household-wide session, `supersede` and its reverse refuse unless the row moved from was
+     inserted in the same unit of work (statement import's reverse matcher call), and P4's un-adopt
+     runs its reverse in a job. Supersession never leaves an account (0005), so visibility doesn't
+     change.
 
 ## Alternatives considered
 - **Cross-owner pairs with a shared group id:** the other member would see a pair they can't
@@ -123,14 +159,14 @@ Review of the first draft added these points:
 - **Rejections in the audit log:** append-only and household-visible, so they can't be queried per
   person under RLS, and the matcher would have to scan the log.
 - **Rejecting by amount and dates instead of row ids:** this survives re-imports that change ids.
-  But ids are stable here (fingerprints, external ids), supersession re-points them, and a rule
+  But ids are stable here (fingerprints, external ids), supersession rewrites them, and a rule
   that broad could hide real transfers.
 - **A `leg` rejection on every unmark (the first draft):** one wrong click would remove a row from
   matching for good.
 
 ## Consequences
-- Links add one table (`transfer_link`) and two code paths: step 0's cleanup, and the
-  `other_side_marked` suggestion.
+- Links add two tables (`transfer_link`, `transfer_leg_offer`) and step 0's cleanup and offer
+  code.
 - `TransactionOut.transfer_counterpart_id` shows the other leg of a pair or link only when the
   reader can see it. That's the "show the other side" link the first draft gave up for moves
   between owners.

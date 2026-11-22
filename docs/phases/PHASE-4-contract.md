@@ -6,8 +6,10 @@ story. A builder who must deviate says so in the PR body and asks Lattice for an
 amendment lands in this file before the code merges.
 
 Revision 2 (2026-11-21) answers Gadfly's two critiques (`docs/phases/reviews/PHASE-4-gadfly.md`,
-`PHASE-4-contract-gadfly.md`) and Bulwark's review of PR #59. Section 11 lists every item and
-where it was closed.
+`PHASE-4-contract-gadfly.md`) and Bulwark's review of PR #59. Revision 3 (the same day) answers
+Bulwark's second review and Gadfly's round 2 at `f651389`, and aligns with the Phase 2 contract's
+supersede clause and shared migration and file order (`PHASE-2-contract.md` §3.3). Section 11
+lists every item and where it was closed.
 
 **Problem.** Three engines are merged as pure code and nothing runs them:
 - `app/domain/rules.py` (C3a)
@@ -42,14 +44,17 @@ the run records its value in `docs/phases/PHASE-4.md` (R as counts and rates onl
      both legs `is_transfer` after one refresh, with no clicks. That includes joint checking paying
      a personally owned card, and one person's private account paying the other's.
    - (b) Every other planted transfer with both legs present, whose two legs at least one person
-     can see, is excluded or is offered to at least one person who can write a leg. The run also
-     reports the planted transfers no single person can see both legs of (an unhinted move between
-     two private accounts, the stated residual in ADR 0027).
+     can see, is excluded or is offered to at least one person who can write a leg. Once that
+     person accepts it, every other person who writes a leg still counted is offered that leg (a
+     leg offer, 5.3). The run also reports the planted transfers no single person can see both legs
+     of: unhinted moves between two private accounts, the stated residual in ADR 0027.
    - (c) No planted purchase is excluded.
-   - (d) The spend total over the holdout equals the truth's spend total exactly (`Decimal`
-     equality).
+   - (d) After the scripted review (7.4 step 6), the spend total over the holdout equals the
+     truth's spend total plus the planted residual moves from (b), exactly (`Decimal` equality).
+     The residual is planted in a fixed, reported amount, so a missed or a wrong exclusion anywhere
+     else breaks the equality. The same total is also reported after step 5, before any click.
    - For R, "planted" means the agent's hand list of card payments (section 7.5). (a) becomes ≥ 90%
-     with no click, and (b) stays at 100%.
+     with no click, (b) stays at 100%, and (d) is S only (R has no exact truth).
 3. **Recurring.**
    - Bill recovery ≥ 95%. A truth bill counts as recovered when one stored series, of either tier,
      holds at least 80% of its members.
@@ -81,14 +86,14 @@ the run records its value in `docs/phases/PHASE-4.md` (R as counts and rates onl
 | D5 | Rules vs split parents and transfer legs | Rules skip split parents. Transfer legs are categorised like any row, and a rule's category doesn't stop pairing. This deviates from PLAN 8.2's "first hit wins" (ADR 0029, Consequences) | here |
 | D6 | Where rules run | Inline at ingest, with the matcher in a worker thread. Retroactive preview and apply run in the author's request session with a preview token | ADR 0029 |
 | D7 | Transfer pairs | A group (`transfer_group_id`) only joins two accounts with the same owner. A move between owners is two single legs joined by a `transfer_link`. Step 1 auto-pairs and auto-links on the same evidence bar. Pairing never changes categories | ADR 0027 |
-| D8 | "Not a transfer" | `transfer_rejection` (`pair` and `leg`). Unmarking a pair, or a single leg with a visible link, writes a `pair` rejection. Only "Never a transfer" writes a `leg` rejection | ADR 0027 |
-| D9 | Suggestions | Computed per person in that person's session, stored with `person_id`. Step 2 never writes pairs: a confident edge in a person's view becomes a `likely` suggestion | ADR 0026 |
+| D8 | "Not a transfer" | `transfer_rejection` (`pair` and `leg`). Unmarking a pair, or a single leg with a visible link, writes a `pair` rejection. Declining a leg offer becomes one at the next refresh. Only "Never a transfer" writes a `leg` rejection | ADR 0027 |
+| D9 | Suggestions and leg offers | Computed per person in that person's session, stored with `person_id`. Step 2 never writes pairs: a confident edge in a person's view becomes a `likely` suggestion. The second person's half of an accepted move is a leg offer that names only their own leg, created household-wide at step 0 | ADR 0026 |
 | D10 | Recurring identity | Stable ids, reconciled by member overlap under a row lock. `confirmed` and `dismissed` stick. A label implies `confirmed`. Status is computed at read time. Two tiers, `bill` and `possible` | ADR 0028 |
 | D11 | Jobs | One `ledger.refresh` job, coalesced per household into 2-minute buckets: link cleanup and auto-pair, then per-person suggestions, then recurring in a `forkserver` process pool | ADR 0029 |
 | D12 | Step-up re-auth | None of the Phase 4 endpoints (section 5.6) | here |
 | D13 | `merchant_key` | Pure, versioned `app/domain/merchant.py`, computed when read, not stored. Rules store the version they were written against | here |
-| D14 | Account ownership | `PATCH /accounts/{id}` changes owner and visibility (A1). Pairs on the account are dissolved into single legs in the same unit of work. A DB trigger refuses an owner change while pairs remain. Claiming a joint account needs the household-owner role | ADR 0027 |
-| D15 | Deleted and superseded legs | A deleted leg's partner is unmarked by trigger. Superseding moves transfer state, user category and splits in `LedgerWriter`. A trigger re-points rejections, links and recurring members to the successor | ADR 0027, 0028 |
+| D14 | Account ownership | `PATCH /accounts/{id}` (A1) makes an account joint, lets the household owner claim a joint account, and changes visibility. Handing an account to another person isn't in Phase 4 (ADR 0008: reassignment is household-wide). A1 refuses an owner change while the account has pairs. From C4c it dissolves them in the same unit of work, and a DB trigger refuses an owner change while pairs remain. The joint-claim role check lives in the service only | ADR 0027 |
+| D15 | Deleted and superseded legs | Supersession is the Phase 2 clause, `LedgerWriter.supersede(loser_id, winner_id)` (`PHASE-2-contract.md` §3.3, built by P2a). Phase 4 adds its steps 7 (C4c), 8 (C5b) and 9 (C4d). A deleted pair leg's partner is unpaired, whoever made the pair | ADR 0027, 0028 |
 
 ---
 
@@ -124,7 +129,8 @@ class CompiledPattern(Protocol):
     def search(self, text: str) -> bool: ...
 MAX_PATTERN_LENGTH = 128
 MAX_SUBJECT_LENGTH = 256          # ADR 0024 point 5 (was 1,024; measured, see the ADR)
-PROBE_LIMIT_MICROSECONDS = 10     # ADR 0024 point 4b
+PROBE_LIMIT_MICROSECONDS = 10     # ADR 0024 point 4b, per probe family
+MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
 def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationError
 ```
 - **C3c deletes the C3a `re` validator** (`_REGEX_TOKEN`, `_compile_safe_regex`, the `re`
@@ -166,8 +172,10 @@ def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationEr
 - `preview` skips `is_split` rows and rows whose source a rule can't replace (unchanged). A row
   whose category already matches but whose source differs (`plaid` to `rule`) **is** a change. It
   gets source `rule` and `category_rule_id` (C3a semantics).
-- `RuleConditions.account_ids` stays in the dataclass, but the codec and the API never produce it
-  in Phase 4 (D2). The same goes for `RuleAction.mark_transfer_candidate` (D4).
+- **C3c removes `RuleConditions.account_ids`** (Bulwark): no Phase 4 path may filter by it, and a
+  field nobody can set is a field somebody will set by accident. Per-rule account lists, if they
+  ever come, return with their own table (section 10). `RuleAction.mark_transfer_candidate` stays
+  in the dataclass, but the codec and the API never produce it (D4).
 - `DescriptionCondition.value` is `field(repr=False)`, so a rule's text never reaches a log through
   `repr` (Bulwark 12). Regex mode calls `rule_regex.compile_pattern`.
 - New:
@@ -207,7 +215,7 @@ def match_transfers(candidates, *, rejected_pairs: frozenset[tuple[UUID, UUID]] 
                     rejected_legs: frozenset[UUID] = frozenset()) -> MatchResult
 @dataclass(frozen=True) class MatchResult:
     pairs: tuple[ProposedPair, ...]       # same owner (both joint, or one person), auto evidence bar met
-    links: tuple[ProposedPair, ...]       # different owners (joint vs owned counts), same evidence bar
+    links: tuple[ProposedPair, ...]       # different owners (joint vs owned counts), a hint on each leg
     suggested: tuple[SuggestedPair, ...]
     ambiguous: tuple[AmbiguousLeg, ...]
 REASON_AMBIGUOUS = "ambiguous"
@@ -221,8 +229,12 @@ def group_edges(edges: Iterable[ReviewEdge]) -> tuple[tuple[ReviewEdge, ...], ..
   leaves the pool entirely, so it isn't even a competitor.
 - **Owners.** `owner_person_id` is compared as a value, and `None` (joint) is a value. Joint versus
   owned therefore differs, which fixes the merged code's `both non-null` test.
-  - An edge that meets the auto evidence bar goes to `pairs` when the owners are equal, and to
-    `links` when they differ.
+  - An edge that meets the auto evidence bar goes to `pairs` when the owners are equal.
+  - **For `links` (different owners), each leg must carry a hint in its own description: transfer
+    or payment wording, or the other account's mask. Evidence on one leg never marks another
+    person's leg** (Bulwark). In the merged code's terms, a link needs `n_out > 0 and n_in > 0`. The
+    one-sided mask exception that lets a pair through doesn't apply. A cross-owner edge that meets
+    the pair bar but not this one is a `one_sided_hint` suggestion.
   - `_suggest_reason` no longer returns `different_owners`. An unhinted cross-owner edge gets its
     hint reason (`no_hint`, `one_sided_hint`, `refund_candidate`), and a protected one gets
     `user_treated_as_spending`.
@@ -261,6 +273,8 @@ def detected_from(series: RecurringSeries, posted: Mapping[UUID, date]) -> Detec
     id: UUID; account_id: UUID; merchant_key: str; direction: Direction; cadence: Cadence
     last_date: date; lapsed: bool; user_state: UserState; label: str | None
     member_ids: frozenset[UUID]
+    newest_member_id: UUID | None     # the live member with the latest posted date (R2-S2)
+    all_members_transfers: bool       # every live member is is_transfer (Gadfly round 2)
 @dataclass(frozen=True) class PlannedSeries:
     stored_id: UUID | None            # None: create
     detected: DetectedSeries | None   # None: kept as is (confirmed/dismissed, not re-detected)
@@ -284,12 +298,24 @@ def detect_rows(rows: Sequence[RowTuple]) -> tuple[DetectedSeries, ...]   # the 
   called with the stored value, so the tier is the same before and after a round trip.
 - `detect_rows` is the only function the C5b child process runs. It takes primitive tuples (ids,
   account ids, dates, amounts as decimal strings, merchant keys) and imports only `app.domain`.
-- `reconcile_series` follows ADR 0028 points 1, 2, 5 and 6, including the matching tie rule and the takeover
-  rule (S1). Property tests check the invariants:
+- `reconcile_series` follows ADR 0028 points 1, 2, 5 and 6. That includes:
+  - the matching tie rule and the takeover rule (S1)
+  - **the newest-member rule** (Gadfly R2-S2): when a stored series' members split across
+    detections, its id and state follow the detection that holds `newest_member_id`, not the one
+    with the largest overlap. So a bill whose recent rows were superseded by Plaid rows under a new
+    merchant key keeps its confirmation on the live schedule.
+  - **the all-transfers rule:** a stored series with `all_members_transfers` is deleted, whatever
+    its state, because its rows turned out to be transfers.
+
+  Property tests check the invariants:
   - member sets are pairwise disjoint
   - every detected series appears in exactly one upsert
-  - no stored `confirmed`, `dismissed` or labelled id is ever in `deletes`
+  - no stored `confirmed`, `dismissed` or labelled id is ever in `deletes`, unless
+    `all_members_transfers`
   - the result doesn't depend on input order
+
+  A table test: supersede the newest 12 of 30 members under a new key. The confirmed id follows
+  the 12.
 - `series_status`:
   - tolerance: 2 days (weekly, biweekly), 3 days (others)
   - `active` while `as_of <= next + tol`
@@ -301,10 +327,21 @@ def detect_rows(rows: Sequence[RowTuple]) -> tuple[DetectedSeries, ...]   # the 
 
 ## 3. Schema: one ordered migration plan
 
-One migration per slice. Keel hands out the migration token in this order: **M1 (C3b), then M3
-(C4c), then M4 (C5b)**. M2 (I1d) has left this plan (Gadfly S4): it's an import follow-up, and Tide
-takes the token whenever it's free. The names M1, M3 and M4 stay as they were, so review
-references still hold.
+One migration per slice. The migration token order is shared with the Phase 2 contract
+(`PHASE-2-contract.md` §3.3) and fixed:
+
+**`0010_list_household_ids` (#31) → M1 `<n>_rules` (C3b) → `<n>_connector_link` (P4a, Phase 2)
+→ M2 `<n>_import_run_reason_final` (I1d, Tide) → M3 `<n>_transfer_corrections` (C4c) → M4
+`<n>_recurring_series` (C5b).**
+
+- A builder may write a migration before holding the token, but numbers it and rebases only once
+  they hold it.
+- If the next holder has no open PR one window after the token frees, the following slice may take
+  it once. Keel notes the skip in SPRINTS.
+- Other shared files have fixed orders too:
+  - `backend/app/services/ledger_service.py`: P2a → C3b → C4c → C5b
+  - `backend/app/services/statement_import.py`: P4a → C3e
+  - inline rules in `IngestService` (`services/ingest.py`): P2b, then C3e
 
 This plan fixes an order, not numbers:
 - The builder who holds the token numbers the migration at build time from the Alembic head on
@@ -315,9 +352,10 @@ This plan fixes an order, not numbers:
 
 | Order | Revision slug | Slice | Needs |
 |---|---|---|---|
-| M1 | `<n>_rules` | C3b | head at `0009_import_run_review_reason` or later |
-| M3 | `<n>_transfer_corrections` | C4c | M1 (helpers) |
-| M4 | `<n>_recurring_series` | C5b | M1 (helpers), M3 (it replaces M3's re-point function) |
+| M1 | `<n>_rules` | C3b | `0010_list_household_ids` (#31); P2a merged (shared `ledger_service.py`) |
+| M2 | `<n>_import_run_reason_final` | I1d (Tide) | P4a's migration |
+| M3 | `<n>_transfer_corrections` | C4c | M1 (helpers), M2 (token order) |
+| M4 | `<n>_recurring_series` | C5b | M1 (helpers), M3 (token order) |
 
 ### 3.0 Conventions (every Phase 4 migration)
 - The Phase 1 contract's conventions hold:
@@ -339,7 +377,7 @@ This plan fixes an order, not numbers:
   - Every relation qualified (`public."transaction"`, `public.account`, `public.rule`).
   - A trigger that doesn't find the account, rule or transaction row it needs **raises**, never
     passes.
-  - Where a trigger must see rows the caller can't (counts and the re-point in 3.3), it follows the
+  - Where a trigger must see rows the caller can't (the counts in 3.1 and 3.3), it follows the
     0002/0005 pattern. It saves `app.household_wide`, sets it `on` for its own statements only, and
     restores it before returning. Those statements are fixed and touch only rows the trigger's
     `NEW`/`OLD` names. Messages carry ids only.
@@ -421,7 +459,12 @@ Triggers:
 **Visibility rule.** A person sees a rule if they wrote it or it's `any`/`joint`-scoped. Another
 person's `own` rule is never visible.
 
-Section 3.2 (M2) is gone: I1d left this plan.
+### 3.2 M2 `<n>_import_run_reason_final` (I1d, Tide; PR #55 follow-up)
+`CREATE OR REPLACE FUNCTION import_run_guard()` with one more frozen column: once
+`OLD.reconcile_status <> 'pending'`, `NEW.review_reason IS DISTINCT FROM OLD.review_reason` raises
+`23514` ("reconciliation of import run % is final"). The downgrade restores the 0005 body
+verbatim. RLS is unchanged. Tests: set at the pending → needs_review update (allowed), changed
+after (rejected), on accepted (rejected). It's listed here only for the token order. Tide owns it.
 
 ### 3.3 M3 `<n>_transfer_corrections` (C4c)
 **`transfer_rejection`**
@@ -436,11 +479,12 @@ Section 3.2 (M2) is gone: I1d left this plan.
 - CHECKs: `(kind = 'leg') = (other_id IS NULL)`, both `other` columns null together, `other_id <>
   transaction_id`.
 - `UNIQUE NULLS NOT DISTINCT (household_id, transaction_id, other_id)`; index on `other_id`.
-- Read: `app_account_details_visible(transaction_account_id) AND (other_account_id IS NULL OR
-  app_account_details_visible(other_account_id))`.
-- Insert/delete: the read predicate AND `(app_account_writable(transaction_account_id) OR
-  (other_account_id IS NOT NULL AND app_account_writable(other_account_id)))`.
-- No UPDATE grant. The re-point trigger deletes and re-inserts.
+- SELECT USING: `app_account_details_visible(transaction_account_id) AND (other_account_id IS NULL
+  OR app_account_details_visible(other_account_id))`.
+- INSERT WITH CHECK and DELETE USING: the read predicate AND
+  `(app_account_writable(transaction_account_id) OR (other_account_id IS NOT NULL AND
+  app_account_writable(other_account_id)))`.
+- No UPDATE grant. Supersede step 7 (C4c) deletes and re-inserts.
 
 **`transfer_suggestion`**
 | Column | Type | Notes |
@@ -449,17 +493,17 @@ Section 3.2 (M2) is gone: I1d left this plan.
 | `person_id` | uuid NOT NULL | composite FK → `person` CASCADE |
 | `outflow_id`, `outflow_account_id` | uuid NOT NULL | the two leg FKs, CASCADE |
 | `inflow_id`, `inflow_account_id` | uuid NOT NULL | the same |
-| `reason` | text NOT NULL | CHECK IN ('no_hint','one_sided_hint','refund_candidate','user_treated_as_spending','ambiguous','likely','other_side_marked') |
+| `reason` | text NOT NULL | CHECK IN ('no_hint','one_sided_hint','refund_candidate','user_treated_as_spending','ambiguous','likely') |
 | `days_apart` | smallint NOT NULL | CHECK 0–5 |
 | `hints` | smallint NOT NULL | CHECK 0–6 |
 | `job_run_id` | uuid NULL | composite FK → `job_run(id, household_id)` ON DELETE SET NULL (job_run_id) |
 
 - CHECK `outflow_account_id <> inflow_account_id`; `UNIQUE (person_id, outflow_id, inflow_id)`.
 - Indexes: `(household_id, person_id)`, `(outflow_id)`, `(inflow_id)`.
-- Read: `(person_id = app_person_id() OR app_household_wide()) AND
+- SELECT USING: `(person_id = app_person_id() OR app_household_wide()) AND
   app_account_details_visible(outflow_account_id) AND
   app_account_details_visible(inflow_account_id)`.
-- Insert/delete: the same predicate. No UPDATE grant.
+- INSERT WITH CHECK and DELETE USING: the same predicate. No UPDATE grant.
 
 **`transfer_link`** (a move between owners, ADR 0027 point 2)
 | Column | Type | Notes |
@@ -467,45 +511,68 @@ Section 3.2 (M2) is gone: I1d left this plan.
 | `id`, `household_id`, `created_at` | | standard |
 | `outflow_id`, `outflow_account_id` | uuid; `outflow_id` NULL after its row is deleted | FK → `transaction(id, account_id)` ON DELETE SET NULL (outflow_id); `(outflow_account_id, household_id)` → `account` CASCADE |
 | `inflow_id`, `inflow_account_id` | the same | the same |
-| `origin` | text NOT NULL | CHECK IN ('job','person'). `job`: step 1 marked both legs. `person`: a person accepted the edge, or A1 dissolved a pair. Never derived from `job_run_id`, which retention may null |
+| `origin` | text NOT NULL | CHECK IN ('job','person'). `job`: step 1 marked both legs. `person`: a person accepted the edge, a person marked a leg of a `job` link, or A1 dissolved a pair. Never derived from `job_run_id`, which retention may null |
 | `job_run_id` | uuid NULL | composite FK → `job_run` ON DELETE SET NULL (job_run_id) |
 
 - CHECK `outflow_account_id <> inflow_account_id`.
 - `UNIQUE (outflow_id)` and `UNIQUE (inflow_id)`. NULLs are distinct, and a leg is in at most one
   link.
-- Read: both accounts detail-visible (ADR 0026 point 2).
-- Insert/delete: the read predicate AND either account writable (household-wide passes both).
-- No UPDATE grant.
+- SELECT USING: both accounts detail-visible (ADR 0026 point 2).
+- INSERT WITH CHECK: the read predicate AND either account writable (household-wide passes both).
+- **DELETE USING: `app_household_wide()` only** (Bulwark). Only step 0 and supersede step 7 remove
+  links.
+- UPDATE USING and WITH CHECK: the read predicate AND either account writable. The guard trigger
+  `transfer_link_guard` (BEFORE UPDATE) allows a non-household-wide session exactly one change,
+  `origin` from `job` to `person`, and raises `42501` on anything else.
+  - A person who marks a leg of a `job` link converts the link to `person` in the same unit of
+    work, so step 0(b) never unmarks a person's mark.
+  - Bulwark's note said "delete and insert". That's impossible for a person once DELETE is
+    household-wide only, so this single guarded column change is used instead.
+
+**`transfer_leg_offer`** (the second person's half of an accepted move, Gadfly R2-B4)
+| Column | Type | Notes |
+|---|---|---|
+| `id`, `household_id`, `created_at` | | standard |
+| `person_id` | uuid NOT NULL | composite FK → `person` CASCADE |
+| `transaction_id`, `transaction_account_id` | uuid NOT NULL | the two leg FKs, CASCADE. The reader's own leg, the only leg named |
+| `state` | text NOT NULL | CHECK IN ('open','declined') |
+| `job_run_id` | uuid NULL | composite FK → `job_run` ON DELETE SET NULL (job_run_id) |
+
+- `UNIQUE (person_id, transaction_id)`.
+- SELECT USING, INSERT WITH CHECK and DELETE USING: `(person_id = app_person_id() OR
+  app_household_wide()) AND app_account_writable(transaction_account_id)`. No UPDATE grant: a
+  decline deletes the `open` row and inserts a `declined` one.
+- The row never names the other leg, its account or the link. The link is found by the leg
+  (`transfer_link` has `UNIQUE (outflow_id)` and `UNIQUE (inflow_id)`), household-wide, by step 0.
 
 **Triggers** (3.0 rules apply to each):
 - `account_guard_transfer_owner`, BEFORE UPDATE OF `owner_person_id` ON `account` (Bulwark 6):
   - When the owner changes, it raises `23514` ("account % has transfer pairs: dissolve them
     first") while any transaction on the account, live or superseded, has a `transfer_group_id`.
   - The existence check runs with `app.household_wide` on.
-  - A1's service dissolves those pairs first in the same unit of work (5.0), so the trigger is the
-    backstop, not the mechanism.
+  - From C4c on, A1's service dissolves those pairs first in the same unit of work (5.0), so the
+    trigger is the backstop, not the mechanism.
 - `transaction_dissolve_orphan`, AFTER DELETE ON `transaction` FOR EACH ROW WHEN
   (`OLD.transfer_group_id IS NOT NULL`):
   - Clears `is_transfer` and `transfer_group_id` on every remaining row of that group, under the
     caller's RLS. This is safe because both legs have one owner (ADR 0027 point 1).
-  - It then checks with `app.household_wide` on. If a row of the group still exists, it raises
-    `42501`: the delete is refused rather than leaving a partner the caller couldn't clear.
-  - Gadfly B3: account cascades, a future "re-import this document" or an import undo.
-- `transaction_supersede_repoint`, AFTER UPDATE OF `superseded_by_id` ON `transaction`, when it
-  changes from NULL to a value:
-  - With `app.household_wide` on, it moves every `transfer_rejection` and `transfer_link` reference
-    to `OLD.id` onto `NEW.superseded_by_id`: `INSERT … SELECT … ON CONFLICT DO NOTHING`, then
-    `DELETE` the old rows.
-  - It deletes `transfer_suggestion` rows that reference `OLD.id`. The next refresh recomputes
-    them.
-  - The account id doesn't change (the 0005 FK keeps supersession inside one account), so
-    visibility of the moved rows doesn't change either.
-  - This is how Bulwark 10's "in the same unit of work" holds even for rejections the superseding
-    session can't see.
+  - It then checks with `app.household_wide` on. **If any row still has `transfer_group_id =
+    OLD.transfer_group_id`**, it raises `42501`: the delete is refused rather than leaving a
+    partner the caller couldn't clear.
+  - It covers deletes outside the writer: account cascades, a future "re-import this document", an
+    import undo. The writer's own path (`remove_external`, PHASE-2 §3.3) unpairs the partner first,
+    and then the trigger finds nothing to do.
+  - **One rule for every lost leg** (Gadfly R2-S1). The survivor of a deleted pair leg is unpaired,
+    whoever made the pair. That's the Phase 2 rule: no rejection, and the next refresh may pair it
+    again. Step 0(a) applies the same rule to links of either origin.
+- There's no supersession trigger. Supersession is the Phase 2 clause, and its steps 7 and 9 move
+  or delete these rows inside the writer's unit of work (4.4).
 
 **Visibility rule.**
 - A suggestion is visible only to the person it was computed for, and only while both legs are
   visible to them.
+- A leg offer is visible only to its person, and only while they can write its leg. It names
+  nothing else.
 - A rejection or a link is visible to anyone who can see both legs.
 
 ### 3.4 M4 `<n>_recurring_series` (C5b)
@@ -546,9 +613,10 @@ Section 3.2 (M2) is gone: I1d left this plan.
   So a member is always on its series' account.
 - Read: `app_account_details_visible(account_id)`. Write: `app_household_wide()` only.
 
-**Re-point update.** M4 replaces `transaction_supersede_repoint` so it also moves `recurring_member`
-rows from `OLD.id` to the successor. Members re-point instead of vanishing, so a series whose rows
-are all superseded keeps its id and state (Gadfly B3). The downgrade restores M3's body verbatim.
+**Supersession.** Supersede step 8 (C5b, PHASE-2 §3.3) moves the loser's `recurring_member` rows
+to the winner, or deletes them when the winner is already in that series. Members move instead of
+vanishing, so a series whose rows are all superseded keeps its id and state (Gadfly B3). There's
+no trigger.
 
 **Visibility rule.** A series and its members are visible exactly when the series account's
 transactions are. Summary-only viewers see none.
@@ -570,45 +638,56 @@ transactions are. Summary-only viewers see none.
 
 | Work | Where | Session | Writes through | Idempotence |
 |---|---|---|---|---|
-| Account owner and visibility (A1) | request | person | `AccountService.change_ownership` → `LedgerWriter.dissolve_account_pairs` + the account UPDATE, in one unit of work | a repeat with the same values is a no-op |
+| Account owner and visibility (A1) | request | person | `AccountService.change_ownership`: account `FOR UPDATE`, then a 409 on pairs (before C4c) or `LedgerWriter.dissolve_account_pairs` (from C4c), then the account UPDATE, in one unit of work | a repeat with the same values is a no-op |
 | Rule CRUD | request | author, person-scoped | `RuleService` (rules aren't ledger fields) | n/a |
 | Rules at ingest | statement import request today; sync job later | the importer's session | the matcher runs in `anyio.to_thread.run_sync`, then `NewTransaction(category_id, category_source='rule', category_rule_id)` → `LedgerWriter.insert_transaction` | a re-import inserts nothing (fingerprints) |
 | Rule preview | request, `anyio.to_thread` | author | none | pure |
 | Rule apply (retroactive) | request | author | `LedgerWriter.apply_rule_bulk` (one UPDATE, precedence in WHERE, exact-count check) | preview token; a second apply changes 0 rows |
 | Set / release category, mark / unmark, manual pair, accept / reject suggestion | request | person | `LedgerWriter`, plus `transfer_rejection` / `transfer_link` in the same unit of work | each call is a state transition; a repeat is a 409 or a no-op |
-| Supersede a row (I4 and later) | importer or sync | importer's | `LedgerWriter.supersede_transaction`, plus the M3/M4 re-point trigger | supersession is one-to-one (0005) |
+| Supersede a row (P2a and P4a callers) | sync job; statement import's reverse matcher call | household-wide; the uploader's for a fresh loser | `LedgerWriter.supersede` (PHASE-2 §3.3) with Phase 4's steps 1, 7, 8 and 9 | supersession is one-to-one (0005) |
 | Link cleanup, auto-pair, auto-link | `ledger.refresh` steps 0–1 | household-wide | `pair_transfers` → `apply_transfer_pair` / `apply_transfer_link` with `job_run_id` | paired or linked rows leave the pool |
 | Transfer suggestions | `ledger.refresh` step 2 | one `scoped_session` per person with a login | `refresh_person_suggestions`: delete and insert that person's rows | replace per person |
 | Recurring detection | `ledger.refresh` step 3 | household-wide | `detect_rows` in the `forkserver` pool, then `reconcile_series` under `FOR UPDATE` | reconcile is a pure function of rows + stored series |
 
 ### 4.1 `ledger.refresh` steps (ADR 0029 point 3)
 - **Steps 0–1** run in one household-wide session from `ctx.factory`, committed together.
-  - Step 0, link cleanup. The rule: the job never leaves a mark of its own whose evidence is gone
-    or rejected, and it never changes a mark a person made.
-    - (a) A link with a NULL leg (its row was deleted): if `origin = 'job'`, unmark the surviving
-      leg when it's still `is_transfer`. Delete the link.
+  - Step 0, link cleanup. The rules:
+    - A mark whose counterpart row is gone is cleared, whoever made it. That's the same rule as a
+      pair (3.3).
+    - The job never keeps a mark of its own whose evidence was rejected.
+    - The job never changes a mark a person made for any other reason.
+
+    The cases:
+    - (a) A link with a NULL leg (its row was deleted): unmark the surviving leg when it's still
+      `is_transfer`, then delete the link. Either origin.
     - (b) A `job` link where one leg is no longer `is_transfer` (a person unmarked it, possibly
       without seeing the link): write the `pair` rejection for the edge if it's missing
       (`rejected_by_person_id` NULL), unmark the other leg, and delete the link.
     - (c) Any link whose edge has a `pair` rejection: delete it. For a `job` link, also unmark any
       leg still marked.
-    - A `person` link with one leg unmarked and no rejection stays. It's a half-accepted move, and
-      step 2 offers the unmarked side (`other_side_marked`).
+    - (d) A `declined` leg offer: write the `pair` rejection for its link's edge (with
+      `rejected_by_person_id` set to the person who declined), delete the link, and delete that
+      leg's offers. The other leg stays as its writer left it.
+    - (e) A `person` link with one leg unmarked and no rejection stays: it's a half-accepted move.
+      For each person with a login who can write the unmarked leg, keep or insert an `open` leg
+      offer, unless they declined it (Gadfly R2-B4).
+      - That means the leg's owner, or every person for a joint account.
+      - This runs here, household-wide, because the person can't see the link.
+      - `open` offers whose leg is now a transfer, or whose link is gone, are deleted.
     - Audits carry `job_run_id`.
   - Step 1 runs `pair_transfers` over all live history and writes `pairs` (same owner) and `links`
-    (different owners).
+    (different owners, a hint on each leg, 2.4).
 - **Step 2:** one `scoped_session(household, person)` per person with a login, each its own
   transaction:
   - `transfer_pairing.load_candidates` (a read-only loader that builds no writer, so it works in a
     session without a user)
   - `match_transfers` with that person's visible rejections
   - `review_edges`
-  - plus one `other_side_marked` edge for each link visible to the person where a leg they can
-    write isn't a transfer and the other leg is (first-pass B1: the second person's half of a move
-    the first person accepted)
   - replace that person's `transfer_suggestion` rows
 
-  It never writes a pair or a link (Bulwark 8).
+  It never writes a pair, a link or a leg offer (Bulwark 8).
+  - An offer row (step 0(e)) names only the person's own leg. They learn nothing about the other
+    leg beyond "another household member marked the other side" (ADR 0026 point 4(b)).
 - **Step 3** (from C5b) runs in the runner's `ctx.session`, so it commits with the success mark:
   - Load live, posted, non-transfer rows with a non-NULL `merchant_key`, plus the stored series.
   - `detect_rows` in the pool, with a 120 s timeout.
@@ -627,9 +706,21 @@ transactions are. Summary-only viewers see none.
   - each leg is live, not pending, not `is_transfer` and has no group
   - `NOT EXISTS` a `pair` rejection for the edge, or a `leg` rejection for either leg
 
-  Postgres READ COMMITTED gives the re-check a fresh snapshot once the lock is granted, so a
-  rejection committed while the job waited is seen. A rejection that commits later found the legs
-  already paired, and its writer returns 409, because it re-checks under its own lock.
+  The re-check is a separate statement, run after `_lock_group` returns. Postgres READ COMMITTED
+  gives each new statement a fresh snapshot, so a rejection that committed while the job waited for
+  the lock is seen (Gadfly round 2). A rejection that commits later finds the legs already paired,
+  and its writer returns 409, because it re-checks under its own lock.
+- **Owner locks before leg locks** (Bulwark):
+  - Before `_lock_group`, every pair and link writer, manual and automatic, takes `SELECT … FOR
+    SHARE` on both legs' account rows, in id order.
+  - `_check_pair` reads the owners from those locked rows.
+  - A1 takes `FOR UPDATE` on the account first, so a pair can't commit against an owner change in
+    flight.
+  - A person's session can lock only accounts it may write: account RLS applies its UPDATE policy
+    to row locks. A pair needs both rows locked, or it raises not-found. A person's link may lock
+    just their own account, because a link is valid between any owners.
+  - Lock order everywhere is accounts, then transactions, so these locks can't deadlock against
+    A1's.
 - **Step 3 never overwrites a person's choice.** It reconciles against series locked `FOR UPDATE`
   after detection, not against the snapshot taken before it.
   - Deletes carry `WHERE user_state = 'auto' AND label IS NULL`.
@@ -655,6 +746,8 @@ transactions are. Summary-only viewers see none.
     no tail check is needed.
   - A first load of 125 statements becomes one run per 2 minutes of uploading, not 125 runs.
   - A test fixes the clock and asserts enqueue time ≤ bucket end < run start.
+  - The healing re-push in `services.jobs.enqueue` (a duplicate while `queued`) carries the same
+    `_defer_until`. Every caller passes it, and the bucket fixes it (Gadfly R2-S5).
 - **"Check again"** (`POST /ledger/refresh`) enqueues `refresh:manual:<UTC minute, as
   %Y%m%dT%H%MZ>`, for example `refresh:manual:20261121T1005Z`, with no defer. Both formats match
   `IDEMPOTENCY_KEY_PATTERN` (`^[A-Za-z0-9][A-Za-z0-9:._-]*$`), which an ISO time with `+00:00`
@@ -683,22 +776,46 @@ transactions are. Summary-only viewers see none.
     link into a `pair` rejection.
   - "Never a transfer" writes a `leg` rejection.
   - A manual pair or a mark lifts the matching rejection.
-- **Supersession** (`LedgerWriter.supersede_transaction(old_id, new_id)`, the only writer of
-  `superseded_by_id`, added to the single-writer lint), one unit of work:
-  - It locks both rows and the old row's group. The new row must be live and fresh: not a transfer,
-    no splits, source not `user`.
-  - It moves to the new row:
-    - a user category (`category_id`, `category_source = 'user'`)
-    - the transfer state: `is_transfer`, and `transfer_group_id` when the amounts are equal.
-      Otherwise the pair dissolves into two single legs, with no rejection.
-    - the splits, when the amounts are equal. Otherwise it raises `LedgerRuleError("split row
-      changed amount")`, and the caller flags the run `needs_review`.
-  - It clears transfer state on the old row, then sets `superseded_by_id`. The M3/M4 trigger
-    re-points rejections, links and recurring members and deletes stale suggestions.
-  - Audit `ledger.superseded {new_id}`.
-  - Phase 4 has no caller. I4 ("Plaid wins") must use this method.
-- **Deletion:** `transaction_dissolve_orphan` clears a deleted leg's partner (3.3). `unmark_transfer`
-  also accepts a group with one surviving leg (Gadfly B3).
+  - Marking a leg of a `job` link converts the link to `person` (3.3).
+  - Accepting a leg offer marks the person's leg single, which completes the link, and deletes the
+    offer. Declining it leaves the leg as it is and records `declined`. Step 0(d) turns that into
+    a `pair` rejection.
+- **Supersession is the Phase 2 clause**, `LedgerWriter.supersede(loser_id, winner_id)` and its
+  reverse (`PHASE-2-contract.md` §3.3; P2a builds steps 1–6 and 10).
+  - Preconditions, as defined there:
+    - same account
+    - the loser has `source = 'import'`
+    - the winner is from a production connection
+    - both rows are live and not pending
+    - equal amounts
+    - when both are transfer legs, the same group. Otherwise `SupersedeConflict`.
+  - Phase 4 adds these steps, each in the named slice and inside the same unit of work:
+    - **C3b, step 1:** `category_rule_id` travels with the category.
+    - **C4c, step 7:** rows of `transfer_rejection` *and `transfer_link`* that name the loser are
+      rewritten to the winner (delete and re-insert, since neither table has an UPDATE grant). A
+      duplicate is deleted. The reverse moves them back. Test: a rejected pair isn't re-paired on
+      the winner, and a link survives supersession of either leg.
+    - **C4d, step 9:** `transfer_suggestion` and `transfer_leg_offer` rows that name the loser are
+      deleted. The next refresh recomputes them.
+    - **C5b, step 8:** `recurring_member` rows move to the winner (3.4). Test: a dismissed series
+      stays dismissed after its members are superseded.
+  - **Session rule** (Bulwark 10, re-argued). Steps 7–9 run in the writer's session, so that session
+    must see every row they move.
+    - The sync job (`IngestService`, PHASE-2 §3.4) and `remove_external` are household-wide, so
+      they do.
+    - Statement import's reverse matcher call runs as the uploader. There, the loser is the row
+      inserted in the same unit of work, so no rejection, link, offer, suggestion or member can
+      name it yet.
+    - From C4c on, `supersede` and its reverse raise `LedgerRuleError` in a session that isn't
+      household-wide, unless the row they move rows *from* was inserted by this writer instance.
+      So **P4's un-adopt must run its reverse in a household-wide job**, not in the request.
+  - Revision 2's design, a re-point trigger with an elevated `app.household_wide`, isn't built.
+- **Deletion:**
+  - `transaction_dissolve_orphan` unpairs a deleted leg's partner (3.3).
+  - `remove_external` does the same through the writer first (PHASE-2 §3.3: no rejection; the next
+    refresh may pair it again).
+  - `unmark_transfer` also accepts a group with one surviving leg (Gadfly B3).
+  - Step 0(a) gives links the same rule.
 - Recurring: detection ignores `is_transfer` rows, and user categories don't matter. `confirmed`
   and `dismissed` stick. Setting a label sets `confirmed` unless the series is `dismissed` (Gadfly
   S1).
@@ -708,6 +825,15 @@ transactions are. Summary-only viewers see none.
   - Editing a rule leaves `category_rule_id` in place: "Set by rule: <name>" names the rule that
     set it, even if it has changed since.
   - A disabled rule can be previewed but not applied (409 `conflict`).
+  - **"Clear this rule's categories"** (Gadfly R2-S3) undoes a bad retroactive apply with no new
+    table, because `category_rule_id` already records which rule set each row.
+    - A preview returns the count and a token over the sorted ids of live rows `WHERE
+      category_rule_id = :rule AND category_source = 'rule'` that the author may write.
+    - The clear then sets `category_id`, `category_source` and `category_rule_id` to NULL on exactly
+      those rows, with an exact-count check.
+    - Rows a person set since (`user`) and rows another rule took over are untouched.
+    - A Plaid category the apply had replaced isn't restored. That's 0% of statement data, and the
+      next sync's `modified` re-derives it from the stored PFC.
 
 ### 4.5 Service changes outside the new modules
 - `LedgerWriter.apply_category(..., rule_id: UUID | None = None)` sets `category_rule_id` when the
@@ -721,14 +847,18 @@ transactions are. Summary-only viewers see none.
     The author reads the count under RLS.
 - `LedgerWriter._check_pair` rejects a different `owner_person_id`, where NULL is a value (ADR
   0027).
+- `LedgerWriter.clear_rule_categories(rule_id, transaction_ids) -> int` (C3b): the 4.4 clear, as
+  one `UPDATE … WHERE id = ANY(:ids) AND category_rule_id = :rule AND category_source = 'rule'`,
+  with an exact-count check (`preview_stale`) and one audit row, `rule.cleared {rule_id}`.
 - `unmark_transfer(transaction_id, *, never: bool = False)` follows 4.4.
-  `mark_transfer_pair` / `mark_transfer_single` delete a matching rejection.
-- New writer methods:
+  `mark_transfer_pair` / `mark_transfer_single` delete a matching rejection. `mark_transfer_single`
+  converts a `job` link on that leg to `person`.
+- New writer methods, all C4c:
   - `mark_transfer_link(out_id, in_id)`: a person, both legs visible, marks the writable legs and
     inserts the link
   - `apply_transfer_link(out_id, in_id, *, job_run_id)`
-  - `dissolve_account_pairs(account_id)`
-  - `supersede_transaction(old_id, new_id)`
+  - `dissolve_account_pairs(account_id)`: called by A1's service from C4c on
+  - supersede steps 7 and its reverse (4.4)
 - **Provenance** (Bulwark 7): `pair_transfers`, `apply_transfer_pair` and `apply_transfer_link`
   raise unless `user_id` is set, or the session is household-wide **and** `job_run_id` is set.
 - `pair_transfers` loads rejections (mapped to the matcher's frozensets) and computes `protected` per
@@ -762,19 +892,33 @@ import result can offer the change.
 
 | Method + path | Body → response | Errors |
 |---|---|---|
-| PATCH `/accounts/{id}` | `AccountOwnershipIn {owner?: "me" \| "joint" \| uuid, visibility?: "private" \| "shared" \| "summary_only"}` (at least one) → `AccountOut` | 404 (missing, invisible or not writable), 403 `forbidden` (a joint account claimed by someone without the household-owner role), 422 (unknown person; `visibility` given for a joint account, which is always visible) |
+| PATCH `/accounts/{id}` | `AccountOwnershipIn {owner?: "me" \| "joint", visibility?: "private" \| "shared" \| "summary_only"}` (at least one) → `AccountOut` | 404 (missing, invisible or not writable), 403 `forbidden` (a joint account claimed by someone without the household-owner role), 409 `conflict` (before C4c only: the account has transfer pairs), 422 (`visibility` given for a joint account) |
 
+- **No hand-over to another person in Phase 4** (Bulwark). `ACCOUNT_WRITABLE` (0002) lets a
+  person session write only rows whose `owner_person_id` is NULL or theirs, so `WITH CHECK` refuses
+  a new owner who is someone else. ADR 0008 makes reassignment household-wide. `owner` is therefore
+  `"me" | "joint"` only. `app/services/accounts.py` never sets `household_wide`. The household-wide
+  guard test (G1, #61) fails if it does.
 - Who may:
-  - The account's owner may change visibility, make the account joint, or give it to another
-    person.
-  - Any member may change a joint account's visibility, which is always effectively shared.
-  - A joint account may be claimed by one person only by the household owner
-    (`principal.is_owner`), because a claim takes write access from the other members.
+  - **The account's owner may change visibility or make the account joint.**
+  - A joint account may be claimed (`owner: "me"`) only by the household owner
+    (`principal.is_owner`), because a claim takes write access from the other members. **This
+    check lives in the service only.** The database lets any member claim a joint account
+    (`account_guard_ownership` allows it for `OLD.owner_person_id IS NULL`, ADR 0008). That's a
+    stated residual: only the API is a claim path.
+  - A claimed account starts `shared` unless `visibility` is given.
+  - A joint account has no visibility of its own. ACCOUNT_VISIBLE shows every joint account to
+    every member, so `visibility` on a joint account is refused with 422. Nobody "changes a joint
+    account's visibility".
 - One unit of work:
-  1. Lock the account row.
-  2. If the owner changes, `LedgerWriter.dissolve_account_pairs(account_id)`: every pair touching
-     the account becomes two single legs (`is_transfer` stays true and no rejection is written),
-     audited as `ledger.transfer_dissolved {group_id, reason: "ownership_changed"}`.
+  1. Lock the account row `FOR UPDATE` (4.2: before any pair writer's `FOR SHARE`).
+  2. If the owner changes:
+     - Before C4c, A1 refuses with 409 when any row on the account has a `transfer_group_id`. No
+       code path can create a pair before C4c (the matcher is guarded and no endpoint pairs), so
+       this is a backstop that keeps A1 out of `ledger_service.py` (file order, section 3).
+     - From C4c on, A1 calls `LedgerWriter.dissolve_account_pairs(account_id)`. Every pair touching
+       the account becomes two single legs (`is_transfer` stays true, no rejection), audited as
+       `ledger.transfer_dissolved {group_id, reason: "ownership_changed"}`.
   3. The account UPDATE.
   4. Audit `account.ownership_changed {account_id, owner_kind_before, owner_kind_after,
      visibility_before, visibility_after}`, with ids only.
@@ -786,6 +930,10 @@ import result can offer the change.
   Consequences).
 - Statement import still makes the uploader the owner, with `private` (unchanged). The result view
   shows "Owner: you · private · Change".
+- **Joint is the recommended change** (Gadfly R2-B1). A joint account stays importable by everyone,
+  because `ACCOUNT_DETAIL_WRITABLE` and `IMPORT_RUN_WRITE` both allow joint accounts. A household
+  with one bookkeeper never locks themselves out, because nothing in Phase 4 can make an account
+  someone else's.
 
 ### 5.1 Transactions (C6a; transfer fields from C4e; `category_rule_id` from C3e)
 `TransactionOut` gains:
@@ -834,6 +982,9 @@ RuleCreateIn       {rule: RuleIn, apply: {preview_token: str} | null}
 RuleCreateOut      {rule: RuleOut, applied_count: int | null}
 RuleApplyIn        {preview_token: str}
 RuleApplyOut       {applied_count: int}
+RuleClearPreviewOut {clear_count: int, sample: TransactionOut[] (≤ 25), preview_token: str}
+RuleClearIn        {preview_token: str}
+RuleClearOut       {cleared_count: int}
 ```
 - `status` is computed on read:
   - `unavailable`: a `regex` rule that `compile_pattern` refuses on this server
@@ -852,6 +1003,8 @@ RuleApplyOut       {applied_count: int}
 | DELETE `/rules/{id}` | → 204 (categories stay) | 404, 403 |
 | POST `/rules/{id}/preview` | → `RulePreviewOut` | 404 |
 | POST `/rules/{id}/apply` | `RuleApplyIn` → `RuleApplyOut` | 404, 403, 409 `preview_stale`, 409 `conflict` (disabled) |
+| POST `/rules/{id}/clear/preview` | → `RuleClearPreviewOut` (4.4 "Clear this rule's categories") | 404, 403 |
+| POST `/rules/{id}/clear` | `RuleClearIn` → `RuleClearOut` | 404, 403, 409 `preview_stale` |
 
 - Validation (422, fixed messages, never echoing input):
   - an unknown category
@@ -860,18 +1013,18 @@ RuleApplyOut       {applied_count: int}
   - before C3d, any `mode: "regex"` ("Patterns aren't available yet.")
 - **The 422 for patterns covers preview, create and PATCH alike**, because all three build
   conditions through `compile_pattern` (first-pass B3).
-- Rate limit: preview and apply share 30 per minute per user (the existing Redis limiter, 429
-  `rate_limited`).
+- Rate limit: preview, apply and clear share 30 per minute per user (the existing Redis limiter,
+  429 `rate_limited`).
 
 ### 5.3 Transfers review (C4e)
 ```
 TransferEdgeOut    {suggestion_id: uuid, outflow_id: uuid, inflow_id: uuid,
                     reason: "no_hint" | "one_sided_hint" | "refund_candidate" |
-                            "user_treated_as_spending" | "ambiguous" | "likely" |
-                            "other_side_marked",
+                            "user_treated_as_spending" | "ambiguous" | "likely",
                     days_apart: int, can_pair: bool, can_mark_legs: bool}
 TransferGroupOut   {key: str, legs: TransactionOut[], edges: TransferEdgeOut[]}
-TransferReviewPage {groups: TransferGroupOut[], next_cursor: str | null}
+TransferOfferOut   {offer_id: uuid, leg: TransactionOut}      # the reader's own leg only
+TransferReviewPage {groups: TransferGroupOut[], offers: TransferOfferOut[], next_cursor: str | null}
 TransferAcceptOut  {result: "paired" | "linked", legs: TransactionOut[]}
 TransferRejectIn   {scope: "pair" | "legs" = "pair"}
 ```
@@ -880,6 +1033,8 @@ TransferRejectIn   {scope: "pair" | "legs" = "pair"}
 | GET `/transfers/review?limit=1..50&cursor=` | → `TransferReviewPage` | 422 |
 | POST `/transfers/suggestions/{id}/accept` | → `TransferAcceptOut` | 404, 409 (a leg changed) |
 | POST `/transfers/suggestions/{id}/reject` | `TransferRejectIn` → 204 | 404 |
+| POST `/transfers/offers/{id}/accept` | → `TransactionOut` (the leg, now a single-leg transfer) | 404, 409 (the leg changed) |
+| POST `/transfers/offers/{id}/decline` | → 204 (records `declined`; step 0(d) writes the rejection) | 404 |
 
 - **Review list:**
   - Groups come from `group_edges` over the reader's suggestions that are still live: legs live,
@@ -895,6 +1050,8 @@ TransferRejectIn   {scope: "pair" | "legs" = "pair"}
 - **Reject:**
   - `pair` writes a pair rejection.
   - `legs` writes a leg rejection for each writable leg ("Never a transfer").
+- **Leg offers:** the page lists the reader's `open` offers. Each shows only the reader's own leg.
+  `transfer_review_count` counts groups plus open offers.
 
 ### 5.4 Recurring (C5d)
 ```
@@ -947,10 +1104,15 @@ Only what acceptance needs. No new nav entries: Transactions gains tabs, Setting
    - An account row shows "Yours · private", "Joint" or "<name>'s · shared", and a "Change" action
      when `can_change_owner`.
    - The sheet:
-     - owner: me, joint, or another person
-     - visibility: private, shared, summary only
-     - a one-line consequence ("Everyone in the household will see these transactions")
+     - owner: "Just me" or "Joint", with **Joint recommended** for a shared account
+     - what Joint lets each person do: "Everyone in the household sees these transactions, can
+       categorise them, and can import its statements"
+     - visibility, for an account that's yours: private, shared, summary only, with a one-line
+       consequence ("Others will see these transactions but can't change them")
      - "Transfers on this account become single entries" when the account has pairs
+     - for the household owner claiming a joint account: "Only you will be able to change these
+       transactions or import its statements"
+   - There's no "give to another person" choice in Phase 4 (5.0).
    - The import result shows the owner and visibility of each block's account, with "Change".
 1. **Transactions → Activity (changed, W1).**
    - Each row shows a category chip, "Transfer", or "Needs category". Until rules land (C3e, W2),
@@ -985,18 +1147,20 @@ Only what acceptance needs. No new nav entries: Transactions gains tabs, Setting
 3. **Settings → Rules (new, W2).**
    - A list of the rules the person can see: name, category, hit count, status, the enabled switch
      (own rules), and the author for others' rules (read only).
-   - Edit, delete, and "Apply to past transactions" (preview first).
+   - Edit, delete, "Apply to past transactions" (preview first), and "Clear this rule's
+     categories" (preview first, then "Clear N"; 4.4).
 4. **Transactions → Transfers to review (new tab, W3).**
    - The tab carries the count from `/ledger/status` as a badge.
    - One card per group:
      - the legs (date, account, amount in mono)
      - a plain reason, such as "Same amount, two days apart, no transfer wording", or for `likely`,
-       "Looks like a transfer between your accounts", or for `other_side_marked`, "The other side is
-       already marked as a transfer"
+       "Looks like a transfer between your accounts"
    - Single-edge cards: "It's a transfer" and "Not a transfer".
    - Multi-edge cards: one row per candidate with the same two actions. Accepting one hides the rest
      of that card.
    - "Never a transfer" sits in an overflow menu.
+   - **Leg offers** are cards with one leg, the reader's own, and the line "Another household member
+     marked the other side of this as a transfer". The actions are "Yes, it's a transfer" and "No".
    - "Check again" calls `POST /ledger/refresh` and shows the last run time.
 5. **Transactions → Recurring (new tab, W4).**
    - Sections: Bills (outflows, tier `bill`), Income (inflows, tier `bill`), Maybe recurring (tier
@@ -1028,49 +1192,74 @@ Each slice is one PR. Gates:
 - Sounding gates acceptance.
 
 ### 7.1 Order
-| Wave | Slices (parallel inside a wave) |
-|---|---|
-| 0 | **C3b** (M1), **A1**, C3c, C4b, C5c |
-| 1 | **A1w**, C6a, C3d |
-| 2 | W1, **C3e** |
-| 3 | W2, **C4c** (M3) |
-| 4 | **C4d** |
-| 5 | **C4e**, **C5b** (M4) |
-| 6 | W3, **C5d** |
-| 7 | W4 |
-| 8 | C7 (acceptance) |
+**First path, before anything else** (Gadfly round 2): **C3c → C6a → W1 → live redeploy.**
+- That's three PRs and no migration (`category_rule_id` arrives with C3e).
+- The result is manual categorisation on the owner's real data on the Activity tab.
+- C6a depends on C3c only, so neither A1 nor C3b's RLS gate can delay it.
 
-**Soonest visible:**
-- **A1 → A1w** lets the owner make accounts joint or give them to the other person, so the second
-  person has data before any transfer slice runs.
-- **C3c → C6a → W1** puts categories on Transactions without waiting on C3b's RLS gate (first-pass
-  S2). `category_rule_id` arrives with C3e.
-- Then C3d + C3e + W2 (rules usable).
-- Then C4c + C4d + C4e + W3 (transfers).
-- Then C5b + C5d + W4 (recurring).
-- Recurring stays after transfers. Otherwise unpaired card payments show as monthly "bills", and a
-  person could confirm them, which leaves a hollow confirmed series behind once pairing lands
-  (Gadfly S4, rejected in part).
+| Wave | Slices (parallel inside a wave) | Then |
+|---|---|---|
+| 0 | C3c, C4b, C5c (pure); **A1** | |
+| 1 | **C6a**, C3d, A1w; **C3b** (M1) once #31 and P2a have merged | |
+| 2 | **W1** | live redeploy, no migration |
+| 3 | **C3e** (after C3b, P4a, P2b) | live redeploy (A1, A1w and M1 by now) |
+| 4 | W2 | live redeploy: rules usable on real data |
+| 5 | **C4c** (M3, after M2) | |
+| 6 | **C4d** | |
+| 7 | **C4e**, **C5b** (M4) | live redeploy |
+| 8 | W3, **C5d** | live redeploy: transfers on real data |
+| 9 | W4 | live redeploy: recurring on real data |
+| 10 | C7 (acceptance) | |
+
+**Standing rule: Keel redeploys the live instance after each wave merges** (Gadfly R2-B3).
+- Take a dump to the private directory first, then migrate. A wave that carries a migration is
+  rehearsed first (7.5 step 1).
+- So the owner sees each screen as it lands, not at phase acceptance.
+- Waves with no "Then" entry still redeploy if anything user-visible merged. The table marks the
+  ones that change what the owner can do.
+
+**Ordering notes:**
+- **A1 → A1w** lets the owner make accounts joint, so the second person has data before any
+  transfer slice runs.
+- Then C3d + C3e + W2 (rules usable), C4c + C4d + C4e + W3 (transfers), and C5b + C5d + W4
+  (recurring).
+- **Recurring stays after transfers.** Otherwise unpaired card payments show as monthly "bills" a
+  person could confirm. ADR 0028's all-transfers rule now deletes such a series once pairing lands,
+  so the swap would be safe. Keel may swap C5b ahead of C4c if transfers slip, as long as C5b then
+  carries the C4d job skeleton (steps 0–2 empty).
+- **C6a and A1 share files but not a dependency.**
+  - The shared files:
+    - `backend/app/schemas/ledger.py`: A1 adds `AccountOut` fields only; C6a adds `TransactionOut`
+      and filter params only.
+    - `backend/app/services/ledger.py`: A1 changes the `accounts()` row mapping only; C6a changes
+      `transactions()` filters and mapping only.
+    - `web/src/api/schema.d.ts`: generated.
+  - When both are open, C6a merges first. A1 rebases (additive hunks in different classes and
+    functions) and reruns `make api-types`.
+- **A1 and C3b share nothing.** A1 no longer edits `ledger_service.py` or its tests (5.0), which
+  answers Gadfly R2-S4.
+- **`ledger_service.py`:** P2a → C3b → C4c → C4d (supersede step 9 only) → C5b. That's the Phase 2
+  order, with the C4d step the clause itself names.
 
 ### 7.2 Slices
 | ID | Slice | Kind / owner | Depends | Gates | Acceptance evidence |
 |---|---|---|---|---|---|
-| **C3b** | M1 (rules), helper functions, `Rule` model, `category_rule_id`, `NewTransaction.category_rule_id`, `apply_category(rule_id)`, `apply_rule_bulk` | db · Ledger (token) | — | Bulwark, Ledger | RLS matrix for `rule`; `rule_scope_guard` and `rule_caps` (two sessions racing past a cap); guessed-id FKs; helper equivalence and `prosecdef = false`; bulk apply exact-count and precedence; up/down/up, **including a downgrade that raises on a non-empty table** |
-| **A1** | `PATCH /accounts/{id}`, `AccountService`, `LedgerWriter.dissolve_account_pairs`, `AccountOut` / `ImportBlockOut` owner fields | db · Ledger | — | Bulwark, Ledger | Owner, joint and other-person matrix (who may, 404 vs 403); a claim of a joint account needs the household owner; a pair on the account becomes two single legs in the same unit of work and both stay excluded; audit detail has ids only; summary-only viewers get 404 |
+| **C3b** | M1 (rules), helper functions, `Rule` model, `category_rule_id`, `NewTransaction.category_rule_id`, `apply_category(rule_id)`, `apply_rule_bulk`, `clear_rule_categories`, supersede step 1's `category_rule_id` | db · Ledger (token) | #31 (0010), P2a | Bulwark, Ledger | RLS matrix for `rule`; `rule_scope_guard` and `rule_caps` (two sessions racing past a cap); guessed-id FKs; helper equivalence and `prosecdef = false`; bulk apply exact-count and precedence; up/down/up, **including a downgrade that raises on a non-empty table** |
+| **A1** | `PATCH /accounts/{id}` (`me` / `joint`, visibility), `AccountService`, `AccountOut` / `ImportBlockOut` owner fields; 409 while the account has pairs | db · Ledger | — | Bulwark, Ledger | See 7.3 A1 |
 | **A1w** | Account owner sheet; the accounts panel and import result show the owner | web · Prism | A1 | Prism, Sounding | vitest; 375 px; **e2e `accounts.e2e.ts`**: upload a synthetic statement, change the owner to joint from the result view, and see it in the accounts panel |
 | **C3c** | `merchant.py`, `rule_regex.py` (refuses everything), rules v2 (scope, splits, ordering, `preview_for`, `preview_token`, codec with `merchant_key_version`) | pure · Codex | — | Ledger, Bulwark | Table and property tests; draft token = saved token; order independence; the `ast` import test; `repr(DescriptionCondition)` has no value |
 | **C4b** | transfers v2 (rejections, `links`, joint-as-owner, `review_edges` with `likely`, `group_edges`) | pure · Codex | — | Ledger | A rejected edge is never paired, linked or suggested over 500 random pools; joint versus owned gives `links`; a hidden competitor in the household view still gives a `likely` edge in the person's view (Gadfly B2); grouping is order-independent |
 | **C5c** | `recurring_series.py` (`series_status`, `series_tier`, `stored_confidence`, `detected_from`, `reconcile_series`, `detect_rows`) | pure · Codex | — | Ledger | Property tests for the ADR 0028 invariants; tie and takeover rules; the lapsed-predecessor merge; the PLAN 1.5-interval boundary table; the tier at 0.6004 equals the tier at 0.600 |
-| **C6a** | Transaction category API (5.1, C6a rows), `TransactionOut` fields, filters | db · Ledger | C3c, A1 (shared files) | Bulwark, Ledger | API tests across private/shared/summary_only/joint; `make api-types` diff; superseded → 409 |
+| **C6a** | Transaction category API (5.1, C6a rows), `TransactionOut` fields, filters | db · Ledger | C3c only (A1 shares files, 7.1) | Bulwark, Ledger | API tests across private/shared/summary_only/joint; `make api-types` diff; superseded → 409 |
 | **W1** | Activity tab chips, filters, row sheet with the category picker and release, rule toast stub | web · Prism | C6a (mocks earlier) | Prism, Sounding | vitest; 375 px; read-only rows show no actions; **e2e `activity.e2e.ts`**: upload, set a category, filter "needs category" |
 | **C3d** | RE2 in `rule_regex.py`, cost probe, dependency pin, corpus gate, `docs/user/rules.md` | pure + lockfile · Ledger | C3c | Bulwark, Ledger | ADR 0024 point 7 gate (required, on CI); probe rejects the corpus' blow-ups; `import re2` only in one module; a failed `import re2` gives `unavailable`; pip-audit clean |
-| **C3e** | `RuleService`, `/api/rules`, ingest-time rules in statement import (matcher in a thread), `preview_stale` code, `category_rule_id` in `TransactionOut` | db · Ledger | C3b, C3c, C6a (C3d for regex) | Bulwark, Ledger | Preview count = applied count; a second apply = 0; scope across two people (`own` invisible to the other; `any` never touches the other's private rows); caps → 409; audit details ids only; a re-import inserts nothing and keeps categories; bounded work (fixed query count per preview/apply, one UPDATE per apply) |
+| **C3e** | `RuleService`, `/api/rules` (including clear), ingest-time rules in statement import and in `IngestService` (matcher in a thread), `preview_stale` code, `category_rule_id` in `TransactionOut` | db · Ledger | C3b, C3c, C6a, P4a (`statement_import.py`), P2b (`IngestService`); C3d for regex | Bulwark, Ledger | Preview count = applied count; a second apply = 0; clear preview count = cleared count; a Plaid row matching a rule gets `category_source = 'rule'`; scope across two people (`own` invisible to the other; `any` never touches the other's private rows); caps → 409; audit details ids only; a re-import inserts nothing and keeps categories; bounded work (fixed query count per preview/apply, one UPDATE per apply) |
 | **W2** | Rule sheet, preview, Settings → Rules, "make a rule" entry points | web · Prism | C3e (mocks earlier) | Prism, Sounding | vitest for the preview → save-and-apply flow and the stale path; scope default by source account; visibility line; 375 px; **e2e `rules.e2e.ts`**: make a rule from a row, preview, save and apply, see the list in Settings |
-| **C4c** | M3, transfer models, writer changes (links, rejections, `supersede_transaction`, unmark rules), `pair_transfers` v2 + `load_candidates` | db · Ledger (token) | C3b, C4b, A1 | Bulwark, Ledger | See 7.3 C4c |
-| **C4d** | `ledger.refresh` job steps 0–2, `refresh_person_suggestions`, `request_refresh` helper, arq pool in the API, `defer_until` in `enqueue`, enqueue after import and ownership change, 5.5 endpoints | db · Ledger | C4c | Bulwark, Ledger | See 7.3 C4d |
-| **C4e** | Transfer endpoints (5.1 transfer rows, 5.3), `TransactionOut` transfer fields, enqueue after edits | db · Ledger | C4d, C6a | Bulwark, Ledger | Accept `paired` vs `linked`; the second person still sees their half; reject `pair` vs `legs`; 409 on a changed leg; the guard test still forbids `pair_transfers` / `apply_transfer_*` in `app/api/` |
+| **C4c** | M3, transfer models, writer changes (links, rejections, leg offers, owner locks, unmark rules, supersede step 7), `pair_transfers` v2 + `load_candidates`, A1's switch to `dissolve_account_pairs` | db · Ledger (token) | C3b, C4b, A1, M2 (token) | Bulwark, Ledger | See 7.3 C4c |
+| **C4d** | `ledger.refresh` job steps 0–2 (including leg offers), `refresh_person_suggestions`, `request_refresh` helper, arq pool in the API, `defer_until` in `enqueue` (and its re-push), enqueue after import and ownership change, supersede step 9, 5.5 endpoints | db · Ledger | C4c | Bulwark, Ledger | See 7.3 C4d |
+| **C4e** | Transfer endpoints (5.1 transfer rows, 5.3, including leg offers), `TransactionOut` transfer fields, enqueue after edits | db · Ledger | C4d, C6a | Bulwark, Ledger | Accept `paired` vs `linked`; the second person still sees their half; an offer's response holds only the reader's leg; reject `pair` vs `legs`; 409 on a changed leg; the guard test still forbids `pair_transfers` / `apply_transfer_*` in `app/api/` |
 | **W3** | Transfers to review tab, badge, sheet transfer actions | web · Prism | C4e | Prism, Sounding | vitest for accept / reject / multi-edge cards; 375 px; **e2e `transfers.e2e.ts`**: upload synthetic checking and card statements, see a card payment excluded, accept one suggestion, unmark it |
-| **C5b** | M4, recurring store service, job step 3 with the `forkserver` pool | db · Ledger (token) | C5c, C4d | Bulwark, Ledger | See 7.3 C5b |
+| **C5b** | M4, recurring store service, job step 3 with the `forkserver` pool, supersede step 8 | db · Ledger (token) | C5c, C4d | Bulwark, Ledger | See 7.3 C5b |
 | **C5d** | Recurring endpoints (5.4), `recurring_count` | db · Ledger | C5b | Bulwark, Ledger | A label confirms; dismissed hidden by default; members are live rows only; 403 for a visible, non-writable series |
 | **W4** | Recurring tab | web · Prism | C5d | Prism, Sounding | Sections and statuses render at 375 px; **e2e `recurring.e2e.ts`**: upload a synthetic statement with a monthly bill, refresh, confirm it, rename it |
 | **C7** | Eval harness, real-data run, Phase 4 acceptance (`docs/phases/PHASE-4.md`) | Sounding (Ledger for the real-data loader) | all | Sounding | Section 0, sections 7.4 and 7.5 |
@@ -1091,18 +1280,44 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     row rejects (Bulwark 4).
   - The downgrade counts and raises before it drops anything (Bulwark 11).
   - `rule_scope_guard` fires on `author_person_id` (Bulwark 11).
-  - `rule_caps` with the advisory lock (ADR 0024 cap).
+  - `rule_caps` with the advisory lock (ADR 0024 cap). The household-wide count lets one person
+    learn how many `own` pattern rules another has, through the 409. That's recorded as an
+    accepted leftover in ADR 0026 point 4 (Bulwark).
+  - `clear_rule_categories` (4.5), and `category_rule_id` in supersede step 1 (PHASE-2 §3.3).
+- **A1:**
+  - `owner` is `"me" | "joint"` only. Any other value is a 422 from the schema (Bulwark).
+  - `app/services/accounts.py` never sets or mentions `household_wide`.
+  - The joint-claim check (`principal.is_owner`) is service-only. Say so in the code comment and
+    the PR; the database allows any member (ADR 0008).
+  - `visibility` on a joint account is a 422.
+  - Lock the account `FOR UPDATE` first. Return 409 while any row on it has a `transfer_group_id`
+    (C4c replaces that with the dissolve).
+  - Tests:
+    - the owner makes an account joint
+    - the household owner claims a joint account, and a non-owner claim is a 403
+    - `owner: <uuid>` is a 422
+    - summary-only viewers and other people's private accounts are a 404
+    - **after `joint`, both people can upload a statement to it**, and accept its `needs_review`
+      runs
+    - audit detail has ids only
 - **C3c:**
   - Delete the C3a `re` validator. Until C3d, `compile_pattern` raises `RuleValidationError("Patterns
     aren't available yet.")` for every input (Bulwark 2).
   - The `ast` test: `rule_regex.py`, `app/domain/rules.py` and `app/services/rules.py` import
     neither `re` nor `regex` (Bulwark 2).
   - `DescriptionCondition.value` is `field(repr=False)` (Bulwark 12).
+  - Remove `RuleConditions.account_ids` (Bulwark).
 - **C3d:**
-  - ADR 0024 points 2, 4b, 5 and 7 as written: no fallback, the cost probe at 10 µs mean,
-    `MAX_SUBJECT_LENGTH = 256`, and the gate (each corpus pattern either rejected by
-    `compile_pattern` or 50,000 searches of 1,024-character subjects in under 1 s on CI, with the
-    three DFA-blow-up shapes in the corpus) (Bulwark 1).
+  - ADR 0024 points 2, 4b, 5, 7 and 8 as written (Bulwark 1 and its round-2 text):
+    - no fallback
+    - `MAX_SUBJECT_LENGTH = 256`
+    - the cost probe: a family for every class atom, including negated, escape and POSIX classes
+      and `.`; per-literal mixed families; more than 16 atoms rejected; the 10 µs limit per family
+    - the gate: each corpus pattern either rejected by `compile_pattern` or 50,000 searches of
+      1,024-character subjects in under 1 s on CI, over subjects independent of the probe
+  - The corpus includes the three DFA blow-up shapes, Bulwark's three evaders
+    (`(?:[J][K][V][Q])?[XY]*X[XYZ]{20}W`, `\d*[0-4]\d{20}#`, `[^5-9]\d{20}#`), and Lattice's two
+    (`\w*Q\w{20}#`, `[[:digit:]]*1[[:digit:]]{20}#`). Each must be rejected.
   - Record the CI numbers in the PR.
 - **C3e:**
   - The ingest matcher runs in `anyio.to_thread.run_sync` (Bulwark 1).
@@ -1121,9 +1336,20 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     set, in `pair_transfers`, `apply_transfer_pair` and `apply_transfer_link` (Bulwark 7).
   - Every derived-row leg column has the `(…_account_id, household_id) → account(id,
     household_id)` FK (Bulwark 9).
-  - `supersede_transaction` re-points rejections (and links) in the same unit of work through
-    `transaction_supersede_repoint` (Bulwark 10).
-  - `transaction_dissolve_orphan` (Gadfly B3). The auto writers' locked re-check of rejections
+  - Supersede step 7 (PHASE-2 §3.3) rewrites `transfer_rejection` and `transfer_link` rows from the
+    loser to the winner, and back in the reverse. Add the session rule (4.4): outside a
+    household-wide session, raise unless the source row was inserted by this writer (Bulwark 10).
+  - Links need a hint on each leg (2.4, Bulwark).
+  - Owner locks (4.2, Bulwark): `FOR SHARE` on both legs' accounts, in id order, before
+    `_lock_group`. `_check_pair` reads owners from the locked rows.
+  - `transfer_link`: DELETE USING is `app_household_wide()` only. `transfer_link_guard` allows a
+    person only `origin` `job` → `person`, which a mark of a `job` link's leg performs (Bulwark).
+  - `transaction_dissolve_orphan` raises if any row still has `transfer_group_id =
+    OLD.transfer_group_id` (Bulwark; Gadfly B3).
+  - State INSERT as WITH CHECK and DELETE as USING for `transfer_rejection`, `transfer_link`,
+    `transfer_suggestion` and `transfer_leg_offer` (Bulwark).
+  - Switch A1 from the 409 to `dissolve_account_pairs`.
+  - The auto writers' locked re-check of rejections is a separate statement after `_lock_group`
     (4.2, Gadfly B5). Tests:
     - unmark, then rerun: never re-paired
     - delete one leg, then unmark the other: succeeds (no orphan is left)
@@ -1132,8 +1358,15 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - a cross-owner edge in the household view is linked, and either person can undo their leg
     - a hidden `job` link's unmark becomes a `pair` rejection at step 0, and the job undoes its
       own mark on the other leg
-    - a half-accepted `person` link gives the second person an `other_side_marked` suggestion
     - `dissolve_account_pairs` writes a `person` link per dissolved pair
+    - **an owner change and a job pairing on that account, interleaved: no cross-owner group**
+      (Bulwark)
+    - a cross-owner edge hinted on one leg only isn't linked (Bulwark)
+    - a person marks a leg of a `job` link, the other person unmarks theirs, then step 0 runs: the
+      first person's mark stays
+    - supersede: a rejected pair isn't re-paired on the winner, and a link follows its leg to the
+      winner
+    - a person session's `supersede` of a non-fresh loser raises
 - **C4d:**
   - Step 2 never writes pairs or links. Record the leftover inference in ADR 0026 (done here)
     (Bulwark 8).
@@ -1148,6 +1381,12 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - every audit row carries `job_run_id`
     - person A never sees a suggestion shaped by B's private rows
     - a hidden competitor still gives A a `likely` suggestion
+    - **B accepts a move from B's private checking to A's shared card, and A gets a leg offer that
+      names only A's leg.** A's decline becomes a `pair` rejection at the next step 0 (Gadfly
+      R2-B4)
+    - a deleted leg's surviving link partner is unmarked, for both origins (Gadfly R2-S1)
+    - the healing re-push carries `_defer_until`
+    - supersede step 9 deletes the loser's suggestions and offers
 - **C5b:**
   - `ProcessPoolExecutor(max_workers=1, mp_context=get_context("forkserver"))`, preloading only
     `app.domain.recurring_series` (Bulwark 5).
@@ -1164,6 +1403,9 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - a confirm made while detection runs survives, using a child blocked on an event, with no
       timing involved
     - supersede every member of a confirmed series, then refresh: same id, still confirmed
+    - supersede step 8: a dismissed series stays dismissed after its members are superseded
+      (PHASE-2 §3.3)
+    - a series whose members all became transfers is deleted
     - a timeout terminates the child and the next run works
     - the event loop serves another coroutine while the child is blocked
 
@@ -1188,7 +1430,12 @@ has better than 6× headroom (section 11).
   - card payments from joint checking to each card (cross-owner: these must be links)
   - A's checking to A's savings (same owner: pairs)
   - a hinted move from B's private checking to A's private savings (private to private: a link)
-  - unhinted transfers (suggestions)
+  - unhinted transfers between accounts at least one person can see both of (suggestions)
+  - an unhinted move from B's private checking to A's shared card, so B is offered it, and A gets a
+    leg offer once B accepts
+  - **the residual:** exactly two unhinted moves between B's private checking and A's private
+    savings. No single person can see both legs. Their amounts are recorded, and criterion 2(d)
+    adds them back.
   - card purchases, refunds and ad-hoc purchases from a synthetic merchant vocabulary
 
   The truth per row: category slug, transfer edge, bill series.
@@ -1205,6 +1452,13 @@ has better than 6× headroom (section 11).
      the label. Otherwise save for new rows only.
   4. Stop at 200 labels.
   5. Import months 7–24 through the statement path (rules at ingest), then run one refresh.
+     Record criterion 2's numbers here, with no clicks.
+  6. **Scripted review** (Gadfly R2-B2). It's deterministic, in person order (A, then B), oldest
+     card first:
+     - Each person accepts every review card and leg offer whose truth is a transfer, picking the
+       true edge on a multi-edge card, and rejects (`scope = "pair"`) or declines the rest.
+     - Then one refresh, and one more pass of the same policy for anything new.
+     - Criteria 2(b) and 2(d) are measured after this step.
 - **Measures:** exactly section 0 criteria 1–4. The run also reports:
   - share of Plaid-sourced rows (0)
   - links, pairs and suggestions per person
@@ -1215,8 +1469,13 @@ has better than 6× headroom (section 11).
 
 ### 7.5 Real-data run (Keel decision; Gadfly B4)
 Holdfast agents (Sounding, with Ledger for the loader) run it locally under ADR 0019, on the owner's
-machine, and report counts only. The owner's instance is on `main` at `0009`, and a dump was taken
-first, so nothing waits on the owner.
+machine, and report counts only.
+
+**Record** (Gadfly R2-B3): Keel upgraded the owner's instance to `main` on 2026-11-21. A dump was
+taken first, migrations 0008 and 0009 were applied, and row counts were unchanged. It's recorded in
+the sprint log (`docs/planning/SPRINTS.md`). Live upgrades from then on follow 7.1's standing
+redeploy rule, under the owner's full-autonomy decision of 2026-11-19 (CLAUDE.md). Keel holds that
+record. If the owner withdraws it, each migration becomes an owner-queue item.
 
 1. **Before each Phase 4 migration reaches the instance:**
    - Take a fresh dump to the private directory.
@@ -1250,21 +1509,21 @@ first, so nothing waits on the owner.
 | Slice | Owns (creates or edits) |
 |---|---|
 | C3b | `backend/migrations/versions/<n>_rules.py`, `backend/app/models/transactions.py`, `backend/app/models/__init__.py`, `backend/app/services/ledger_service.py`, `backend/tests/models/test_rls_rules.py`, `backend/tests/models/test_migration_rules.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/test_ledger_single_writer.py` |
-| A1 | `backend/app/api/routes_accounts.py` (new), `backend/app/schemas/accounts.py` (new), `backend/app/services/accounts.py` (new), `backend/app/schemas/ledger.py` (`AccountOut` fields), `backend/app/services/ledger.py` (account fields), `backend/app/schemas/imports.py`, `backend/app/services/imports.py` (block owner fields), `backend/app/services/ledger_service.py` (`dissolve_account_pairs`), `backend/tests/api/test_account_ownership.py`, `backend/tests/ledger/test_ledger_service.py`, `web/src/api/schema.d.ts` (generated) |
-| A1w | `web/src/pages/transactions/AccountsPanel.tsx`, `web/src/pages/transactions/AccountOwnerSheet.tsx` (new), `web/src/pages/import/ResultView.tsx`, `web/src/api/ledger.ts`, `web/src/api/imports.ts`, `web/src/mocks/ledger.ts`, `web/src/mocks/imports.ts`, `web/e2e/accounts.e2e.ts` |
+| A1 | `backend/app/api/routes_accounts.py` (new), `backend/app/schemas/accounts.py` (new), `backend/app/services/accounts.py` (new), `backend/app/schemas/ledger.py` (`AccountOut` fields), `backend/app/services/ledger.py` (account fields), `backend/app/schemas/imports.py`, `backend/app/services/imports.py` (block owner fields), `backend/tests/api/test_account_ownership.py`, `web/src/api/schema.d.ts` (generated). Not `ledger_service.py` (file order, section 3) |
+| A1w | `web/src/pages/transactions/AccountsPanel.tsx`, `web/src/pages/transactions/AccountOwnerSheet.tsx` (new), `web/src/pages/import/ResultView.tsx`, `web/src/api/accounts.ts` (new), `web/src/api/imports.ts`, `web/src/mocks/accounts.ts` (new), `web/src/mocks/imports.ts`, `web/src/mocks/handlers.ts`, `web/e2e/accounts.e2e.ts`. Not `api/ledger.ts` or `mocks/ledger.ts`, which are W1's |
 | C3c | `backend/app/domain/{merchant,rule_regex,rules}.py`, `backend/tests/domain/{test_merchant,test_rule_regex,test_rules,test_regex_imports}.py` |
 | C4b | `backend/app/domain/transfers.py`, `backend/tests/domain/test_transfers.py` |
 | C5c | `backend/app/domain/recurring_series.py`, `backend/tests/domain/test_recurring_series.py` |
 | C6a | `backend/app/api/routes_ledger.py`, `backend/app/schemas/ledger.py`, `backend/app/services/ledger.py`, `backend/tests/api/test_ledger*.py`, `web/src/api/schema.d.ts` |
 | W1 | `web/src/pages/transactions/**` (except A1w's files), `web/src/mocks/ledger.ts`, `web/src/api/ledger.ts`, `web/e2e/activity.e2e.ts` |
 | C3d | `backend/app/domain/rule_regex.py`, `backend/pyproject.toml`, `backend/uv.lock`, `backend/tests/domain/test_rule_regex.py`, `backend/tests/domain/regex_corpus.py` (new), `docs/user/rules.md` |
-| C3e | `backend/app/services/rules.py`, `backend/app/api/routes_rules.py`, `backend/app/schemas/rules.py`, `backend/app/services/statement_import.py`, `backend/app/services/errors.py`, `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (`category_rule_id`), `web/src/api/contracts.ts` (error code only), `web/src/api/schema.d.ts`, `backend/tests/api/test_rules*.py`, `backend/tests/services/test_rules*.py`, `backend/tests/bench/test_rules_bench.py` |
+| C3e | `backend/app/services/rules.py`, `backend/app/api/routes_rules.py`, `backend/app/schemas/rules.py`, `backend/app/services/statement_import.py` (after P4a), `backend/app/services/ingest.py` (inline rules, after P2b), `backend/app/services/errors.py`, `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (`category_rule_id`), `web/src/api/contracts.ts` (error code only), `web/src/api/schema.d.ts`, `backend/tests/api/test_rules*.py`, `backend/tests/services/test_rules*.py`, `backend/tests/bench/test_rules_bench.py` |
 | W2 | `web/src/pages/settings/Rules*.tsx`, `web/src/features/rules/**` (new), `web/src/mocks/rules.ts`, `web/src/mocks/handlers.ts`, `web/src/api/rules.ts`, `web/src/app/routes.tsx`, `web/e2e/rules.e2e.ts` |
-| C4c | `backend/migrations/versions/<n>_transfer_corrections.py`, `backend/app/models/transfers.py` (new), `backend/app/models/__init__.py`, `backend/app/services/{ledger_service,transfer_pairing}.py`, `backend/tests/models/test_rls_transfers.py`, `backend/tests/models/test_transfer_triggers.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/ledger/test_transfer_pairing.py`, `backend/tests/test_ledger_single_writer.py` |
-| C4d | `backend/app/jobs/handlers/ledger_refresh.py`, `backend/app/services/transfer_suggestions.py` (new), `backend/app/services/refresh.py` (new: `request_refresh`), `backend/app/services/jobs.py` + `backend/app/jobs/queue.py` (`defer_until`), `backend/app/api/deps.py`, `backend/app/services/imports.py` + `backend/app/services/accounts.py` (enqueue), `backend/app/api/routes_ledger_status.py`, `backend/app/schemas/ledger_status.py`, `backend/app/worker/main.py` (comment), `backend/tests/ledger/test_transfer_pairing_guard.py`, `backend/tests/models/test_household_wide_guard.py` (allowlist only), `backend/tests/jobs/test_ledger_refresh*.py` |
+| C4c | `backend/migrations/versions/<n>_transfer_corrections.py`, `backend/app/models/transfers.py` (new), `backend/app/models/__init__.py`, `backend/app/services/{ledger_service,transfer_pairing}.py`, `backend/app/services/accounts.py` (the dissolve switch), `backend/tests/api/test_account_ownership.py`, `backend/tests/models/test_rls_transfers.py`, `backend/tests/models/test_transfer_triggers.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/ledger/test_transfer_pairing.py`, `backend/tests/test_ledger_single_writer.py` |
+| C4d | `backend/app/jobs/handlers/ledger_refresh.py`, `backend/app/services/transfer_suggestions.py` (new), `backend/app/services/ledger_service.py` (supersede step 9 only), `backend/app/services/refresh.py` (new: `request_refresh`), `backend/app/services/jobs.py` + `backend/app/jobs/queue.py` (`defer_until`), `backend/app/api/deps.py`, `backend/app/services/imports.py` + `backend/app/services/accounts.py` (enqueue), `backend/app/api/routes_ledger_status.py`, `backend/app/schemas/ledger_status.py`, `backend/app/worker/main.py` (comment), `backend/tests/ledger/test_transfer_pairing_guard.py`, `backend/tests/models/test_household_wide_guard.py` (allowlist only), `backend/tests/jobs/test_ledger_refresh*.py` |
 | C4e | `backend/app/services/transfers.py` (new, request side), `backend/app/api/routes_transfers.py`, `backend/app/schemas/transfers.py`, `backend/app/api/routes_ledger.py` (transfer endpoints), `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (transfer fields), `web/src/api/schema.d.ts`, `backend/tests/api/test_transfers*.py` |
 | W3 | `web/src/pages/transactions/Transfers*.tsx`, `web/src/mocks/ledger.ts`, `web/src/api/transfers.ts`, `web/e2e/transfers.e2e.ts` |
-| C5b | `backend/migrations/versions/<n>_recurring_series.py`, `backend/app/models/recurring.py` (new), `backend/app/models/__init__.py`, `backend/app/services/recurring.py` (store side), `backend/app/services/recurring_pool.py` (new), `backend/app/jobs/handlers/ledger_refresh.py` (step 3), `backend/app/jobs/runner.py` + `backend/app/jobs/registry.py` (`cpu_pool`), `backend/app/worker/main.py` (pool lifecycle), `backend/tests/models/test_rls_recurring.py`, `backend/tests/jobs/test_ledger_refresh_recurring.py`, `backend/tests/bench/test_recurring_bench.py` |
+| C5b | `backend/migrations/versions/<n>_recurring_series.py`, `backend/app/models/recurring.py` (new), `backend/app/models/__init__.py`, `backend/app/services/ledger_service.py` (supersede step 8), `backend/app/services/recurring.py` (store side), `backend/app/services/recurring_pool.py` (new), `backend/app/jobs/handlers/ledger_refresh.py` (step 3), `backend/app/jobs/runner.py` + `backend/app/jobs/registry.py` (`cpu_pool`), `backend/app/worker/main.py` (pool lifecycle), `backend/tests/models/test_rls_recurring.py`, `backend/tests/jobs/test_ledger_refresh_recurring.py`, `backend/tests/bench/test_recurring_bench.py` |
 | C5d | `backend/app/api/routes_recurring.py`, `backend/app/schemas/recurring.py`, `backend/app/services/recurring.py` (read side), `backend/app/api/routes_ledger_status.py` (`recurring_count`), `web/src/api/schema.d.ts`, `backend/tests/api/test_recurring*.py` |
 | W4 | `web/src/pages/transactions/Recurring*.tsx`, `web/src/mocks/recurring.ts`, `web/src/mocks/handlers.ts`, `web/src/api/recurring.ts`, `web/e2e/recurring.e2e.ts` |
 | C7 | `backend/tests/eval/**` (new), `docs/phases/PHASE-4.md` |
@@ -1298,9 +1557,10 @@ generated `schema.d.ts` conflicts by rerunning `make api-types`, never by hand.
 | PR #52 | CPU-heavy, off the event loop | `forkserver` pool with a killing timeout (ADR 0029 point 3.3) |
 | PR #52 | Bills hidden when ad-hoc in-range purchases share the merchant; variable weekly pay with a missed cycle dropped | Detector limits, not wiring. C7 reports them by category, and a follow-up comes per 7.4's trigger |
 | PR #58 | An annual pair's typical amount should be the newer charge; annual pairs that change by about 20% are missed; 11 ad-hoc purchases admitted as members | Detector limits. C7 reports each one (count of affected truth bills), and they fall under the same 7.4 follow-up trigger. Wiring doesn't depend on them |
-| PR #55 Keel | Freeze `review_reason` in `import_run_guard` (own migration) | I1d, outside this plan (Tide, own token) |
+| PR #55 Keel | Freeze `review_reason` in `import_run_guard` (own migration) | M2 (3.2), I1d, Tide; in the shared token order |
 | ADR 0016 | Wire `arq_pool` into the API when the first API-triggered job lands | C4d |
-| Bulwark on PR #59 | Items 1–14 | Section 7.3 per slice; section 11 |
+| Bulwark on PR #59 | Items 1–14, then round 2 | Section 7.3 per slice; section 11 |
+| Phase 2 contract §3.3 | The supersede clause, its reverse, and the shared migration-token and file order | D15, 3, 4.4, 7.1, 7.6; steps 1, 7, 8 and 9 named per slice |
 
 ---
 
@@ -1311,7 +1571,9 @@ generated `schema.d.ts` conflicts by rerunning `make api-types`, never by hand.
 2. **A move between two people's accounts** is recorded as two linked single transfers, marked
    automatically when the wording says so, and each person can undo their side. Default: yes (ADR
    0027).
-3. **Only the household owner can take a joint account for one person.** Default: yes (D14).
+3. **Only the household owner can take a joint account for one person**, and nobody can hand an
+   account to someone else in Phase 4. Joint is the recommended setting for a shared account.
+   Default: yes (D14).
 
 The real-data checks are no longer an owner item. Holdfast agents run them locally (section 7.5).
 
@@ -1321,8 +1583,11 @@ The real-data checks are no longer an owner item. Holdfast agents run them local
 - the ML classifier and nightly retrain (cut from Q1)
 - rule actions for tax tag, rename and transfer marking
 - per-rule account lists, and a per-account opt-out from another person's rule
-- undoing a retroactive apply (every value an apply overwrites is re-derivable: user categories are
-  never overwritten, Plaid categories come from the stored PFC, and rule categories come from rules)
+- **handing an account to another person:** this needs a narrow owner-run function with its own
+  ADR (ADR 0008: reassignment is household-wide). That ADR must also give the giver a way to keep
+  importing the account's statements (Gadfly R2-B1).
+- a full undo record for retroactive apply (the "clear this rule's categories" action in 4.4 is the
+  Phase 4 undo)
 - splits UI and API (the C6 remainder, Phase 5 if needed)
 - agent-authored rules (Phase 8: created disabled, a person enables)
 - the `any_of` literal-list mode (ADR 0024 exit)
@@ -1334,9 +1599,10 @@ The real-data checks are no longer an owner item. Holdfast agents run them local
 - recurring price-increase alerts (Phase 5, B4)
 
 Phase 4 doesn't touch secrets handling, `household_setting`, ADR 0015, or anything in the Plaid
-lane (its key entry and slot-tombstone migration are separate stories). I4 must call
-`LedgerWriter.supersede_transaction` (4.4). Phase 4's ADRs are 0024 and 0026–0029. 0023 and 0025
-belong to the Plaid lane.
+lane (its key entry and slot-tombstone migration are separate stories). It adds steps to the Phase
+2 supersede clause and follows the shared token and file order (section 3, 4.4). P4's un-adopt must
+run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026–0029. 0023 and
+0025 belong to the Plaid lane.
 
 ---
 
@@ -1346,14 +1612,14 @@ belong to the Plaid lane.
 | Item | Response | Where |
 |---|---|---|
 | B1 cross-owner moves fail criterion 2 and double-count | **Accepted.** Cross-owner edges that meet the auto bar are linked automatically: both legs marked, plus a `transfer_link`. Joint versus owned counts as different owners. A hidden link's unmark becomes a `pair` rejection at step 0, so no `leg` rejection is written by accident. A card is hidden only when every leg the reader can write is a transfer. The leak is stated and accepted. The C7 holdout includes joint checking paying a personal card, and a private-to-private move | 2.4, 3.3, 4.1, 4.4, 5.3, ADR 0026, ADR 0027, 7.4 |
-| B2 supersession drops people's corrections | **Accepted.** `supersede_transaction` moves the user category, transfer state and splits, and a trigger re-points rejections, links and members in the same unit of work. Test: unmark, then supersede, then refresh, and nothing is re-paired | 3.3, 3.4, 4.4, 7.3 C4c |
+| B2 supersession drops people's corrections | **Accepted.** Revision 3 replaces Revision 2's own writer and re-point trigger with the Phase 2 clause (`LedgerWriter.supersede`, PHASE-2 §3.3). Phase 4 adds steps 7 (rejections, links), 8 (members) and 9 (suggestions, offers) in the same unit of work. Test: a rejected pair isn't re-paired on the winner | 4.4, 7.3 C4c, C4d, C5b |
 | B3 the regex gate is in the API only | **Accepted.** `compile_pattern` refuses every input until C3d, so the codec, loader and API all refuse. The `ast` import test. The 422 covers preview, create and PATCH. "Skipped and flagged" is `RuleOut.status` | 2.2, 5.2, ADR 0024 point 2 |
 | B4 C7 has no evidence plan | **Accepted.** Generator module, seed custody, labelling policy, denominators, precision as slug equality, Plaid share 0, owners in the holdout, bill-tier recovery, false-series caps | 0, 7.4 |
 | S1 rule visibility leaks and naming | **Accepted in part.** A rule from a private row defaults to `own`. `any` reads "Joint and my accounts". Account lists are removed, so "future accounts" is no longer an issue. **Rejected:** a per-account opt-out from another person's rule. That person can set the row (a user choice wins) or make a higher-priority rule. Recorded in section 10 | 2.3, 3.1, 6 (item 2), 10 |
 | S2 slice order and sizes | **Accepted.** C6a depends on C3c, not C3b. "Needs category" is stated plainly. C4c is split into C4c/C4e and C5b into C5b/C5d | 6 (item 1), 7.1, 7.2 |
 | S3 missing preconditions | **Accepted.** The PR #58 row is added. The guard's allowed files are named | 8 |
 | S4 `merchant_key` unversioned for rules | **Accepted.** `merchant_key_version` is in the conditions JSON, and a mismatch is `needs_review`. Whether to ship a rewrite migration is decided in the bump PR | 2.3, 5.2 |
-| S5 retroactive apply keeps no history | **Rejected.** Every value an apply overwrites is re-derivable (section 10), and the audit row names the rule. An apply record is a new RLS table for an undo that Phase 4 doesn't ship | 10 |
+| S5 retroactive apply keeps no history | **Rejected in Revision 2, reversed in Revision 3** (Gadfly R2-S3): "re-derivable" was false for rows that were uncategorised. There's still no apply-record table, but "Clear this rule's categories" is added | 4.4, 5.2, 10 |
 | S6 contradictions with the spec | **Decided.** Savings: ADR 0022 rule 1 applies to income and spending, and rule 3 reads `savings`-kind outflows whatever their `is_transfer`. Pairing never changes categories, so a paired move into savings still counts as saving (ADR 0027 Consequences). Rules vs transfers: the deviation from PLAN 8.2 is recorded (ADR 0029). Grouping by account: kept and recorded (ADR 0028 Consequences, section 10) | ADRs 0027–0029 |
 | S7 builder guesses | **All decided.** PATCH keeps `category_rule_id`. Same category but a new source counts as a change. A disabled rule can't be applied (409). Refresh is coalesced (4.3). "Check again" uses a 1-minute bucket. Caps: 200 per author including disabled, 25 enabled patterns per household | 2.3, 4.3, 4.4, 5.2 |
 | RE2 exit | **Accepted.** Harbor owns the watch. Triggers: a Python bump with no wheel, a `pip-audit` finding with no fix, or 18 months with no release. The exit is regex rules showing `unavailable`, plus an `any_of` literal-list mode | ADR 0024 Consequences |
@@ -1361,15 +1627,15 @@ belong to the Plaid lane.
 ### 11.2 Gadfly, second pass (`reviews/PHASE-4-contract-gadfly.md`)
 | Item | Response | Where |
 |---|---|---|
-| B1 no ownership producer; owner changes break the invariant | **Accepted (Keel decision).** A1 is added before every transfer slice. `PATCH /accounts/{id}` dissolves pairs in the same unit of work, and the import result offers the change. `account_guard_transfer_owner` is the DB backstop. Phase 4 isn't declared single-owner | 5.0, 6 (item 0), 3.3, 7.1 |
+| B1 no ownership producer; owner changes break the invariant | **Accepted (Keel decision).** A1 is added before every transfer slice. `PATCH /accounts/{id}` (`me` / `joint` since Revision 3) refuses, and from C4c dissolves, pairs in the same unit of work, and the import result offers the change. `account_guard_transfer_owner` is the DB backstop. Phase 4 isn't declared single-owner | 5.0, 6 (item 0), 3.3, 7.1 |
 | B2 the per-person pass drops confident pairs | **Accepted.** `pairs` and `links` in a person's view become `likely` suggestions. Step 2 never writes pairs | 2.4, 3.3, 4.1, 7.3 C4b |
-| B3 deleting or superseding a paired leg corrupts the partner and series | **Accepted.** `transaction_dissolve_orphan`, `unmark_transfer` with one survivor, the re-point trigger for members, live-only member listings. Both tests named | 3.3, 3.4, 4.4, 7.3 |
+| B3 deleting or superseding a paired leg corrupts the partner and series | **Accepted.** `transaction_dissolve_orphan`, `unmark_transfer` with one survivor, member moves in supersede step 8 (Revision 3), live-only member listings. Both tests named | 3.3, 3.4, 4.4, 7.3 |
 | B4 acceptance can pass without real data | **Accepted (Keel decision).** Agents run the real-data check locally on a restore of the owner's instance, with counts only. The upgrade dependency is dropped (the instance is at `0009` with a dump). Criterion 4 is rewritten so it can fail. One e2e per screen against the real API | 0, 7.2, 7.5 |
 | B5 the job overwrites choices made while it runs | **Accepted.** `FOR UPDATE` and a re-plan after detection, guarded deletes, upserts that never write user fields, and the rejection re-check under the leg lock | 4.2, ADR 0028, ADR 0029 |
 | S1 series identity holes | **Accepted.** A label implies `confirmed`. The tie rule prefers user-stated series, and the takeover rule moves state to the detection | 2.5, ADR 0028 points 1–2 |
 | S2 the process pool can't kill a task | **Accepted, in Bulwark 5's form:** a `forkserver` `ProcessPoolExecutor`, the worker terminated and the pool recreated on timeout. The spec timeout is explicit (300 s). The path is `app/worker/main.py` | 4.3, 7.3 C5b |
 | S3 refresh fan-out and staleness | **Accepted (Keel decision).** 2-minute buckets deferred to the bucket's end, with no tail check needed (4.3 proves it). Transfer edits and ownership changes enqueue the same key | 4.3 |
-| S4 migration path too long | **Accepted in part.** M2 leaves the plan. **Rejected:** merging M3 and M4, because one migration per slice keeps each RLS review whole and keeps Bulwark's items attached to their slices. **Rejected:** recurring before transfers (7.1, with the reason) | 3, 7.1 |
+| S4 migration path too long | **Accepted in part.** Revision 2 took M2 out. Revision 3 puts it back in the shared token order (PHASE-2 §3.3), still owned by Tide. **Rejected:** merging M3 and M4, because one migration per slice keeps each RLS review whole and keeps Bulwark's items attached to their slices. **Rejected:** recurring before transfers (7.1, with the reason) | 3, 7.1 |
 | S5 cut account scope | **Accepted in part.** `rule_account`, its triggers and its 422s are cut. **Rejected:** cutting `own`. Bulwark 3 needs it so a rule made from a private row stays private | 3.1, 2.3 |
 | S6 types don't match the code | **Accepted.** `DetectedSeries` / `detected_from`, `UUID` ids, rows without a `merchant_key` never sent, `stored_confidence` and the tier from the stored value, the named `load_candidates` loader owned by C4c, the connection comment, and `handlers.ts` ownership | 2.5, 4.1, 7.6 |
 | S7 wall-clock limits flaky in CI | **Accepted, except the ADR 0024 gate,** which Bulwark requires on CI. It keeps better than 6× headroom: accepted corpus patterns took 0.04–0.15 s per 50,000 searches locally against a 1 s gate | 7.3, ADR 0024 |
@@ -1386,8 +1652,35 @@ belong to the Plaid lane.
 | 7 provenance wording | **Accepted**, for `apply_transfer_link` too | 4.5 |
 | 8 step 2 never writes pairs; leftover inference | **Accepted** | 2.4, ADR 0026 point 4 |
 | 9 derived-row FKs include `household_id` | **Accepted**, for every leg column of every derived table | 3.0, 3.3, 3.4 |
-| 10 supersede re-points rejections | **Accepted.** It's a trigger, so it works even for rejections the superseding session can't see. It follows the existing 0005 supersession-guard pattern | 3.3 |
+| 10 supersede re-points rejections | **Accepted.** Revision 2 used a trigger. Revision 3 uses the Phase 2 clause's step 7, in the writer's unit of work, plus a session rule: household-wide, or a loser inserted in the same unit of work | 4.4 |
 | 11 M1 downgrade; `rule_scope_guard` on author | **Accepted** | 3.1 |
 | 12 `repr=False`; audit details; `rule.applied {count}` | **Accepted.** Decision: no count for any scope, because `any` rules also touch the author's private rows | 2.3, 4.5 |
 | 13 `recurring_series` UPDATE policy | **Accepted** | 3.4 |
 | 14 manual key format | **Accepted:** `refresh:manual:20261121T1005Z` and `refresh:auto:20261121T1004Z` | 4.3 |
+
+### 11.4 Bulwark, round 2 (review of `f651389`)
+| Item | Response | Where |
+|---|---|---|
+| Must-fix 1, the cost probe is evadable | **Accepted, with the exact text for points 4b, 7 and 8, plus two measured amendments.** (1) Bulwark's mixed family (half the atom's alphabet, half *all* literals) still accepted `\w*Q\w{20}#` (128 µs per search on crafted subjects) and `[[:digit:]]*1[[:digit:]]{20}#` (65 µs), because a terminator literal like `#` breaks the chain. So the mixed subjects are drawn per literal. (2) The limit applies to each family's mean, so decoy atoms can't dilute a costly family. Re-measured: Bulwark's three evaders are rejected at 68, 64 and 71 µs (worst family), and a 13-decoy variant at 72 µs | ADR 0024 points 4b, 7, 8; 2.2; 7.3 C3d |
+| Must-fix 2, A1 can't hand an account to another person | **Accepted (Keel chose option a).** `owner` is `"me" \| "joint"`. "Who may" is replaced. Section 10 gains the hand-over line. 7.1 says "joint". `accounts.py` never gains `household_wide` | 5.0, 6 item 0, 7.1, 7.3 A1, 10 |
+| Must-fix 3, a cross-owner link from one person's evidence | **Accepted as written** | 2.4, 4.1, ADR 0027 point 2 |
+| Must-fix 4, the owner-change race | **Accepted as written.** One stated limit: a person's session can't lock another person's account row (account RLS applies to row locks). A pair needs both rows locked; a person's link locks only their own, because links don't depend on owners | 4.2, 7.3 C4c, ADR 0027 point 7 |
+| C4c notes | **Accepted.** DELETE on `transfer_link` is household-wide only. **Deviation:** "delete and insert" can't run in a person session once DELETE is household-wide, so the `job` → `person` conversion is a single guarded `origin` UPDATE (`transfer_link_guard`). The orphan trigger's wording is changed. INSERT is WITH CHECK and DELETE is USING for all four tables | 3.3, 7.3 C4c |
+| A1 notes | **Accepted.** The service-only claim check is stated as a residual. The 422 for `visibility` on a joint account is kept, and "any member may change a joint account's visibility" is removed | 5.0 |
+| C3b and C3c notes | **Accepted.** The cap-count leftover is recorded in ADR 0026 point 4. `RuleConditions.account_ids` is removed | 2.3, 7.3, ADR 0026 |
+
+### 11.5 Gadfly, round 2 (`reviews/PHASE-4-contract-gadfly.md`, "Round 2")
+| Item | Response | Where |
+|---|---|---|
+| R2-B1 giving an account away locks the uploader out | **Closed by Bulwark must-fix 2.** There's no hand-over in Phase 4. The sheet recommends Joint and says what Joint lets each person do. The follow-up is recorded with the hand-over ADR | 5.0, 6 item 0, 10 |
+| R2-B2 criterion 2(d) can't pass | **Accepted.** Step 6 is a deterministic scripted reviewer. A fixed, reported residual is planted, so (d) is an exact equality that any missed or wrong exclusion breaks. It's also reported before any click | 0, 7.4 |
+| R2-B3 the go-ahead isn't recorded | **Accepted (Keel's record).** The 2026-11-21 upgrade is cited from the sprint log, with a standing redeploy-after-each-wave rule under the owner's full-autonomy decision | 7.1, 7.5 |
+| R2-B4 a half-accepted private move never reaches the second person | **Accepted, with a different shape than proposed.** Gadfly's fix relaxed the suggestion policy to one visible leg, but a suggestion row names both legs and both accounts. A new `transfer_leg_offer` row names only the reader's own leg. Step 0 creates it household-wide, so the person never reads the link. Decline becomes a `pair` rejection at the next step 0 | 3.3, 4.1, 5.3, 6 item 4, 7.3 C4d |
+| R2-S1 the delete trigger and links disagree | **Accepted.** One rule: the survivor of a deleted leg is unpaired or unmarked, whoever made the mark. That's the Phase 2 rule | 3.3, 4.1, ADR 0027 point 9 |
+| R2-S2 Plaid supersession splits confirmed series | **Accepted.** The newest-member rule, with a table test (12 of 30 under a new key) | 2.5, ADR 0028 point 1 |
+| R2-S3 the undo rejection is unsound | **Accepted.** "Clear this rule's categories" is a preview plus a token, with no table | 4.4, 4.5, 5.2, 6 item 3 |
+| R2-S4 C3b and A1 share files | **Accepted.** A1 no longer edits `ledger_service.py` or its tests | 5.0, 7.1, 7.6 |
+| R2-S5 small contradictions | **All accepted:** the joint-visibility wording, the service-only claim residual, `_defer_until` on the re-push | 5.0, 4.3 |
+| Earlier-blocker note: the re-check must be a separate statement | **Accepted** | 4.2 |
+| Recurring before transfers | **Accepted as a line in ADR 0028** (the all-transfers rule). The order is kept; Keel may swap it (7.1) | 2.5, 7.1, ADR 0028 |
+| Shortest path to one working screen | **Accepted.** C3c → C6a → W1 → live redeploy comes first. C6a doesn't depend on A1, and the shared files and their split are named | 7.1 |

@@ -1,7 +1,7 @@
 # 0029. Rules run where rows are written; transfers and recurring run in one refresh job
 
 - Status: Accepted
-- Date: 2026-11-21 (revised the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel
 
 ## Context
@@ -46,17 +46,18 @@ Constraints:
      one `UPDATE` per apply.
 3. **One job, `ledger.refresh`, does the household-wide work, in this order:**
    1. **Link cleanup and automatic pairs**, in one household-wide session, committed together:
-      - Step 0 resolves links whose leg was deleted, unmarked or rejected (ADR 0027 point 2).
+      - Step 0 resolves links whose leg was deleted, unmarked or rejected, turns declined leg
+        offers into rejections, and keeps the open leg offers for half-accepted links (ADR 0027
+        point 2).
       - Step 1 pairs same-owner edges and links cross-owner edges over all live history, with
         rejections honoured, re-checked under the leg lock, and `job_run_id` in the audit.
       - A rerun pairs nothing new.
    2. **Transfer suggestions per person.** For each person with a login, a
       `scoped_session(household, person)`:
       - runs the matcher over what that person sees
-      - adds `other_side_marked` edges for half-accepted links
       - replaces that person's suggestions (delete and insert in one transaction)
 
-      It never writes a pair or a link.
+      It never writes a pair, a link or a leg offer.
    3. **Recurring detection.**
       - It loads live, posted, non-transfer rows that have a merchant key, household-wide.
       - `detect_rows` runs in a `ProcessPoolExecutor(max_workers=1,

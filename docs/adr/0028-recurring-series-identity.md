@@ -1,7 +1,7 @@
 # 0028. Recurring series keep their identity across runs; status is computed when read
 
 - Status: Accepted
-- Date: 2026-11-21 (revised the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel
 
 ## Context
@@ -34,15 +34,26 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
      half of its members, and that detection matched an `auto` stored series. The user-stated
      series then takes the detection: its id, `user_state` and `label` survive, and the `auto`
      series is deleted. This stops a hollow confirmed series sitting next to an `auto` twin.
+   - **Newest member wins a split** (Gadfly R2-S2). When a stored series' members split across
+     two or more detections, its id and state follow the detection that holds its newest live
+     member, not the one with the largest overlap.
+     - Plaid rows carry a `merchant_name` and statement rows don't, so supersession can move a
+       bill's recent members to a new merchant key.
+     - The person's confirmation should stay on the live schedule, not the old history.
    - **Unmatched stored series:** an `auto`, unlabelled one is deleted. `confirmed`, `dismissed` and
      labelled ones stay with their old detection columns, so a person's choice is never lost. Any of
      their members claimed by a detection move to that detection.
+   - **A series whose live members are all `is_transfer` is deleted whatever its state** (Gadfly
+     round 2). Its rows turned out to be transfers, such as card payments paired after the series
+     was confirmed. This makes it safe for recurring to ship before transfers.
    - Member sets are disjoint across series (`UNIQUE (transaction_id)` on `recurring_member`).
    - **A label implies `confirmed`** unless the series is `dismissed`. Naming a series is
      confirming it, so "the label sticks" holds.
-   - **Supersession keeps identity.** When a member row is superseded, a trigger re-points its
-     `recurring_member` row to the successor in the same unit of work. A series whose rows are all
-     superseded keeps its id, members and state. Listings count and show live members only.
+   - **Supersession keeps identity.** When a member row is superseded, supersede step 8
+     (`PHASE-2-contract.md` §3.3, added by C5b) moves its `recurring_member` row to the winner in
+     the same unit of work, or deletes it when the winner is already in that series. A series whose
+     rows are all superseded keeps its id, members and state. Listings count and show live members
+     only.
 2. **The job never overwrites a choice made while it runs.**
    - Detection takes seconds, and the stored series loaded before it can be stale. So after
      detection, the job locks the household's stored series (`SELECT … FOR UPDATE`, with their
@@ -80,8 +91,10 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
   two series for one group (two plans billed on one card), and a key change would orphan rows.
 - **Replace all series on every run:** it loses confirmations, dismissals and labels.
 - **Mapping member ids through `superseded_by_id` inside `reconcile_series`:** it works for
-  reconciliation, but every reader would need the same mapping. Re-pointing once, in the same unit
-  of work as the supersede, keeps the stored members true.
+  reconciliation, but every reader would need the same mapping. Moving them once, in the supersede's
+  unit of work, keeps the stored members true.
+- **Largest overlap always wins:** simple, but a partial Plaid supersession leaves the confirmation
+  on the stale statement history.
 - **Optimistic concurrency (a version column checked on write):** a conflict would fail the whole
   job attempt and retry 7 s of detection. Locking only for the final write costs nothing.
 - **Store status and refresh it nightly:** another job and a stale window, for a value that's a

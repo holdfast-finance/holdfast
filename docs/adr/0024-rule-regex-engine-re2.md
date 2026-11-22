@@ -1,7 +1,7 @@
 # 0024. Rule patterns run on RE2 (google-re2), not Python `re`
 
 - Status: Accepted
-- Date: 2026-11-21 (revised the same day after Bulwark's review of PR #59)
+- Date: 2026-11-21 (revised twice the same day after Bulwark's reviews of PR #59)
 - Deciders: Lattice (architect); Keel. Bulwark verdict required on the implementing PR (C3d).
 
 ## Context
@@ -95,28 +95,60 @@ Lattice's measurements, 2026-11-21:
 
    Error messages never echo the pattern.
 
-   4b. **Save-time cost probe.** `compile_pattern` times the compiled pattern against a probe set
+   4b. **Save-time cost probe.** `compile_pattern` times the compiled pattern against a probe set,
    and rejects it with a fixed message ("This pattern is too slow to run on every transaction.")
-   when its mean exceeds **10 µs per search** (`PROBE_LIMIT_MICROSECONDS`).
+   when a probe family's mean exceeds **10 µs per search** (`PROBE_LIMIT_MICROSECONDS`).
    - **Probe set:** 64 fixed synthetic subjects of `MAX_SUBJECT_LENGTH` characters:
      - 24 over `{A,B,C}`
      - 8 over `{A,B}`
      - 31 description-like
      - one run of `A`
 
-     Plus 32 subjects for each of up to four bracket classes in the pattern (ranges expanded,
-     negated classes skipped) and for `.`, drawn with a fixed seed. Classes are found by a character
-     scan, not `re`.
-   - **Why derived subjects:** a fixed set alone accepted `[XY]*X[XYZ]{20}W` at 1.1 µs, while the
-     same pattern costs 335 µs per search on subjects over its own alphabet.
+     Bulwark's text, adopted as written: "Plus 32 subjects for every class atom in the pattern:
+     bracket classes, including negated ones (complemented within printable ASCII), escapes (`\d \D
+     \w \W \s \S \pL \PL \pN`), POSIX classes and `.`. Each atom also gets 32 subjects drawn half from
+     its alphabet and half from the pattern's literal characters. A pattern with more than 16
+     distinct class atoms is rejected as too complex." (`MAX_CLASS_ATOMS`.)
+   - **Two amendments, both measured:**
+     - **Per-literal mixed families.** The "half from the pattern's literal characters" subjects
+       are drawn per literal: for each literal character (up to 32), 32 subjects, half from the
+       atom's alphabet and half that one character. A family that mixes all the literals together
+       still accepted `\w*Q\w{20}#` (128 µs per search on subjects over `{Q,A}`) and
+       `[[:digit:]]*1[[:digit:]]{20}#` (65 µs over `{0,1}`), because the terminator `#` keeps
+       breaking the chain the blow-up needs.
+     - **The limit applies to each family's mean, not the whole set's.** With up to 16 atoms, one
+       costly family is a small share of the set, and decoy atoms would dilute it below the limit.
+       The probe stops at the first family over the limit.
+   - **Classes are found by a character scan, not `re`.** Repeat counts (`{n,m}`) aren't literals.
+     Generated letters are upper case, because matching is case-insensitive.
+   - **Why derived subjects at all:** a fixed set alone accepted `[XY]*X[XYZ]{20}W` at 1.1 µs, while
+     the same pattern costs 335 µs per search on subjects over its own alphabet.
    - **Timing:** each pass compiles the pattern afresh, because the DFA cache is per compiled
-     object. A warm second pass hid every blow-up in our measurements. The probe keeps the best of
+     object. A warm second pass hid every blow-up in our measurements. Each family keeps the best of
      three cold passes, which cuts false rejections under load.
-   - **Measured:**
-     - It rejects the three shapes above (46, 78 and 54 µs), `A[ABC]{12}D` (17.7), `A[ABC]{11}D`
-       (10.8), `[AB]*A[ABC]{9}D` (12.9) and `[XY]*X[XYZ]{20}W` (30.7).
-     - It accepts literals, alternations, anchored classes and PR #53's two patterns at 0.8–1.3 µs.
-     - It costs about 2 ms per pattern.
+   - **Measured** (2026-11-21, round 2; worst family mean, cold, best of three):
+     - **Bulwark's three evaders are rejected:**
+       - `(?:[J][K][V][Q])?[XY]*X[XYZ]{20}W`: 68 µs
+       - `\d*[0-4]\d{20}#`: 64 µs
+       - `[^5-9]\d{20}#`: 71 µs
+
+       Bulwark measured them passing the revision-2 probe at about 1 µs.
+     - Also rejected:
+       - a 13-decoy variant of the first: 72 µs
+       - a 5-decoy variant of `[AB]*A[ABC]{20}D`: 70 µs
+       - `\w*Q\w{20}#`: 110–117 µs
+       - `[[:digit:]]*1[[:digit:]]{20}#`: 70–73 µs
+       - `[A-Z ]*E[A-Z ]{20}Q`: 106 µs
+       - `[A-Z0-9 ]*X[A-Z0-9 ]{14}Q`: 93 µs
+       - the three shapes above: 63, 117 and 139 µs
+     - Still accepted at 0.9–2.4 µs:
+       - literals and alternations (`AMZN MKTP|AMAZON\.COM`, `UBER (EATS|TRIP)`)
+       - anchored classes (`^[A-Z]+ [0-9]{4}$`)
+       - `\d{3}-\d{4}`, `[^0-9]+ PAYMENT`, `(?:VENMO|ZELLE|PAYPAL) \*?[A-Z ]+`
+       - PR #53's two patterns
+       - `[^A-W]{1}[XYZ]{120}#`. Every character of its class starts and continues a run, so its
+         DFA stays small (2.1 µs on its own alphabet).
+     - It costs 0.3–3 ms per accepted pattern, and up to about 15 ms to reject one.
    - **The probe affects acceptance only, never matching.** A stored pattern is never re-probed,
      and its matches never depend on load, so preview count = applied count still holds. A
      borderline pattern may be accepted on one save and refused on another. That's accepted:
@@ -143,16 +175,26 @@ Lattice's measurements, 2026-11-21:
 
    **Each corpus pattern must either be rejected by `compile_pattern` or run 50,000 searches of
    1,024-character subjects in under 1 s on CI.**
-   - The subjects are the probe's families at 1,024 characters (truncated to 256 by `search`, as in
-     production).
+   - Bulwark's text, adopted as written: "Gate subjects are independent of the probe: for each
+     corpus pattern, 1,024-character subjects over the union of every atom's alphabet, plus the
+     probe families. The corpus adds decoy-class (five or more classes), escape-class,
+     negated-class and POSIX variants of the three shapes."
+   - The corpus also holds Lattice's two per-literal cases (`\w*Q\w{20}#`,
+     `[[:digit:]]*1[[:digit:]]{20}#`).
+   - The subjects are truncated to 256 by `search`, as in production.
    - The three shapes can only pass by rejection: they take 12–28 s.
-   - Measured locally: every pattern the probe accepted took 0.04–0.15 s for 50,000 searches. The
-     borderline ones it rejected would have taken 0.39–0.67 s.
+   - Measured locally:
+     - every pattern the round-2 probe accepted took 0.04–0.10 s for 50,000 searches over the
+       union-alphabet subjects plus the probe families
+     - the borderline patterns the revision-2 probe rejected would have taken 0.39–0.67 s
    - That leaves better than 6× headroom for free-tier runners. C3d records its CI numbers in the
      PR.
 8. **Cap: 25 enabled `regex` rules per household.** The `rule_caps` trigger enforces it, counting
-   every person's rules (PHASE-4 contract 3.1). That bounds the worst case at ingest and in preview
-   to 25 × 10 µs per row.
+   every person's rules (PHASE-4 contract 3.1). With 4b's class coverage, every accepted pattern
+   costs at most the probe limit on its own alphabet. The cap then bounds ingest and preview at
+   about 25 × 10 µs per row. The count crosses people, so a 409 at the cap tells one person how
+   many enabled pattern rules exist in total, `own` ones included. That's accepted (ADR 0026 point
+   4).
 
 ## Alternatives considered
 - **Python `re` with the C3a validator:** measured at 0.95 s per search on a pattern that passes it.
@@ -186,3 +228,7 @@ Lattice's measurements, 2026-11-21:
 - Patterns that worked under `re` semantics but use backreferences or lookaround are rejected at
   save. No rules are stored yet, so nothing needs migrating.
 - The probe is timing-based, so acceptance near 10 µs can vary between saves. Matching never does.
+- The probe is a heuristic over subject families, not a proof. It catches every adversarial shape
+  measured so far: counted classes after an unanchored prefix, decoys, escapes, negation, POSIX and
+  frequent literals. A new evasion is a corpus addition and a probe change in `rule_regex.py`,
+  reviewed by Bulwark. The cap and the 256-character subject bound the damage in the meantime.

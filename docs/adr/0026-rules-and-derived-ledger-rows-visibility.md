@@ -1,7 +1,7 @@
 # 0026. Who sees and who writes rules, transfer suggestions, links and recurring series
 
 - Status: Accepted
-- Date: 2026-11-21 (revised the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel. Amends ADR 0008 (adds per-person policies for `rule` and
   five new tables).
 
@@ -97,23 +97,36 @@ Two leaks are easy to build by accident:
      - (a) A `likely` suggestion between two accounts the person can see, both hinted, tells them
        that step 1 found a competitor they can't see: an equal-amount row on a hidden account.
      - (b) A leg that step 1 marked as a transfer with no counterpart the person can see (a hidden
-       link) tells them money moved to or from an account hidden from them.
+       link) tells them money moved to or from an account hidden from them. So does a **leg offer**
+       ("another household member marked the other side"): the second person's half of a move the
+       first accepted.
      - (c) A shared leg's `transfer_group_id` tells another member the same (ADR 0027 point 1).
+     - (d) The household-wide cap of 25 enabled pattern rules (ADR 0024 point 8) is counted across
+       people. A 409 at the cap lets one person learn how many enabled pattern rules exist in total,
+       including another person's `own` ones. It never shows their names, patterns or effects
+       (Bulwark).
 
-     Each reveals that an equal amount exists somewhere, never which account, row, date or
-     description. The amount is already on the visible row. We accept these. The alternative is
-     leaving moves between owners counted twice.
+     (a)–(c) each reveal that an equal amount exists somewhere, never which account, row, date or
+     description, and the amount is already on the visible row. (d) reveals a count. We accept
+     these. The alternative is leaving moves between owners counted twice, or a per-person cap that
+     doubles the worst case.
+   - **Leg offers** (`transfer_leg_offer`) are rows for one person that name only that person's own
+     leg, which they can write. Step 0 creates them household-wide, so the person never reads the
+     link or the other leg.
 5. **Corrections, links and series are visible through their accounts.**
    - `transfer_rejection` and `transfer_link` are readable when both legs are detail-visible, and
-     writable (insert or delete) when that holds and either leg's account is writable.
+     insertable when that holds and either leg's account is writable.
+   - A rejection can be deleted under the same rule. A link can be deleted only household-wide.
+   - A person may change one thing about a link: its `origin`, from `job` to `person` (a guard
+     trigger).
    - `recurring_series` and `recurring_member` are readable when the series account is
      detail-visible.
    - Detection columns are written only household-wide. A person who may write the account may
      change only `user_state` and `label`. A guard trigger enforces this, because both writers are
      `holdfast_app` and column grants can't tell them apart. The UPDATE policy has both USING and
      WITH CHECK.
-   - Some trigger work must see rows the caller can't: the supersede re-point, the `rule_caps`
-     count, the account owner guard. These triggers follow the 0002/0005 pattern: they switch
+   - Some trigger work must see rows the caller can't: the `rule_caps` count, the account owner
+     guard, the orphan-pair check. These triggers follow the 0002/0005 pattern: they switch
      `app.household_wide` on for their own fixed statements and restore it. Those statements touch
      only rows named by the triggering row.
 6. **Summary-only viewers see none of these rows**, the same as transactions.
