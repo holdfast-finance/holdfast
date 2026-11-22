@@ -29,6 +29,7 @@ from tests.ledger.test_ledger_sync_verbs import (
     connector,
     document,
     import_row,
+    people,
     put,
     row,
     split,
@@ -551,3 +552,115 @@ async def test_random_supersede_unsupersede_round_trips_keep_the_ledger_consiste
                     select(Transaction.id).where(Transaction.transfer_group_id == group)
                 )
                 assert len(legs.all()) == 2
+
+
+# ------------------------------------------------------------ review follow-up
+
+
+async def test_unsupersede_after_the_winners_amount_drifted_drops_its_splits(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a, old, new = await setup(factory, household, "-25.00")
+    await supersede(factory, household, old, new)
+    await put(factory, household, connector(a, "ext-1", "-30.00"))  # the bank moved the amount
+    await split(factory, household, new, ["-20.00", "-10.00"])
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        w = LedgerWriter(s, household)
+        assert await w.remove_external(a, "ext-1") is True
+        assert w.counts["splits_cleared"] == 1
+    # The unit committed (the split-balance trigger is deferred to commit) and old is whole.
+    r = await row(factory, household, old)
+    assert r.superseded_by_id is None and r.amount == D("-25.00")
+    assert await splits_of(factory, household, old) == []
+
+
+async def test_unsupersede_after_drift_keeps_the_winner_consistent_when_it_stays(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a, old, new = await setup(factory, household, "-25.00")
+    await supersede(factory, household, old, new)
+    await put(factory, household, connector(a, "ext-1", "-30.00"))
+    await split(factory, household, new, ["-20.00", "-10.00"])
+    await unsupersede(factory, household, old)  # un-adopt keeps no winner, but the unit must commit
+    assert await splits_of(factory, household, new) == []
+    assert await splits_of(factory, household, old) == []
+
+
+async def test_unsupersede_after_drift_dissolves_a_pair_made_on_the_winner(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    b = await conn_account(factory, household)
+    old = await import_row(factory, household, a, "-25.00")
+    partner = await put(factory, household, connector(b, "ext-p", "25.00"))
+    await pair(factory, household, old, partner)
+    new = await put(factory, household, connector(a, "ext-1", "-25.00"))
+    await supersede(factory, household, old, new)
+    await put(factory, household, connector(a, "ext-1", "-30.00"))  # drift dissolves the pair
+    assert (await row(factory, household, partner)).transfer_group_id is None
+    other = await put(factory, household, connector(b, "ext-q", "30.00"))
+    await pair(factory, household, new, other)  # the winner is re-paired at its new amount
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        w = LedgerWriter(s, household)
+        await w.unsupersede_transaction(old)
+        assert w.counts["transfers_dissolved"] == 1
+    for tid in (old, new, other):
+        r = await row(factory, household, tid)
+        assert (r.is_transfer, r.transfer_group_id) == (False, None)
+
+
+async def test_unsupersede_always_clears_the_winners_transfer_state(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    _, old, new = await setup(factory, household)
+    await supersede(factory, household, old, new)
+    await single(factory, household, new)
+    await touch(factory, household, old, is_transfer=True)  # old already carries a mark
+    await unsupersede(factory, household, old)
+    assert (await row(factory, household, new)).is_transfer is False
+
+
+async def test_a_person_session_supersedes_across_a_cross_owner_pair(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    alex, sam = await people(factory, household)
+    joint = await conn_account(factory, household)
+    alexs = await conn_account(factory, household, owner=alex)
+    old = await import_row(factory, household, joint, "-30.00")
+    partner = await put(factory, household, connector(alexs, "ext-p", "30.00"))
+    group = await pair(factory, household, old, partner)  # Sam can't see the partner leg
+    new = await put(factory, household, connector(joint, "ext-1", "-30.00"))
+    async with scoped_session(factory, household, sam) as s:
+        await LedgerWriter(s, household, user_id=USER).supersede_transaction(old, new)
+    assert (await row(factory, household, new)).transfer_group_id == group
+    assert (await row(factory, household, partner)).transfer_group_id == group
+    async with scoped_session(factory, household, sam) as s:
+        await LedgerWriter(s, household, user_id=USER).unsupersede_transaction(old)
+    assert (await row(factory, household, old)).transfer_group_id == group
+    assert (await row(factory, household, new)).transfer_group_id is None
+    # Removing a paired winner Sam can lock but whose partner she can't: delete goes through, the
+    # partner is left to the Phase 4 orphan trigger.
+    other = await put(factory, household, connector(joint, "ext-2", "-9.00"))
+    their = await put(factory, household, connector(alexs, "ext-q", "9.00"))
+    g2 = await pair(factory, household, other, their)
+    async with scoped_session(factory, household, sam) as s:
+        assert await LedgerWriter(s, household, user_id=USER).remove_external(joint, "ext-2")
+    assert (await row(factory, household, their)).transfer_group_id == g2
+
+
+async def test_a_person_session_cannot_supersede_rows_of_a_private_account(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    alex, sam = await people(factory, household)
+    alexs = await conn_account(factory, household, owner=alex)
+    old = await import_row(factory, household, alexs, "-2.00")
+    new = await put(factory, household, connector(alexs, "ext-1", "-2.00"))
+    async with scoped_session(factory, household, sam) as s:
+        w = LedgerWriter(s, household, user_id=USER)
+        with pytest.raises(TransactionNotFoundError):
+            await w.supersede_transaction(old, new)
+        with pytest.raises(TransactionNotFoundError):
+            await w.unsupersede_transaction(old)
+    async with scoped_session(factory, household, alex) as s:
+        await LedgerWriter(s, household, user_id=USER).supersede_transaction(old, new)
+    assert (await row(factory, household, old)).superseded_by_id == new

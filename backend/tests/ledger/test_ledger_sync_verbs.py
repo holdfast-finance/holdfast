@@ -22,6 +22,7 @@ from app.models import (
     Category,
     Document,
     ImportRun,
+    Person,
     Transaction,
     TransactionSplit,
 )
@@ -42,7 +43,12 @@ DAY = date(2026, 3, 10)
 
 
 async def conn_account(
-    f: Factory, hid: uuid.UUID, *, env: str = "production", connected: bool = True
+    f: Factory,
+    hid: uuid.UUID,
+    *,
+    env: str = "production",
+    connected: bool = True,
+    owner: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """A synthetic account. Connected + production is an adopted import account (ADR 0033);
     connected + sandbox is a plain connector account (the database refuses to adopt into
@@ -75,7 +81,8 @@ async def conn_account(
                 name="Example Checking",
                 type="depository",
                 currency="USD",
-                visibility="shared",
+                owner_person_id=owner,
+                visibility="private" if owner else "shared",
             )
         )
     if adopt:
@@ -180,6 +187,14 @@ async def import_row(
             )
         )
     return tid
+
+
+async def people(f: Factory, hid: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
+    alex, sam = uuid.uuid4(), uuid.uuid4()
+    async with scoped_session(f, hid, None, household_wide=True) as s:
+        s.add(Person(id=alex, household_id=hid, display_name="Alex", filing_role="primary"))
+        s.add(Person(id=sam, household_id=hid, display_name="Sam", filing_role="spouse"))
+    return alex, sam
 
 
 async def row(f: Factory, hid: uuid.UUID, tid: uuid.UUID) -> Transaction:
@@ -531,3 +546,127 @@ async def test_post_pending_refuses_a_posted_row_that_is_pending_or_a_live_row(
             await svc.post_pending("plain", connector(a, "post-2", "-1.00"))
         with pytest.raises(LedgerRuleError):  # the posted external id is taken
             await svc.post_pending("pend-1", connector(a, "plain", "-1.00"))
+
+
+# ------------------------------------------------------------ review follow-up
+
+
+async def test_post_pending_validates_the_pending_row_before_inserting_the_posted_row(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    await put(factory, household, connector(a, "plain", "-1.00"))  # posted already, not pending
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        with pytest.raises(LedgerRuleError):
+            await LedgerWriter(s, household).post_pending("plain", connector(a, "post-2", "-1.00"))
+        # Same session, after the refusal: nothing was inserted (no reliance on the rollback).
+        found = await s.execute(select(Transaction.id).where(Transaction.external_id == "post-2"))
+        assert found.first() is None
+
+
+async def test_post_pending_replay_returns_the_posted_id_and_writes_nothing(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    await put(factory, household, connector(a, "pend-1", "-10.00", is_pending=True))
+    posted = connector(a, "post-1", "-10.00")
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        first = await LedgerWriter(s, household).post_pending("pend-1", posted)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        w = LedgerWriter(s, household)
+        assert await w.post_pending("pend-1", posted) == first
+        assert not w.counts
+        rows = await s.execute(select(Transaction.id).where(Transaction.account_id == a))
+        assert [r for (r,) in rows] == [first]
+
+
+async def test_remove_external_of_a_paired_leg_releases_the_partner(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    b = await conn_account(factory, household)
+    out_leg = await put(factory, household, connector(a, "ext-out", "-20.00"))
+    in_leg = await put(factory, household, connector(b, "ext-in", "20.00"))
+    await pair_rows(factory, household, out_leg, in_leg)
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        w = LedgerWriter(s, household)
+        assert await w.remove_external(a, "ext-out") is True
+        assert w.counts["transfers_dissolved"] == 1
+    r = await row(factory, household, in_leg)
+    assert (r.is_transfer, r.transfer_group_id) == (False, None)
+
+
+async def test_a_later_upsert_without_a_pending_id_keeps_the_stored_one(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    tid = await put(factory, household, connector(a, "ext-1", "-5.00", pending_external_id="p-1"))
+    await put(factory, household, connector(a, "ext-1", "-5.00", description_raw="CHANGED"))
+    r = await row(factory, household, tid)
+    assert (r.pending_external_id, r.description_raw) == ("p-1", "CHANGED")
+
+
+async def test_upsert_refuses_an_existing_row_from_another_source(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    await put(factory, household, connector(a, "ext-1", "-5.00"))
+    async with scoped_session(factory, household, None, household_wide=True) as s:
+        with pytest.raises(LedgerRuleError, match="upsert_source_mismatch"):
+            await LedgerWriter(s, household).upsert_external(
+                connector(a, "ext-1", "-5.00", source="simplefin")
+            )
+
+
+async def pair_rows(f: Factory, hid: uuid.UUID, a: uuid.UUID, b: uuid.UUID) -> uuid.UUID:
+    async with scoped_session(f, hid, None, household_wide=True) as s:
+        return await LedgerWriter(s, hid, user_id=USER).mark_transfer_pair(a, b)
+
+
+async def test_every_sync_verb_refuses_an_anonymous_person_session(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    a = await conn_account(factory, household)
+    old = await import_row(factory, household, a, "-1.00")
+    new = await put(factory, household, connector(a, "ext-1", "-1.00"))
+    _, sam = await people(factory, household)
+    async with scoped_session(factory, household, sam) as s:
+        w = LedgerWriter(s, household)  # no acting user, not a system job
+        with pytest.raises(LedgerRuleError, match="acting user or a system job"):
+            await w.upsert_external(connector(a, "ext-2", "-1.00"))
+        with pytest.raises(LedgerRuleError, match="acting user or a system job"):
+            await w.remove_external(a, "ext-1")
+        with pytest.raises(LedgerRuleError, match="acting user or a system job"):
+            await w.post_pending("x", connector(a, "ext-3", "-1.00"))
+        with pytest.raises(LedgerRuleError, match="acting user or a system job"):
+            await w.supersede_transaction(old, new)
+        with pytest.raises(LedgerRuleError, match="acting user or a system job"):
+            await w.unsupersede_transaction(old)
+
+
+async def test_person_sessions_follow_account_write_access_for_the_sync_verbs(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    alex, sam = await people(factory, household)
+    joint = await conn_account(factory, household)
+    alexs = await conn_account(factory, household, owner=alex)
+    theirs = await put(factory, household, connector(alexs, "a-1", "-3.00"))
+    pend = await put(factory, household, connector(alexs, "a-pend", "-3.00", is_pending=True))
+    assert theirs and pend
+    async with scoped_session(factory, household, sam) as s:
+        w = LedgerWriter(s, household, user_id=USER)
+        out = await w.upsert_external(connector(joint, "j-1", "-4.00"))  # joint: allowed
+        assert out.action is UpsertAction.INSERTED
+        await w.upsert_external(connector(joint, "j-pend", "-6.00", is_pending=True))
+        posted_id = await w.post_pending("j-pend", connector(joint, "j-posted", "-6.00"))
+        assert posted_id
+        with pytest.raises(LedgerRuleError):  # Alex's private account: the insert is denied
+            await w.upsert_external(connector(alexs, "a-2", "-4.00"))
+    async with scoped_session(factory, household, sam) as s:
+        w = LedgerWriter(s, household, user_id=USER)
+        assert await w.remove_external(alexs, "a-1") is False  # invisible: behaves as missing
+        with pytest.raises(TransactionNotFoundError):
+            await w.post_pending("a-pend", connector(alexs, "a-posted", "-3.00"))
+    async with scoped_session(factory, household, alex) as s:
+        w = LedgerWriter(s, household, user_id=USER)
+        assert await w.remove_external(alexs, "a-1") is True

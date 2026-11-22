@@ -76,7 +76,6 @@ _UPSERT_FIELDS = (
     "plaid_pfc_primary",
     "plaid_pfc_detailed",
     "is_pending",
-    "pending_external_id",
 )
 
 
@@ -464,7 +463,15 @@ class LedgerWriter:
         and, for a paired transfer leg, dissolves the pair (the legs no longer match); both are
         reported on the outcome and tallied in ``counts``. Not audited per row: the sync run is
         the record.
+
+        **P5b must surface ``transfers_dissolved``** to the user (a transfer they or the matcher
+        paired just broke because the bank changed an amount); it is not silent bookkeeping.
+        An existing row whose ``source`` differs from the incoming one is refused. A ``None``
+        ``pending_external_id`` never erases the one already stored.
+
+        Needs an acting user or a system job (household-wide) session.
         """
+        await self._require_actor_or_system()
         validate_amount(new.amount)
         if new.external_id is None or new.source not in CONNECTOR_SOURCES:
             raise LedgerRuleError("upsert_external needs a connector row with an external id")
@@ -479,12 +486,19 @@ class LedgerWriter:
         rows = await self._lock_group([existing_id])
         txn = rows[existing_id]
         self._require_live(txn)
+        if txn.source != new.source:
+            raise LedgerRuleError("upsert_source_mismatch")
         changed = False
         for attr in _UPSERT_FIELDS:
             value = getattr(new, attr)
             if getattr(txn, attr) != value:
                 setattr(txn, attr, value)
                 changed = True
+        if new.pending_external_id is not None and txn.pending_external_id != (
+            new.pending_external_id
+        ):
+            txn.pending_external_id = new.pending_external_id
+            changed = True
         category_kept = False
         if new.category_id is not None and new.category_source is not None:
             incoming = AutoCategorySource(new.category_source).value
@@ -507,11 +521,8 @@ class LedgerWriter:
                 try:
                     await self._check_pair(txn, partner, amount_a=new.amount)
                 except TransferPairError:
-                    for leg in (txn, partner):
-                        leg.is_transfer = False
-                        leg.transfer_group_id = None
+                    self._dissolve_group(txn, rows)
                     dissolved = True
-                    self.counts["transfers_dissolved"] += 1
             txn.amount = new.amount
             changed = True
         await self._flush()
@@ -527,8 +538,13 @@ class LedgerWriter:
         """Delete a connector row (Plaid ``removed``). ``False`` when there is no such row.
 
         A winner is un-superseded first, so the row it replaced counts again and gets back the
-        state the winner holds. A paired leg's partner is left to the Phase 4 orphan trigger.
+        state the winner holds. A paired leg's partner is released here while this session can
+        lock it (counted as ``transfers_dissolved``; the caller should surface it). A partner this
+        session can't see is left to the Phase 4 orphan trigger, which stays the backstop.
+
+        Needs an acting user or a system job (household-wide) session.
         """
+        await self._require_actor_or_system()
         tid = await self._id_by_external(account_id, external_id)
         if tid is None:
             return False
@@ -540,7 +556,11 @@ class LedgerWriter:
         ).scalar_one_or_none()
         if replaced is not None:
             await self.unsupersede_transaction(replaced)
-        txn = (await self._lock_group([tid]))[tid]
+        rows = await self._lock_group([tid])
+        txn = rows[tid]
+        if txn.transfer_group_id is not None:
+            self._dissolve_group(txn, rows)
+            await self._flush()
         result = await self._db(
             self._s.execute(delete(Transaction).where(Transaction.id == tid)),
             TransactionNotFoundError,
@@ -557,7 +577,15 @@ class LedgerWriter:
         notes, tax and receipt fields, the transfer state, and the splits when the amount is
         unchanged. When the amount changed, the splits go with the pending row and a paired
         pending leg's pair is dissolved. Both are tallied in ``counts``.
+
+        **Replay:** when the posted row already exists with this ``pending_external_id`` and the
+        pending row is gone, it returns the posted id and writes nothing. A pending row that was
+        never seen raises ``TransactionNotFoundError``: **P2b routes that case to
+        ``upsert_external``** (the posted row simply arrives without a pending twin).
+
+        Needs an acting user or a system job (household-wide) session.
         """
+        await self._require_actor_or_system()
         validate_amount(posted.amount)
         if posted.external_id is None or posted.source not in CONNECTOR_SOURCES:
             raise LedgerRuleError("post_pending needs a connector row with an external id")
@@ -566,10 +594,21 @@ class LedgerWriter:
         if posted.pending_external_id not in (None, pending_external_id):
             raise LedgerRuleError("pending_external_id does not match the posted row")
         pending_id = await self._id_by_external(posted.account_id, pending_external_id)
+        existing_id = await self._id_by_external(posted.account_id, posted.external_id)
         if pending_id is None:
-            raise TransactionNotFoundError("pending transaction not found")
-        if await self._id_by_external(posted.account_id, posted.external_id) is not None:
+            if existing_id is None:
+                raise TransactionNotFoundError("pending transaction not found")
+            existing = (await self._lock_group([existing_id]))[existing_id]
+            if existing.pending_external_id == pending_external_id:
+                return existing_id
             raise LedgerRuleError("posted transaction already exists")
+        if existing_id is not None:
+            raise LedgerRuleError("posted transaction already exists")
+        # Validate the pending row under lock before anything is inserted.
+        pending = (await self._lock_group([pending_id]))[pending_id]
+        self._require_live(pending)
+        if not pending.is_pending:
+            raise LedgerRuleError("the replaced row is not pending")
         posted_id = await self.insert_transaction(
             replace(posted, pending_external_id=pending_external_id), skip_duplicates=True
         )
@@ -577,9 +616,6 @@ class LedgerWriter:
             raise LedgerRetryableError("posted row appeared meanwhile; retry the unit of work")
         rows = await self._lock_group([pending_id, posted_id])
         pending, post = rows[pending_id], rows[posted_id]
-        self._require_live(pending)
-        if not pending.is_pending:
-            raise LedgerRuleError("the replaced row is not pending")
         if outranks(pending.category_source, post.category_source):
             post.category_id, post.category_source = pending.category_id, pending.category_source
         post.notes = pending.notes
@@ -594,19 +630,17 @@ class LedgerWriter:
             if await self._has_splits(pending.id):
                 self.counts["splits_cleared"] += 1
             if pending.transfer_group_id is not None:
-                group = pending.transfer_group_id
-                for leg in [r for r in rows.values() if r.transfer_group_id == group]:
-                    leg.is_transfer = False
-                    leg.transfer_group_id = None
-                self.counts["transfers_dissolved"] += 1
+                self._dissolve_group(pending, rows)
             elif pending.is_transfer:
                 pending.is_transfer = False
                 post.is_transfer = True
             await self._flush()
-        await self._db(
+        result = await self._db(
             self._s.execute(delete(Transaction).where(Transaction.id == pending_id)),
             TransactionNotFoundError,
         )
+        if getattr(result, "rowcount", 0) != 1:
+            raise TransactionNotFoundError("pending transaction not found")
         self._s.expunge(pending)
         return posted_id
 
@@ -619,7 +653,15 @@ class LedgerWriter:
 
         Raises ``LedgerRuleError("supersede_amount_mismatch")`` for unequal amounts and
         ``SupersedeConflict`` for transfer state that can't be taken over. Both rows stay live.
+
+        **The counters increment before the raise** (``supersede_amount_mismatch``,
+        ``supersede_conflict``). A caller that catches the error and carries on in the same
+        session must run each call in a savepoint (``session.begin_nested()``), so a later
+        rollback of the unit cannot leave a half-counted run. Only locks are taken before a raise.
+
+        Needs an acting user or a system job (household-wide) session.
         """
+        await self._require_actor_or_system()
         if old_id == new_id:
             raise LedgerRuleError("supersede_same_row")
         rows = await self._lock_group([old_id, new_id])
@@ -673,7 +715,17 @@ class LedgerWriter:
     async def unsupersede_transaction(self, old_id: uuid.UUID) -> None:
         """Undo ``supersede_transaction``: ``old`` is live again and takes back what the winner
         holds where its own value is empty (or lower-ranked, for the category). The winner's
-        transfer state is cleared, so deleting it afterwards leaves no orphan leg."""
+        transfer state is always cleared, so deleting it afterwards leaves no orphan leg.
+
+        Splits and transfer state move to ``old`` only when the two amounts are equal. If the
+        winner's amount drifted since (a sync changed it), its splits are dropped
+        (``splits_cleared``) and its pair is dissolved on both legs (``transfers_dissolved``),
+        because neither fits ``old``'s amount.
+
+        Needs an acting user or a system job session. Un-adopt calls it in the requester's
+        person-scoped session (PHASE-2 3.2), so RLS still decides which rows it may touch.
+        """
+        await self._require_actor_or_system()
         found = (
             await self._db(
                 self._s.execute(
@@ -693,10 +745,19 @@ class LedgerWriter:
             raise LedgerRetryableError("supersession changed while locking; retry the unit of work")
         old.superseded_by_id = None  # the trigger moves the derived rows back
         await self._flush()
-        if not await self._has_splits(old_id):
-            await self._move_splits(w_id, old_id)
-        if (win.is_transfer or win.transfer_group_id is not None) and not old.is_transfer:
-            await self._move_transfer_state(win, old)
+        same_amount = old.amount == win.amount
+        if await self._has_splits(w_id):
+            if not same_amount:
+                await self._delete_splits(w_id)
+                self.counts["splits_cleared"] += 1
+            elif not await self._has_splits(old_id):
+                await self._move_splits(w_id, old_id)
+        if win.is_transfer or win.transfer_group_id is not None:
+            if same_amount:
+                await self._move_transfer_state(win, old)
+            else:
+                self._dissolve_group(win, rows)
+                await self._flush()
         old.is_tax_relevant = old.is_tax_relevant or win.is_tax_relevant
         old.tax_tag = first_present(old.tax_tag, win.tax_tag)
         if old.receipt_document_id is None:
@@ -738,6 +799,23 @@ class LedgerWriter:
             ),
             TransactionNotFoundError,
         )
+
+    def _dissolve_group(self, txn: Transaction, rows: dict[uuid.UUID, Transaction]) -> None:
+        """Clear the transfer state of ``txn`` and every locked leg of its group."""
+        group = txn.transfer_group_id
+        legs = [txn]
+        if group is not None:
+            legs += [r for r in rows.values() if r is not txn and r.transfer_group_id == group]
+            self.counts["transfers_dissolved"] += 1
+        for leg in legs:
+            leg.is_transfer = False
+            leg.transfer_group_id = None
+
+    async def _require_actor_or_system(self) -> None:
+        """The sync and supersede verbs are for a system job (household-wide session) or a named
+        acting user, never an anonymous request handler (same rule as ``apply_transfer_pair``)."""
+        if self._user_id is None and not await is_household_wide(self._s):
+            raise LedgerRuleError("this verb needs an acting user or a system job session")
 
     async def _move_transfer_state(self, src: Transaction, dst: Transaction) -> None:
         """``src`` leaves its group (or single mark) first, then ``dst`` takes it."""
