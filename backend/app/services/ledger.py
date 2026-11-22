@@ -20,7 +20,9 @@ from typing import Any, Literal
 
 from sqlalchemy import Select, case, func, select, tuple_
 from sqlalchemy.dialects.postgresql import distinct_on
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db_context import scoped_session
@@ -53,6 +55,8 @@ from app.services.ledger_service import (
     LedgerRetryableError,
     LedgerWriter,
     SupersededTransactionError,
+    TransactionNotFoundError,
+    _translate,
 )
 from app.services.sessions import Principal
 
@@ -71,6 +75,9 @@ def _cents(value: Decimal) -> Decimal:
 
 @dataclass(frozen=True)
 class TransactionFilters:
+    """Category filters and summaries act on the parent row only: a split parent keeps its own
+    category_id and shows has_splits=true, and its parts are not matched or summed separately."""
+
     account_ids: list[uuid.UUID] = field(default_factory=list)
     date_from: date | None = None
     date_to: date | None = None
@@ -155,6 +162,21 @@ def validate_filters(f: TransactionFilters) -> None:
         raise ApiError("validation_error", "The start date is after the end date.")
     if f.min_amount is not None and f.max_amount is not None and f.min_amount > f.max_amount:
         raise ApiError("validation_error", "The minimum amount is above the maximum.")
+
+
+def _api_error(exc: Exception) -> ApiError:
+    """Map a ledger failure to the API error. Messages are fixed; nothing from the cause rides."""
+    if isinstance(exc, SupersededTransactionError):
+        return ApiError("conflict", "That transaction was replaced and can't be changed.")
+    if isinstance(exc, CategoryNotFoundError):
+        return ApiError("not_found", "That category wasn't found.")
+    if isinstance(exc, LedgerNotFoundError):
+        return ApiError("not_found", "That transaction wasn't found.")
+    if isinstance(exc, LedgerRetryableError):
+        return ApiError("conflict", "That transaction changed. Try again.")
+    if isinstance(exc, LedgerRuleError):
+        return ApiError("conflict", "That change isn't allowed on this transaction.")
+    return ApiError("server_error", "Something went wrong on our side.")
 
 
 class LedgerService:
@@ -260,7 +282,9 @@ class LedgerService:
     def _can_edit(self, owner_person_id: uuid.UUID | None) -> bool:
         # The exact predicate of the C6a brief: no owner, or the reader is the owner. Never reads
         # `visibility`. A principal with no person can't edit. C3b swaps this for
-        # app_account_writable() and adds an equivalence test.
+        # app_account_writable() and adds an equivalence test. That test must record the no-person
+        # case: the helper returns true for joint rows there while can_edit is false, and
+        # _edit refuses a no-person principal itself (Bulwark M1).
         person = self.principal.person_id
         return person is not None and (owner_person_id is None or owner_person_id == person)
 
@@ -326,39 +350,54 @@ class LedgerService:
     async def set_category(
         self, transaction_id: uuid.UUID, category_id: uuid.UUID | None
     ) -> TransactionOut:
-        return await self._edit(
-            transaction_id, lambda w: w.set_category(transaction_id, category_id)
-        )
+        async def op(w: LedgerWriter, s: AsyncSession) -> None:
+            await w.set_category(transaction_id, category_id)
+            # After the lock and the live check, so a missing or superseded row answers first.
+            # Raising here rolls the whole unit back. A split parent is categorised per part.
+            split = await s.execute(
+                select(TransactionSplit.id)
+                .where(TransactionSplit.transaction_id == transaction_id)
+                .limit(1)
+            )
+            if split.first() is not None:
+                raise ApiError(
+                    "conflict", "This transaction is split. Categorise its parts instead."
+                )
+
+        return await self._edit(transaction_id, op)
 
     async def release_category(self, transaction_id: uuid.UUID) -> TransactionOut:
-        return await self._edit(transaction_id, lambda w: w.release_category(transaction_id))
+        async def op(w: LedgerWriter, s: AsyncSession) -> None:
+            await w.release_category(transaction_id)
+
+        return await self._edit(transaction_id, op)
 
     async def _edit(
-        self, transaction_id: uuid.UUID, op: Callable[[LedgerWriter], Awaitable[None]]
+        self,
+        transaction_id: uuid.UUID,
+        op: Callable[[LedgerWriter, AsyncSession], Awaitable[None]],
     ) -> TransactionOut:
         """Run one LedgerWriter edit in the reader's own person-scoped session (never wide).
 
         A row that is missing, invisible or not writable is one 404 (RLS decides). Money and
         category fields are written only by LedgerWriter (ADR 0011).
         """
-        failure: ApiError | None = None
+        # The RLS write predicate passes for an ownerless (joint) account even with no person, so
+        # the service closes that gap: no person, no edit (Bulwark M1). Checked before any query.
+        if self.principal.person_id is None:
+            raise ApiError("not_found", "That transaction wasn't found.")
+        failure: ApiError
         try:
             async with self._session() as s:
                 writer = LedgerWriter(
                     s, self.principal.household_id, user_id=self.principal.user_id, ip=self.ctx.ip
                 )
-                await op(writer)
+                await op(writer, s)
                 return await self._one(s, transaction_id)
-        except SupersededTransactionError:
-            failure = ApiError("conflict", "That transaction was replaced and can't be changed.")
-        except CategoryNotFoundError:
-            failure = ApiError("not_found", "That category wasn't found.")
-        except LedgerNotFoundError:
-            failure = ApiError("not_found", "That transaction wasn't found.")
-        except LedgerRetryableError:
-            failure = ApiError("conflict", "That transaction changed. Try again.")
-        except LedgerRuleError:
-            failure = ApiError("conflict", "That change isn't allowed on this transaction.")
+        except (DBAPIError, StaleDataError) as exc:
+            failure = _api_error(_translate(exc, TransactionNotFoundError))
+        except (LedgerRuleError, LedgerRetryableError) as exc:
+            failure = _api_error(exc)
         raise failure
 
     async def summary(self, f: TransactionFilters) -> TransactionSummary:

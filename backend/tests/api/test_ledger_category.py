@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.db_context import apply_context, scoped_session, unscoped_session
 from app.models import Account, AppUser, AuditLog, Category, Transaction, TransactionSplit
@@ -23,7 +23,12 @@ from tests.api.conftest import Owner, make_client
 
 
 async def _account(
-    app: FastAPI, hid: uuid.UUID, name: str, owner_person: uuid.UUID | None, visibility: str
+    app: FastAPI,
+    hid: uuid.UUID,
+    name: str,
+    owner_person: uuid.UUID | None,
+    visibility: str,
+    currency: str = "USD",
 ) -> uuid.UUID:
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
         a = Account(
@@ -33,7 +38,7 @@ async def _account(
             name=name,
             type="depository",
             visibility=visibility,
-            currency="USD",
+            currency=currency,
         )
         s.add(a)
         await s.flush()
@@ -338,3 +343,140 @@ def test_openapi_has_category_fields() -> None:
     for f in ("merchant_key", "category_id", "category_source", "has_splits", "can_edit"):
         assert f in props, f
     assert "CategoryChoiceIn" in schemas
+
+
+async def test_no_person_session_cannot_write_joint_rows(app: FastAPI, owner: Owner) -> None:
+    w = await _world(app, owner)
+    try:
+        async with unscoped_session(app.state.session_factory) as s:
+            await apply_context(s, w.hid, None)
+            user = AppUser(
+                household_id=w.hid, person_id=None, email="np@example.com", role="member"
+            )
+            s.add(user)
+            await s.flush()
+            token = await sessions.create(s, user.id, ip=None, user_agent=None, strong=True)
+        cat = await _category(app, w.hid, "food.groceries")
+        tid = w.tx["joint"]
+        async with make_client(app) as np:
+            np.cookies.set("hf_session", token)
+            got = await np.get(f"/api/transactions/{tid}")
+            assert got.status_code == 200 and got.json()["can_edit"] is False
+            r = await np.put(f"/api/transactions/{tid}/category", json={"category_id": str(cat)})
+            assert r.status_code == 404
+            assert (await np.post(f"/api/transactions/{tid}/category/release")).status_code == 404
+        async with scoped_session(app.state.session_factory, w.hid, None, household_wide=True) as s:
+            row = await s.get(Transaction, tid)
+            assert row is not None
+            assert row.category_id is None and row.category_source is None
+    finally:
+        await w.sam_client.aclose()
+
+
+async def test_other_persons_superseded_row_is_404_not_409(app: FastAPI, owner: Owner) -> None:
+    w = await _world(app, owner)
+    try:
+        cat = await _category(app, w.hid, "food.groceries")
+        acct = w.acct["sam_shared"]  # visible to me, writable only by Sam
+        winner = await _tx(app, w.hid, acct, "Plaid copy")
+        loser = await _tx(app, w.hid, acct, "Import copy")
+        async with scoped_session(app.state.session_factory, w.hid, None, household_wide=True) as s:
+            row = await s.get(Transaction, loser)
+            assert row is not None
+            row.superseded_by_id = winner
+        r = await owner.client.put(
+            f"/api/transactions/{loser}/category", json={"category_id": str(cat)}
+        )
+        assert r.status_code == 404
+        assert (
+            await owner.client.post(f"/api/transactions/{loser}/category/release")
+        ).status_code == 404
+        # The owner of the account does get the 409.
+        r = await w.sam_client.put(
+            f"/api/transactions/{loser}/category", json={"category_id": str(cat)}
+        )
+        assert r.status_code == 409
+    finally:
+        await w.sam_client.aclose()
+
+
+async def test_split_parent_is_409_and_has_splits_clears_after_delete(
+    app: FastAPI, owner: Owner
+) -> None:
+    w = await _world(app, owner)
+    try:
+        groceries = await _category(app, w.hid, "food.groceries")
+        coffee = await _category(app, w.hid, "food.coffee")
+        parent = await _tx(app, w.hid, w.acct["mine_private"], "Split parent", amount="-20.00")
+        async with scoped_session(app.state.session_factory, w.hid, None, household_wide=True) as s:
+            for amt, cat in (("-12.00", groceries), ("-8.00", coffee)):
+                s.add(
+                    TransactionSplit(
+                        household_id=w.hid,
+                        transaction_id=parent,
+                        amount=Decimal(amt),
+                        category_id=cat,
+                    )
+                )
+        assert (await owner.client.get(f"/api/transactions/{parent}")).json()["has_splits"] is True
+        r = await owner.client.put(
+            f"/api/transactions/{parent}/category", json={"category_id": str(groceries)}
+        )
+        assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+        async with scoped_session(app.state.session_factory, w.hid, None, household_wide=True) as s:
+            row = await s.get(Transaction, parent)
+            assert row is not None
+            assert row.category_id is None and row.category_source is None  # rolled back
+            await s.execute(
+                delete(TransactionSplit).where(TransactionSplit.transaction_id == parent)
+            )
+        got = await owner.client.get(f"/api/transactions/{parent}")
+        assert got.json()["has_splits"] is False
+        r = await owner.client.put(
+            f"/api/transactions/{parent}/category", json={"category_id": str(groceries)}
+        )
+        assert r.status_code == 200 and r.json()["has_splits"] is False
+    finally:
+        await w.sam_client.aclose()
+
+
+async def test_summary_filters_currencies_and_superseded(app: FastAPI, owner: Owner) -> None:
+    w = await _world(app, owner)
+    try:
+        groceries = await _category(app, w.hid, "food.groceries")
+        coffee = await _category(app, w.hid, "food.coffee")
+        usd = w.acct["mine_private"]
+        eur = await _account(app, w.hid, "eur", w.me, "private", currency="EUR")
+        await _tx(app, w.hid, usd, "S1", "-10.00", category_id=groceries, category_source="rule")
+        await _tx(app, w.hid, usd, "S2", "-5.00", category_id=coffee, category_source="user")
+        await _tx(app, w.hid, usd, "S3", "100.00", is_transfer=True)
+        await _tx(app, w.hid, eur, "S4", "-7.00", category_id=groceries, category_source="user")
+        winner = await _tx(app, w.hid, usd, "S5", "-1.00")
+        loser = await _tx(app, w.hid, usd, "S6", "-1000.00", category_id=groceries)
+        async with scoped_session(app.state.session_factory, w.hid, None, household_wide=True) as s:
+            row = await s.get(Transaction, loser)
+            assert row is not None
+            row.superseded_by_id = winner
+
+        async def totals(**params: Any) -> dict[str, tuple[str, str, int]]:
+            params["account_id"] = [str(usd), str(eur)]
+            r = await owner.client.get("/api/transactions/summary", params=params)
+            assert r.status_code == 200, r.text
+            return {
+                t["currency"]: (t["outflow"], t["inflow"], t["count"]) for t in r.json()["totals"]
+            }
+
+        assert await totals(category_id=[str(groceries)]) == {
+            "USD": ("-10.00", "0.00", 1),
+            "EUR": ("-7.00", "0.00", 1),
+        }
+        assert await totals(category_id=[str(coffee)]) == {"USD": ("-5.00", "0.00", 1)}
+        assert await totals(category_source="user") == {
+            "USD": ("-5.00", "0.00", 1),
+            "EUR": ("-7.00", "0.00", 1),
+        }
+        assert await totals(transfer="only") == {"USD": ("0.00", "100.00", 1)}
+        out = await totals(transfer="exclude")
+        assert out["USD"] == ("-26.00", "0.00", 4) and out["EUR"] == ("-7.00", "0.00", 1)
+    finally:
+        await w.sam_client.aclose()

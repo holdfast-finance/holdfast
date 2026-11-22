@@ -6,6 +6,8 @@ import uuid
 from datetime import date
 from typing import Literal
 
+from pydantic import Field
+
 from app.schemas.common import DecimalStr, Model, MoneyStr
 
 AccountVisibility = Literal["private", "shared", "summary_only"]
@@ -57,7 +59,10 @@ class TransactionOut(Model):
     merchant_key: str | None
     category_id: uuid.UUID | None
     category_source: CategorySource | None
-    has_splits: bool
+    has_splits: bool = Field(
+        description="True when the row has split parts. Category filters and summaries use the "
+        "parent row's category only; a split parent is not matched by its parts."
+    )
     # Whether this reader may change the row: the account has no owner, or the reader owns it.
     # Never derived from `visibility`. False for a principal with no person.
     can_edit: bool

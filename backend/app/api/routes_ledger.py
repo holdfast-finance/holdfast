@@ -84,6 +84,8 @@ async def list_transactions(
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query(max_length=256)] = None,
 ) -> TransactionPage:
+    """List live transactions. Category filters act on the parent row only: a split parent
+    shows `has_splits=true` and is matched by its own category, never by its parts."""
     f = _filters(
         account_id,
         date_from,
@@ -118,6 +120,8 @@ async def transactions_summary(
     category_source: CategorySource | None = None,
     transfer: Literal["only", "exclude"] | None = None,
 ) -> TransactionSummary:
+    """Per-currency totals. Category filters act on the parent row only; split parts are not
+    summed separately. Superseded rows are excluded."""
     f = _filters(
         account_id,
         date_from,
@@ -146,6 +150,8 @@ async def get_transaction(
 async def set_transaction_category(
     transaction_id: uuid.UUID, body: CategoryChoiceIn, ctx: Ctx, principal: CurrentPrincipal
 ) -> TransactionOut:
+    """Set or clear a category. 404 when the row is missing, invisible or not writable; 409 when
+    the row is superseded or is a split parent (categorise its parts instead)."""
     return await LedgerService(ctx, principal).set_category(transaction_id, body.category_id)
 
 
