@@ -164,7 +164,10 @@ def test_tier_survives_confidence_round_trip(
     )
 
 
-@pytest.mark.parametrize(("amount", "direction"), [("-21.20", "outflow"), ("21.20", "inflow")])
+@pytest.mark.parametrize(
+    ("amount", "direction"),
+    [("-21.20", "outflow"), ("21.20", "inflow"), ("0.00", "outflow"), ("-0.00", "outflow")],
+)
 def test_detected_from_derives_direction_first_date_and_uuid_members(
     amount: str, direction: Direction
 ) -> None:
@@ -284,7 +287,7 @@ def test_user_stated_series_takes_over_an_auto_match_on_strict_majority(
     other = _detected((9, 10, 11))
     assert reconcile_series([auto, donor], [detection, other]) == SeriesPlan(
         (
-            PlannedSeries(donor.id, detection, detection.member_ids, donor.id),
+            PlannedSeries(donor.id, detection, _ids(range(1, 9)), donor.id),
             PlannedSeries(None, other, other.member_ids, None),
         ),
         (auto.id,),
@@ -348,6 +351,31 @@ def test_merge_uses_latest_lapsed_predecessor_then_lowest_id_and_unions_history(
     assert reconcile_series([older, chosen, tied], [detection]) == SeriesPlan(
         (PlannedSeries(chosen.id, detection, chosen.member_ids | detection.member_ids, None),),
         (older.id, tied.id),
+    )
+
+
+def test_rerun_after_a_lapsed_merge_keeps_the_predecessor_history() -> None:
+    old = _stored(1, (1, 2, 3), state="confirmed", lapsed=True)
+    resumed = _detected((4, 5, 6))
+    merged = PlannedSeries(old.id, resumed, _ids(range(1, 7)), None)
+    assert reconcile_series([old], [resumed]) == SeriesPlan((merged,), ())
+
+    stored = replace(old, lapsed=False, member_ids=merged.member_ids, newest_member_id=UUID(int=6))
+    assert reconcile_series([stored], [resumed]) == SeriesPlan((merged,), ())
+
+
+def test_matched_series_keeps_members_no_detection_claims() -> None:
+    labelled = _stored(1, (1, 2, 3, 4), label="Studio membership")
+    other = _stored(2, (5, 6, 7))
+    detection = _detected((3, 4, 8))
+    claims_two = _detected((2, 5, 6, 7), first=FIRST - timedelta(days=1))
+    plan = reconcile_series([labelled, other], [detection, claims_two])
+    assert plan == SeriesPlan(
+        (
+            PlannedSeries(other.id, claims_two, claims_two.member_ids, None),
+            PlannedSeries(labelled.id, detection, _ids((1, 3, 4, 8)), None),
+        ),
+        (),
     )
 
 

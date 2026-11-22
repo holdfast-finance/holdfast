@@ -24,8 +24,9 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
    - **Matching:** a detected series matches the stored series it shares the most member
      transactions with. It's one to one and greedy by overlap. Ties go to a user-stated series
      (`confirmed`, `dismissed` or labelled) over an `auto` one, then to the lowest stored id. The
-     stored row keeps its id, `user_state` and `label`. Detection columns and members are replaced
-     by the detection.
+     stored row keeps its id, `user_state` and `label`. Detection columns are replaced by the
+     detection. Members become the detection's plus any stored members no detection claims, so
+     history a lapsed merge brought in survives the next run (a rerun on the stored plan is a no-op).
    - **Lapsed merge:** an unmatched detection is the resumed schedule when its `(account,
      merchant_key, direction, cadence)` equals a stored, unmatched, **lapsed** series that ended
      before it starts. It merges into that series (the latest-ending one, then the lowest id).
@@ -59,7 +60,9 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
    - Detection takes seconds, and the stored series loaded before it can be stale. So after
      detection, the job locks the household's stored series (`SELECT … FOR UPDATE`, with their
      members) and re-runs `reconcile_series` on the locked state. The re-plan is pure and cheap.
-   - Deletes carry `WHERE user_state = 'auto' AND label IS NULL`.
+   - Deletes carry `WHERE user_state = 'auto' AND label IS NULL`, except the all-transfer
+     deletes above, which run without that guard (they apply whatever the state).
+   - On a takeover the row keeps its own state: `takes_state_from` is always its own id.
    - Upserts never write `user_state` or `label`, except the takeover rule, which copies values read
      under the lock.
    - A `PATCH` that arrives during the job's final write waits for it. If the job deleted that

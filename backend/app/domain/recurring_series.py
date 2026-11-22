@@ -78,7 +78,8 @@ def detected_from(series: RecurringSeries, posted: Mapping[UUID, date]) -> Detec
     members = frozenset(
         UUID(member) if isinstance(member, str) else member for member in series.transaction_ids
     )
-    direction: Direction = "outflow" if series.typical_amount.is_signed() else "inflow"
+    # Same split as the detector's grouping (`amount > 0`), so zero counts as outflow.
+    direction: Direction = "inflow" if series.typical_amount > 0 else "outflow"
     # Stored series carry UUID account ids, and the lapsed-merge key compares them by equality.
     account_id = (
         UUID(series.account_id) if isinstance(series.account_id, str) else series.account_id
@@ -99,6 +100,8 @@ class StoredSeries:
     lapsed: bool
     user_state: UserState
     label: str | None
+    # Live members only: superseded rows and transfers are left out by the caller, so the
+    # takeover majority ("more than half") is counted against the members that still count.
     member_ids: frozenset[UUID]
     newest_member_id: UUID | None
     all_members_transfers: bool
@@ -113,6 +116,7 @@ class PlannedSeries:
     stored_id: UUID | None
     detected: DetectedSeries | None
     member_ids: frozenset[UUID]
+    # Set only on a takeover, and always equal to `stored_id`: the row keeps its own state.
     takes_state_from: UUID | None
 
 
@@ -198,7 +202,11 @@ def reconcile_series(
     for index, item in enumerate(detections):
         stored_id = matches.get(index)
         members = item.member_ids
-        if stored_id is None:
+        if stored_id is not None:
+            # Keep history no detection claims, as the lapsed merge does, so a rerun on the
+            # stored plan returns the same membership (ADR 0028: history stays in one place).
+            members |= stored_by_id[stored_id].member_ids.difference(detection_by_member)
+        else:
             detected_key = (
                 item.series.account_id,
                 item.series.merchant_key,
