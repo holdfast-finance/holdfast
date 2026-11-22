@@ -9,7 +9,6 @@ backtracking engine. This module must never import ``re`` or ``regex``;
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Protocol
 
 MAX_PATTERN_LENGTH = 128
@@ -17,7 +16,7 @@ MAX_SUBJECT_LENGTH = 256
 PROBE_LIMIT_MICROSECONDS = 10
 MAX_CLASS_ATOMS = 16
 REGEX_BUDGET_SECONDS = 10
-INGEST_REGEX_MS_PER_ROW = Decimal("0.5")
+INGEST_REGEX_US_PER_ROW = 500  # microseconds; amends the contract's 0.5 ms literal
 
 PATTERNS_UNAVAILABLE = "Patterns aren't available yet."
 

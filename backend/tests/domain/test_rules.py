@@ -24,7 +24,7 @@ TXN = RuleTransaction(
     amount=Decimal("-12.34"),
     account_id=UUID(int=2),
     posted_on=date(2026, 11, 21),
-    merchant_key="moonfern",
+    merchant_key="MOONFERN",
 )
 CATEGORY = UUID(int=3)
 AUTHOR = UUID(int=40)
@@ -33,7 +33,7 @@ RULE = Rule(
     UUID(int=4),
     10,
     True,
-    RuleConditions(merchant_key="moonfern"),
+    RuleConditions(merchant_key="MOONFERN"),
     RuleAction(CATEGORY),
     AUTHOR,
     CREATED,
@@ -56,7 +56,7 @@ class TestRules(TestCase):
     def test_conditions_are_anded(self) -> None:
         conditions = RuleConditions(
             description=DescriptionCondition("contains", "stationery"),
-            merchant_key="moonfern",
+            merchant_key="MOONFERN",
             amount_equals=Decimal("-12.34"),
             amount_min=Decimal("-15.00"),
             amount_max=Decimal("-10.00"),
@@ -70,7 +70,7 @@ class TestRules(TestCase):
         for txn in (
             replace(TXN, description="moonfern"),
             replace(TXN, merchant_key=None),
-            replace(TXN, merchant_key="MOONFERN"),
+            replace(TXN, merchant_key="moonfern"),
             replace(TXN, amount=Decimal("-12.33")),
             replace(TXN, posted_on=date(2026, 11, 20)),
             replace(TXN, posted_on=date(2026, 11, 24)),

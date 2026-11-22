@@ -29,7 +29,7 @@ from uuid import UUID
 
 from app.domain.category_precedence import can_replace_category
 from app.domain.fingerprint import normalize_description
-from app.domain.merchant import MERCHANT_KEY_VERSION
+from app.domain.merchant import MAX_KEY_LENGTH, MERCHANT_KEY_VERSION, merchant_key
 from app.domain.money import ZERO
 from app.domain.rule_regex import CompiledPattern, compile_pattern
 from app.domain.rule_regex import RuleValidationError as RuleValidationError
@@ -38,6 +38,24 @@ AccountScope = Literal["any", "joint", "own"]
 ACCOUNT_SCOPES = ("any", "joint", "own")
 CODEC_VERSION = 1
 TOKEN_VERSION = 2
+MAX_DESCRIPTION_VALUE_LENGTH = 128
+MAX_AMOUNT = Decimal(10) ** 12
+CENT = Decimal("0.01")
+
+
+def _check_amount(amount: Decimal) -> None:
+    if not amount.is_finite():
+        raise RuleValidationError("Amount conditions require finite Decimal values.")
+    if amount != amount.quantize(CENT):
+        raise RuleValidationError("Amounts allow at most 2 decimal places.")
+    if abs(amount) >= MAX_AMOUNT:
+        raise RuleValidationError("Amount is out of range.")
+
+
+def _amount_text(amount: Decimal) -> str:
+    cents = amount.quantize(CENT)
+    return "0.00" if cents == 0 else format(cents, "f")
+
 
 # A draft sorts after every saved rule of equal priority, where it will sit once saved.
 DRAFT_CREATED_AT = datetime.max.replace(tzinfo=UTC)
@@ -45,7 +63,10 @@ DRAFT_ID = UUID(int=2**128 - 1)
 
 
 class MerchantKeyVersionMismatch(RuleValidationError):
-    """Stored conditions use another merchant key version. The loader reports needs_review."""
+    """Stored conditions use another merchant key version. The loader reports needs_review.
+
+    C3e note: catch this before ``RuleValidationError``, which it subclasses.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +83,8 @@ class DescriptionCondition:
             raise RuleValidationError("Unknown description match mode.")
         if not self.value.strip():
             raise RuleValidationError("Description text is required.")
+        if self.mode != "regex" and len(self.value) > MAX_DESCRIPTION_VALUE_LENGTH:
+            raise RuleValidationError("Description text is too long.")
         literal = normalize_description(self.value) if self.mode != "regex" else ""
         regex = compile_pattern(self.value) if self.mode == "regex" else None
         object.__setattr__(self, "_literal", literal)
@@ -110,8 +133,15 @@ class RuleConditions:
         ):
             raise RuleValidationError("A rule needs at least one condition.")
         for amount in amounts:
-            if amount is not None and (not isinstance(amount, Decimal) or not amount.is_finite()):
-                raise RuleValidationError("Amount conditions require finite Decimal values.")
+            if amount is not None:
+                if not isinstance(amount, Decimal):
+                    raise RuleValidationError("Amount conditions require finite Decimal values.")
+                _check_amount(amount)
+        key = self.merchant_key
+        if key is not None and not (
+            1 <= len(key) <= MAX_KEY_LENGTH and key == merchant_key(key, key)
+        ):
+            raise RuleValidationError("Merchant key is not in normalized form.")
         if (
             self.amount_min is not None
             and self.amount_max is not None
@@ -250,6 +280,8 @@ def _sorted_txns(txns: Iterable[RuleTransaction]) -> list[RuleTransaction]:
 
 def match(rules: Iterable[Rule], txn: RuleTransaction) -> RuleMatch | None:
     """Return the first enabled rule that matches and may touch the row, in rule order."""
+    if txn.is_split:
+        return None
     return _first_match(_ordered_rules(rules), txn)
 
 
@@ -347,7 +379,7 @@ def conditions_to_json(c: RuleConditions) -> dict[str, object]:
     for name in ("amount_equals", "amount_min", "amount_max"):
         amount: Decimal | None = getattr(c, name)
         if amount is not None:
-            out[name] = format(amount, "f")
+            out[name] = _amount_text(amount)
     if c.amount_sign is not None:
         out["amount_sign"] = c.amount_sign
     for name in ("date_from", "date_through"):

@@ -47,7 +47,7 @@ def rule(
         "id": UUID(int=n),
         "priority": priority,
         "enabled": True,
-        "conditions": RuleConditions(merchant_key="moonfern"),
+        "conditions": RuleConditions(merchant_key="MOONFERN"),
         "action": RuleAction(CAT_A),
         "author_person_id": author,
         "created_at": T0,
@@ -64,7 +64,7 @@ def txn(n: int, owner: UUID | None = None, **kw: object) -> RuleTransaction:
         "amount": Decimal("-5.00"),
         "account_id": UUID(int=900),
         "posted_on": date(2026, 11, 1),
-        "merchant_key": "moonfern",
+        "merchant_key": "MOONFERN",
         "account_owner_person_id": owner,
     }
     base.update(kw)
@@ -148,7 +148,7 @@ def test_preview_for_counts_and_changes() -> None:
         txn(2, category_source="user", category_id=CAT_B),
         txn(3, is_split=True),
         txn(4, BOB),
-        txn(5, description="other", merchant_key="other"),
+        txn(5, description="other", merchant_key="OTHER"),
     ]
     result = preview_for(target, [], rows)
     assert [c.transaction_id for c in result.changes] == [UUID(int=1)]
@@ -220,7 +220,7 @@ def test_token_changes_with_content_and_changed_rows() -> None:
         replace(r, enabled=False),
         replace(r, account_scope="joint"),
         replace(r, action=RuleAction(CAT_B)),
-        replace(r, conditions=RuleConditions(merchant_key="other")),
+        replace(r, conditions=RuleConditions(merchant_key="OTHER")),
     ):
         assert preview_token(other, changes) != base
 
@@ -230,8 +230,8 @@ def test_token_changes_with_content_and_changed_rows() -> None:
 
 FULL = RuleConditions(
     description=DescriptionCondition("contains", "moon"),
-    merchant_key="moonfern",
-    amount_equals=Decimal("-12.340"),
+    merchant_key="MOONFERN",
+    amount_equals=Decimal("-12.34"),
     amount_min=Decimal("-20"),
     amount_max=Decimal("0.01"),
     amount_sign="outflow",
@@ -243,7 +243,7 @@ FULL = RuleConditions(
 def test_codec_round_trip_and_shape() -> None:
     obj = conditions_to_json(FULL)
     assert obj["v"] == 1 and obj["merchant_key_version"] == 1
-    assert obj["amount_equals"] == "-12.340" and obj["date_from"] == "2026-01-01"
+    assert obj["amount_equals"] == "-12.34" and obj["date_from"] == "2026-01-01"
     assert obj["description"] == {"mode": "contains", "value": "moon"}
     assert conditions_from_json(json.loads(json.dumps(obj))) == FULL
 
@@ -266,10 +266,10 @@ def test_codec_round_trip_and_shape() -> None:
         {"v": 1, "date_from": "2026-1-1"},
         {"v": 1, "date_from": 20260101},
         {"v": 1, "amount_sign": "sideways"},
-        {"v": 1, "merchant_key": "moonfern"},
+        {"v": 1, "merchant_key": "MOONFERN"},
         {"v": 1, "merchant_key_version": 1, "amount_sign": "inflow"},
-        {"v": 1, "merchant_key": "moonfern", "merchant_key_version": "1"},
-        {"v": 1, "merchant_key": "moonfern", "merchant_key_version": True},
+        {"v": 1, "merchant_key": "MOONFERN", "merchant_key_version": "1"},
+        {"v": 1, "merchant_key": "MOONFERN", "merchant_key_version": True},
         {"v": 1, "description": {"mode": "contains"}},
         {"v": 1, "description": {"mode": "contains", "value": "x", "extra": 1}},
         {"v": 1, "description": {"mode": "fuzzy", "value": "x"}},
@@ -285,7 +285,7 @@ def test_codec_is_strict(bad: dict[str, object]) -> None:
 
 def test_merchant_key_version_mismatch_is_distinct() -> None:
     with pytest.raises(MerchantKeyVersionMismatch):
-        conditions_from_json({"v": 1, "merchant_key": "moonfern", "merchant_key_version": 2})
+        conditions_from_json({"v": 1, "merchant_key": "MOONFERN", "merchant_key_version": 2})
 
 
 # --- regex is refused everywhere (until C3d) --------------------------------

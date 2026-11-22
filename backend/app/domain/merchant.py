@@ -6,6 +6,8 @@ changes so stored rules are flagged instead of silently matching differently.
 
 from __future__ import annotations
 
+import unicodedata
+
 from app.domain.fingerprint import normalize_description
 
 MERCHANT_KEY_VERSION = 1
@@ -19,10 +21,15 @@ MIN_KEY_LENGTH = 2
 _SEPARATORS = str.maketrans({c: " " for c in "*#/\\|:;,"})
 
 
+def _normalize(text: str) -> str:
+    """NFKC first so width and compatibility forms can't split one merchant into two keys."""
+    return normalize_description(unicodedata.normalize("NFKC", text))
+
+
 def merchant_key(merchant_name: str | None, description_raw: str) -> str | None:
-    source = normalize_description(merchant_name) if merchant_name else ""
+    source = _normalize(merchant_name) if merchant_name else ""
     if not any(ch.isalpha() for ch in source):
-        source = normalize_description(description_raw)
+        source = _normalize(description_raw)
     tokens = [
         t
         for t in source.translate(_SEPARATORS).split()
