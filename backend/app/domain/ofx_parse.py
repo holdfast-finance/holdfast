@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal, DecimalException
 from xml.etree import ElementTree as ET
 
+from app.domain.file_kind import looks_like_ofx
 from app.domain.statement_parse import StatementParseError
 from app.domain.tabular_statement import (
     ExportRows,
@@ -28,6 +29,11 @@ _CLOSER = re.compile(r"</([A-Z][A-Z0-9_.-]*)>")
 # Only this much of a file is searched for its encoding. Every pattern below is anchored or made of
 # non-overlapping, length-bounded classes, so the scan is linear in these bytes, whatever follows.
 _SNIFF_BYTES = 1024
+MAX_OFX_TAGS = 200_000  # a statement of 50k rows has a few dozen tags each at most
+_DEBIT_TYPES = frozenset(
+    {"DEBIT", "CHECK", "PAYMENT", "ATM", "POS", "FEE", "SRVCHG", "DIRECTDEBIT", "REPEATPMT"}
+)
+_CREDIT_TYPES = frozenset({"CREDIT", "DEP", "DIRECTDEP", "INT"})
 _XML_DECL = re.compile(rb"[ \t\r\n]*<\?xml\b")
 _XML_ENCODING = re.compile(
     rb"""encoding[ \t\r\n]{0,8}=[ \t\r\n]{0,8}['"]([A-Za-z0-9._-]{1,40})['"]"""
@@ -57,12 +63,21 @@ class OfxStatement(TransactionExport):
     period_end: date | None
     ledger_as_of: date | None = None  # LEDGERBAL DTASOF: when the closing balance was struck
     corrections: tuple[OfxCorrection, ...] = ()
+    kind: str = "bank"  # "card" for a CCSTMTRS statement
+    # Keyed token of the statement kind, BANKID and the full ACCTID: identifies the real account
+    # without storing any digits (the last four are only for display).
+    account_token: str = ""
 
 
 def _decode(source: str | bytes) -> str:
     if isinstance(source, str):
         return source.removeprefix("\ufeff")
     encoding = "utf-8-sig"
+    # A UTF-8 BOM is dropped before a declared charset is honoured: decoding its bytes as cp1252
+    # would put junk in front of the SGML header and the file would no longer look like OFX.
+    had_bom = source.startswith(codecs.BOM_UTF8)
+    if had_bom:
+        source = source[len(codecs.BOM_UTF8) :]
     if source.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
         encoding = "utf-32"
     elif source.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
@@ -75,7 +90,7 @@ def _decode(source: str | bytes) -> str:
             name = charset[1].decode("ascii")
             if name.lower() == "none":
                 name = "utf-8"
-        elif _XML_DECL.match(head) and not source.startswith(codecs.BOM_UTF8):
+        elif _XML_DECL.match(head) and not had_bom:
             declaration = _XML_ENCODING.search(head[: max(head.find(b"?>"), 0)])
             if declaration:
                 name = declaration[1].decode("ascii")
@@ -91,9 +106,13 @@ def _decode(source: str | bytes) -> str:
 
 
 def _tree(text: str) -> ET.Element:
+    if text.count("<") > MAX_OFX_TAGS:
+        raise StatementParseError("OFX has too many elements")
     if "\x00" in text or _DECLARATION.search(text):
         raise StatementParseError("OFX disallows DOCTYPE and ENTITY declarations and NUL bytes")
     text = text.lstrip()
+    if not looks_like_ofx(text):
+        raise StatementParseError("OFX root not found")
     root = _OFX_ROOT.search(text)
     prefix = text[: root.start()] if root else text
     sgml = prefix.upper().startswith(("OFXHEADER:", "DATA:"))
@@ -170,6 +189,9 @@ def _statement(
 ) -> OfxStatement:
     account_tag = "BANKACCTFROM" if element.tag == "STMTRS" else "CCACCTFROM"
     account = _value(element, f"{account_tag}/ACCTID", required=True)
+    bank_id = _value(element, f"{account_tag}/BANKID")
+    kind = "bank" if element.tag == "STMTRS" else "card"
+    account_token = external_id_token(f"{kind}:{bank_id}:{account}", id_key)
     currency = _value(element, "CURDEF", required=True).upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise StatementParseError("invalid OFX currency")
@@ -213,6 +235,16 @@ def _statement(
                         )
                     )
                     continue
+                trn_type = _value(txn, "TRNTYPE").upper()
+                # A card PAYMENT is money in (it lowers what is owed), a bank PAYMENT is out.
+                debit_types = _DEBIT_TYPES - {"PAYMENT"} if kind == "card" else _DEBIT_TYPES
+                if kind == "card" and trn_type not in _DEBIT_TYPES | _CREDIT_TYPES:
+                    # OTHER, XFER, CASH or no type at all say nothing about direction.
+                    rows.flag("sign_unverified")
+                if (trn_type in debit_types and amount > 0) or (
+                    trn_type in _CREDIT_TYPES and amount < 0
+                ):
+                    rows.flag("sign_conflict")
                 description = _value(txn, "NAME") or _value(txn, "MEMO")
                 rows.add(
                     posted,
@@ -229,6 +261,12 @@ def _statement(
                     f"OFX transaction row {row_number}: amount out of range"
                 ) from None
 
+    if kind == "card" and closing is not None and closing > 0:
+        net = sum((txn.amount for txn in rows.txns), Decimal(0))
+        if net > 0:
+            # A card that owes money has a negative balance. Rows and balance both pointing
+            # the other way is what a file with every sign inverted looks like.
+            rows.flag("sign_unverified")
     dates = [txn.posted_date for txn in rows.txns]
     newest_first = bool(dates and dates[0] > dates[-1] and dates == sorted(dates, reverse=True))
     period_start = _date(start) if start else None
@@ -255,6 +293,8 @@ def _statement(
         period_end=period_end,
         ledger_as_of=ledger_as_of,
         corrections=tuple(corrections),
+        kind=kind,
+        account_token=account_token,
     )
 
 
