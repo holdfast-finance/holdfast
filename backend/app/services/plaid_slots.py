@@ -6,10 +6,15 @@ exchange and ``ImportService``.
 
 "Real data" means any account, import run, manual entry or production connection. Accounts that
 belong to a sandbox connection are not real data. Visibility follows the caller's row-level
-security: another person's private account is not visible to the owner's session, but every
-account that exists today is imported (it leaves an import run) or connected (it leaves a
-connection), and both are household-wide, so nothing is missed until manual accounts land (M1,
-which adds its own check).
+security: another person's private account is not visible to the owner's session. The
+``import_run`` read policy follows document and account visibility (migration 0005), so
+``has_real_data()`` can miss another person's private *imported* accounts as well as manual ones
+(M1 adds its own manual-account check). Connections are household-wide, so connected data is
+never missed.
+
+TODO(next-migration): add a SECURITY DEFINER ``household_has_real_data(hid)`` that returns a
+boolean only, like ``plaid_slot_count``, and call it here so the answer no longer depends on the
+caller's visibility.
 """
 
 from __future__ import annotations

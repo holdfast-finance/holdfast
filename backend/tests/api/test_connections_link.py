@@ -702,6 +702,54 @@ async def test_abandon_ends_the_open_reservation_and_clears_its_token(
     assert (await reserve(owner)) != rid  # the lock is free again
 
 
+async def abandon(owner: Owner, rid: uuid.UUID) -> httpx.Response:
+    return await owner.client.post(
+        f"/api/connections/plaid/reservations/{rid}/abandon",
+        json={"confirm_phrase": PHRASE_ABANDON},
+    )
+
+
+@pytest.mark.parametrize("failure", ["unreachable", "refused"])
+async def test_abandon_of_a_young_reservation_is_refused_while_plaid_cannot_confirm(
+    owner: Owner, app: FastAPI, fake: FakePlaid, failure: str
+) -> None:
+    """Link may already have made an Item, so an unanswered check must not free the slot."""
+    rid = await reserve(owner)
+    fake.down = failure == "unreachable"
+    fake.link_get_fail = failure == "refused"
+    r = await abandon(owner, rid)
+    assert r.status_code == 502 and r.json()["error"]["code"] == "plaid_unavailable"
+    assert "Try again" in r.json()["error"]["message"]
+    row = await slot_row(app, hid_of(owner), rid)
+    assert row.state == "reserved" and row.link_token_enc is not None
+    assert await ledger(app, "sandbox") == 1
+    fake.down = fake.link_get_fail = False
+    assert (await abandon(owner, rid)).json()["state"] == "abandoned"
+
+
+async def test_abandon_of_an_old_reservation_proceeds_when_plaid_cannot_answer(
+    owner: Owner, app: FastAPI, fake: FakePlaid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import plaid_link
+
+    rid = await reserve(owner)
+    monkeypatch.setattr(plaid_link, "RESERVATION_TTL_HOURS", 0)  # the token is past its life
+    fake.down = True
+    assert (await abandon(owner, rid)).json()["state"] == "abandoned"
+
+
+async def test_abandon_ignores_only_an_unreadable_token(
+    owner: Owner, app: FastAPI, fake: FakePlaid
+) -> None:
+    from app.security.crypto import generate_key
+
+    rid = await reserve(owner)
+    app.state.settings.fernet_key = SecretStr(generate_key())  # the sealed token no longer opens
+    r = await abandon(owner, rid)
+    assert r.status_code == 200 and r.json()["state"] == "abandoned"
+    assert "/link/token/get" not in fake.paths()
+
+
 # --------------------------------------------------------------------------- coexistence
 
 

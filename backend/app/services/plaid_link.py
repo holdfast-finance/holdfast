@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -35,6 +35,7 @@ from app.integrations.plaid.client import (
 from app.integrations.plaid.link import (
     ABANDON_PHRASE,
     COUNT_SOURCE,
+    RESERVATION_TTL_HOURS,
     SLOT_LIMIT_ERROR_CODES,
     SLOT_TOTAL,
     DaysNotAllowedError,
@@ -695,20 +696,38 @@ class PlaidLinkService:
                 raise ApiError("not_found", "That link reservation doesn't exist.")
             if slot.state not in {"reserved", "unknown"}:
                 raise ApiError("conflict", "That reservation is already settled.")
-            sealed, env = slot.link_token_enc, slot.env
+            sealed, env, created = slot.link_token_enc, slot.env, slot.created_at
+        young = datetime.now(UTC) - created < timedelta(hours=RESERVATION_TTL_HOURS)
         if sealed is not None and env == self.ctx.settings.plaid_env:
-            # Best effort: if Plaid can say Link did create an Item, refuse to forget it.
+            # While the token is live, Link may have created an Item that only Plaid can see.
+            # If Plaid can't answer, abandoning could leave the ledger under-counting: retry.
             creds, _fp = self._credentials()
             try:
-                token = crypto.open(sealed, self._slot_ctx(hid, reservation_id), key=self._key())
-                async with plaid_setup.open_client(creds) as plaid:
-                    data = await plaid.link_token_get(token)
-                if parse_link_sessions(data).public_tokens:
-                    raise ApiError(
-                        "conflict", "Link created an Item. Resolve the reservation instead."
-                    )
-            except (PlaidError, PlaidUnavailable, crypto.CryptoError):
-                pass
+                token: SecretToken | None = crypto.open(
+                    sealed, self._slot_ctx(hid, reservation_id), key=self._key()
+                )
+            except crypto.CryptoError:
+                token = None  # an unreadable token can't be asked about
+            if token is not None:
+                try:
+                    async with plaid_setup.open_client(creds) as plaid:
+                        data = await plaid.link_token_get(token)
+                except (PlaidError, PlaidUnavailable) as exc:
+                    if young:
+                        await self._audit_failure(
+                            "plaid.reservation_abandon",
+                            reservation_id,
+                            {"error": type(exc).__name__, "reason": "plaid_unconfirmed"},
+                        )
+                        raise ApiError(
+                            "plaid_unavailable",
+                            "Plaid couldn't confirm that no Item was made. Try again shortly.",
+                        ) from None
+                else:
+                    if parse_link_sessions(data).public_tokens:
+                        raise ApiError(
+                            "conflict", "Link created an Item. Resolve the reservation instead."
+                        )
         result = await self._close(reservation_id, "abandoned", "plaid.reservation_abandon")
         await self._audit_result("plaid.reservation_abandon", reservation_id, result.state)
         return result
