@@ -48,6 +48,7 @@ describe('AppShell layout', () => {
     ).toEqual([
       'Overview',
       'Transactions',
+      'Import',
       'Budgets',
       'Forecast',
       'Investments',
@@ -58,15 +59,17 @@ describe('AppShell layout', () => {
     expect(within(sidebar).getByRole('link', { name: 'holdfast home' })).toBeInTheDocument()
   })
 
-  it.each(Object.values(PAGES).filter((p) => p.id !== 'overview' && p.id !== 'settings'))(
-    'routes $path to a placeholder for Phase $phase',
-    async (page) => {
-      mockViewport(1440)
-      renderApp(page.path)
-      expect(await screen.findByRole('heading', { level: 1, name: page.label })).toBeVisible()
-      expect(screen.getByText(`Coming in Phase ${page.phase}`)).toBeInTheDocument()
-    },
-  )
+  it.each(
+    Object.values(PAGES).filter(
+      (p) =>
+        p.id !== 'overview' && p.id !== 'settings' && p.id !== 'transactions' && p.id !== 'import',
+    ),
+  )('routes $path to a placeholder for Phase $phase', async (page) => {
+    mockViewport(1440)
+    renderApp(page.path)
+    expect(await screen.findByRole('heading', { level: 1, name: page.label })).toBeVisible()
+    expect(screen.getByText(`Coming in Phase ${page.phase}`)).toBeInTheDocument()
+  })
 
   it('labels the overview as demo data', async () => {
     renderApp('/')

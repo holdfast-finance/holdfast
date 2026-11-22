@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 
 import { resetDb } from '@/mocks/db'
@@ -8,6 +8,10 @@ import { server } from '@/mocks/node'
 import { useReauthStore } from '@/stores/reauth'
 
 import { mockViewport } from './matchMedia'
+
+// findBy* and waitFor give up after 1 s by default. A lazy route plus the session query can take
+// longer than that when another suite is using the machine, which failed tests that pass alone.
+configure({ asyncUtilTimeout: 5000 })
 
 // Default to a phone-sized viewport (mobile-first); tests opt into desktop explicitly.
 mockViewport(375)

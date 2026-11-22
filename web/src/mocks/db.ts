@@ -1,3 +1,5 @@
+import type { ImportRun } from '@/api/imports'
+import type { Account, Transaction } from '@/api/ledger'
 import type { AuditEntry, FilingRole, UserRole } from '@/api/contracts'
 
 /*
@@ -60,6 +62,12 @@ export interface MockState {
   users: MockUser[]
   invites: MockInvite[]
   audit: AuditEntry[]
+  /** Imported accounts and transactions (see `./ledger.ts`). */
+  accounts: Account[]
+  transactions: Transaction[]
+  /** Statement import runs and the filenames already imported (see `./imports.ts`). */
+  importRuns: ImportRun[]
+  importedFiles: string[]
   session: MockSession | null
   challenges: Set<string>
   failedLogins: number
@@ -73,6 +81,10 @@ function emptyState(): MockState {
     users: [],
     invites: [],
     audit: [],
+    accounts: [],
+    transactions: [],
+    importRuns: [],
+    importedFiles: [],
     session: null,
     challenges: new Set(),
     failedLogins: 0,

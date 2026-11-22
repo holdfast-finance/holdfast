@@ -6,14 +6,23 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models._common import (
     CATEGORY_KINDS,
+    CATEGORY_ORIGINS,
     CATEGORY_SOURCES,
     CREATED_BY,
+    SHA256_HEX_PATTERN,
     TRANSACTION_SOURCES,
     UUIDPK,
     CreatedAt,
@@ -30,14 +39,29 @@ class Category(Base):
     __table_args__ = (
         check_in("kind", CATEGORY_KINDS),
         child_fk("parent_id", "category", ondelete="SET NULL"),
+        check_in("origin", CATEGORY_ORIGINS),
+        # The flag follows the kind: an expense that should not count is hidden or kind excluded.
+        CheckConstraint(
+            "counts_toward_spending = false OR kind = 'expense'",
+            name="counts_spending_only_expense",
+        ),
         parent_key(),
+        UniqueConstraint("household_id", "slug"),
     )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
     parent_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    # Stable machine key (ADR 0022): "<group>.<category>" for a category, "<group>" for a group.
+    # Seeding and the PFC mapping key on it; renaming a category never changes it.
+    slug: Mapped[str]
     name: Mapped[str]
     kind: Mapped[str]
+    # "system": seeded from the default tree. "user": added by the household.
+    origin: Mapped[str] = mapped_column(server_default=text("'user'"))
+    is_hidden: Mapped[bool] = mapped_column(server_default=text("false"))
+    counts_toward_spending: Mapped[bool] = mapped_column(server_default=text("false"))
+    sort_order: Mapped[int] = mapped_column(server_default=text("0"))
     is_essential: Mapped[bool] = mapped_column(server_default=text("false"))
     default_tax_tag: Mapped[str | None]
     created_at: Mapped[CreatedAt]
@@ -78,6 +102,25 @@ class Transaction(Base):
 
     **Splits.** If a transaction has splits, they sum exactly to ``amount`` (deferred constraint
     trigger, checked at commit). Changing ``amount`` re-runs the check.
+
+    **Imports** (ADR 0017). An imported row (``source = 'import'``) always has an
+    ``import_fingerprint`` (64-char hex, ``app.domain.fingerprint``), unique per account, so a
+    re-import inserts nothing. ``import_run_id`` records which run created it: every imported
+    row has one, and only imported rows do (CHECKs). Trigger ``transaction_import_run_guard``
+    lets a row join a run only on insert, only while the run is ``running`` and its
+    reconciliation ``pending``, only in the run's account (when it has one), and only if the
+    writer may write the run. After that the link and the row's account are final. A run can't
+    be deleted while its rows exist (NO ACTION), so undoing an import deletes its rows first,
+    under RLS.
+
+    **Supersession** (PLAN 8.1 step 5, "Plaid wins"). ``superseded_by_id`` points at the row that
+    replaces this one; superseded rows stay (so their fingerprints keep re-imports idempotent) but
+    every metric and view must exclude them (``superseded_by_id IS NULL``). The database enforces:
+    same account (composite FK to ``(id, account_id)``), not self, one-to-one (a winner replaces
+    at most one row), and no chains (a winner is live, and a row that replaces another can't
+    itself be superseded). ``transaction_supersession_guard`` locks the winner, and any row this
+    one already replaces, before that check. Deleting the winner (Plaid
+    ``removed``) clears the link, so the replaced row counts again.
     """
 
     __tablename__ = "transaction"
@@ -87,11 +130,49 @@ class Transaction(Base):
         child_fk("account_id", "account"),
         child_fk("category_id", "category", ondelete="SET NULL"),
         child_fk("receipt_document_id", "document", ondelete="SET NULL"),
+        # NO ACTION: an import run can't be deleted while it still has rows (undo deletes them
+        # first, under RLS). Household and account deletes still cascade both.
+        child_fk("import_run_id", "import_run", ondelete="NO ACTION"),
+        # Supersession stays within one account (and so one household).
+        ForeignKeyConstraint(
+            ["superseded_by_id", "account_id"],
+            ["transaction.id", "transaction.account_id"],
+            ondelete="SET NULL (superseded_by_id)",
+        ),
         CheckConstraint("transfer_group_id IS NULL OR is_transfer", name="transfer_group"),
+        CheckConstraint(
+            "superseded_by_id IS NULL OR superseded_by_id <> id", name="not_self_superseded"
+        ),
+        CheckConstraint("import_run_id IS NULL OR source = 'import'", name="import_run_source"),
+        CheckConstraint("source <> 'import' OR import_run_id IS NOT NULL", name="import_has_run"),
+        CheckConstraint(
+            "source <> 'import' OR import_fingerprint IS NOT NULL", name="import_fingerprinted"
+        ),
+        CheckConstraint(
+            f"import_fingerprint IS NULL OR import_fingerprint ~ '{SHA256_HEX_PATTERN}'",
+            name="import_fingerprint_hex",
+        ),
         # Scoped per account (not global) so a duplicate can't reveal another household's data.
         UniqueConstraint("account_id", "external_id"),
         UniqueConstraint("account_id", "import_fingerprint"),
+        # Target of the supersession FK.
+        UniqueConstraint("id", "account_id"),
+        # One-to-one: a winner replaces at most one row. Also serves the supersession FK.
+        Index(
+            "uq_transaction_superseded_by_id",
+            "superseded_by_id",
+            unique=True,
+            postgresql_where=text("superseded_by_id IS NOT NULL"),
+        ),
         Index("ix_transaction_account_id_posted_date", "account_id", "posted_date"),
+        # Keyset list of live rows across accounts: (household, posted_date desc, id desc).
+        Index(
+            "ix_transaction_household_id_posted_date_id_live",
+            "household_id",
+            text("posted_date DESC"),
+            text("id DESC"),
+            postgresql_where=text("superseded_by_id IS NULL"),
+        ),
         Index("ix_transaction_category_id_posted_date", "category_id", "posted_date"),
         Index("ix_transaction_merchant_name", "merchant_name"),
         Index(
@@ -132,6 +213,10 @@ class Transaction(Base):
         comment="Plaid pending_transaction_id: external_id of the pending row replaced.",
     )
     source: Mapped[str]
+    import_run_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        comment="Row that replaces this one (Plaid wins). Superseded rows are excluded."
+    )
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 

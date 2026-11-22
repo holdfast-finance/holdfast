@@ -54,6 +54,10 @@ NUMERIC_COLUMNS: dict[tuple[str, str], str] = {
     ("estimate_snapshot", "withheld"): "money",
     ("estimate_snapshot", "projected_due"): "money",
     ("agent_finding", "est_savings"): "money",
+    ("import_run", "opening_balance"): "money",
+    ("import_run", "closing_balance"): "money",
+    ("import_run", "txn_sum"): "money",
+    ("import_run", "balance_diff"): "money",
 }
 
 
