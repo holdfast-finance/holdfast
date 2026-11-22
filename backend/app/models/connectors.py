@@ -98,6 +98,8 @@ class PlaidLinkSlot(Base):
             "env <> 'production' OR owner_count IS NOT NULL", name="production_has_owner_count"
         ),
         CheckConstraint("state <> 'linked' OR item_id IS NOT NULL", name="linked_has_item"),
+        # An Item that exists is never "abandoned": that state means no Item was made.
+        CheckConstraint("state <> 'abandoned' OR item_id IS NULL", name="abandoned_has_no_item"),
         CheckConstraint("(state = 'reserved') = (resolved_at IS NULL)", name="resolved_when_done"),
         child_fk("bank_connection_id", "bank_connection", ondelete="SET NULL"),
         Index(

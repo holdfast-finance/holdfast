@@ -227,10 +227,11 @@ async def _enqueue[P: JobPayload](
                     )
                 )
             ).one()
-            if row.payload != body:
-                raise IdempotencyConflict(f"{spec.name}: key reused with a different payload")
-            if row.requested_by != requested_by:
-                raise IdempotencyConflict(f"{spec.name}: key reused by a different requester")
+            # One message for both cases, so a conflict doesn't tell a caller which one it was.
+            if row.payload != body or row.requested_by != requested_by:
+                raise IdempotencyConflict(
+                    f"{spec.name}: key reused with a different payload or requester"
+                )
             run_id, status, created = row.id, row.status, False
             next_attempt_at = row.next_attempt_at
 

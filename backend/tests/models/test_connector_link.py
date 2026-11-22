@@ -336,6 +336,44 @@ def test_a_person_cannot_change_or_delete_another_persons_coverage(
         c.execute(t.update().where(t.c.id == joint_cov).values(account_id=world.shared))
 
 
+@pytest.mark.parametrize(
+    ("start", "end", "name"),
+    [
+        (date(1989, 12, 31), date(2026, 1, 31), "start_plausible"),
+        (date(2026, 1, 1), date(2099, 1, 1), "not_after_written"),
+        (date(2026, 1, 31), date(2026, 2, 28), "no_overlap"),  # shares Jan 31 (inclusive)
+        (date(2025, 12, 1), date(2026, 3, 1), "no_overlap"),
+    ],
+)
+def test_coverage_intervals_are_plausible_and_never_overlap(
+    app_engine: Engine, world: World, start: date, end: date, name: str
+) -> None:
+    with app_engine.begin() as c:
+        set_ctx(c, world.hid, wide=True)
+        _coverage(c, world, world.joint)  # Jan 2026
+    with app_engine.begin() as c, pytest.raises(IntegrityError, match=name):
+        set_ctx(c, world.hid, wide=True)
+        _insert(
+            c,
+            "account_coverage",
+            household_id=world.hid,
+            account_id=world.joint,
+            start_date=start,
+            end_date=end,
+        )
+    with app_engine.begin() as c:  # the next month, and another account, are fine
+        set_ctx(c, world.hid, wide=True)
+        for account in (world.joint, world.shared):
+            _insert(
+                c,
+                "account_coverage",
+                household_id=world.hid,
+                account_id=account,
+                start_date=date(2026, 2, 1),
+                end_date=date(2026, 2, 28),
+            )
+
+
 def test_coverage_period_order(app_engine: Engine, world: World) -> None:
     with app_engine.begin() as c, pytest.raises(IntegrityError, match="period_order"):
         set_ctx(c, world.hid, wide=True)
@@ -504,6 +542,10 @@ def test_slot_constraints(app_engine: Engine, world: World) -> None:
         ({"flag": "free text with spaces"}, "flag_is_code"),
         ({"state": "linked", "link_token_enc": None, "resolved_at": WHEN}, "linked_has_item"),
         ({"resolved_at": WHEN}, "resolved_when_done"),
+        (
+            {"state": "abandoned", "link_token_enc": None, "resolved_at": WHEN, "item_id": "i-1"},
+            "abandoned_has_no_item",
+        ),
     ]
     for values, name in bad:
         with app_engine.begin() as c, pytest.raises(IntegrityError, match=name):
@@ -725,8 +767,7 @@ def test_manual_and_native_accounts_cannot_change_source(app_engine: Engine, wor
         _update_account(
             c,
             native,
-            "source = 'import', bank_connection_id = NULL, statement_key = 'k',"
-            " external_account_id = 'k'",
+            "source = 'import', bank_connection_id = NULL",
         )
 
 
@@ -809,3 +850,62 @@ def test_statement_keys_are_unique_per_household(app_engine: Engine, world: Worl
             name="Twin",
             type="depository",
         )
+
+
+# --------------------------------------------------------------------------- statement keys (M1)
+
+
+def test_only_an_import_account_is_created_with_a_statement_key(
+    app_engine: Engine, world: World
+) -> None:
+    bad: list[tuple[dict[str, Any], str]] = [
+        ({"source": "manual", "statement_key": "example_bank.checking:0000:k"}, "statement key"),
+        (
+            {
+                "source": "plaid",
+                "bank_connection_id": world.prod,
+                "external_account_id": "plaid-x",
+                "statement_key": "example_bank.checking:0000:k",
+            },
+            "statement key",
+        ),
+        ({"source": "import", "external_account_id": "no-key"}, "import_has_statement_key"),
+        (
+            {
+                "source": "import",
+                "statement_key": "example_bank.checking:0000:k",
+                "external_account_id": "example_bank.checking:0000:k",
+                "adopted_at": WHEN,
+            },
+            "adopted only by an update",
+        ),
+    ]
+    for values, message in bad:
+        with app_engine.begin() as c, pytest.raises(DBAPIError, match=message):
+            set_ctx(c, world.hid, wide=True)
+            _insert(c, "account", household_id=world.hid, name="X", type="depository", **values)
+
+
+def test_no_account_can_take_a_statement_key_later(app_engine: Engine, world: World) -> None:
+    """A key set after insert would capture that statement's later imports (Bulwark M1), from
+    a manual, sandbox or native account, or from another person's private one."""
+    with app_engine.begin() as c:
+        set_ctx(c, world.hid, world.sam)
+        manual = _insert(
+            c,
+            "account",
+            household_id=world.hid,
+            owner_person_id=world.sam,
+            visibility="private",
+            source="manual",
+            name="Example Cash",
+            type="depository",
+        )
+    for who in (world.sam, None):
+        with app_engine.begin() as c, pytest.raises(DBAPIError, match="statement key"):
+            set_ctx(c, world.hid, who, wide=who is None)
+            _update_account(c, manual, "statement_key = 'example_bank.checking:0000:next'")
+    # An imported account's key can't be swapped either.
+    with app_engine.begin() as c, pytest.raises(DBAPIError, match="statement key"):
+        set_ctx(c, world.hid, wide=True)
+        _update_account(c, world.joint, "statement_key = statement_key || '-moved'")

@@ -14,6 +14,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -133,6 +134,16 @@ class Account(Base):
             " AND source IN ('plaid', 'simplefin'))",
             name="adopted_is_connected",
         ),
+        # Only an imported (or adopted) account carries a statement key, and every imported one
+        # does. With the trigger (no key set after insert, none on a non-import insert) no other
+        # account can take a statement's key and capture its later imports.
+        CheckConstraint(
+            "source <> 'import' OR statement_key IS NOT NULL", name="import_has_statement_key"
+        ),
+        CheckConstraint(
+            "statement_key IS NULL OR source = 'import' OR adopted_at IS NOT NULL",
+            name="statement_key_is_imported",
+        ),
         parent_key(),
     )
 
@@ -229,6 +240,18 @@ class AccountCoverage(Base):
         child_fk("account_id", "account"),
         child_fk("source_import_run_id", "import_run", ondelete="SET NULL"),
         CheckConstraint("start_date <= end_date", name="period_order"),
+        CheckConstraint("start_date >= DATE '1990-01-01'", name="start_plausible"),
+        # Coverage is statements already imported: it can't reach past the day it was written.
+        CheckConstraint(
+            "end_date <= (created_at AT TIME ZONE 'UTC')::date", name="not_after_written"
+        ),
+        # Intervals are merged at adoption, so one account's never overlap (btree_gist).
+        ExcludeConstraint(
+            ("account_id", "="),
+            (text("daterange(start_date, end_date, '[]')"), "&&"),
+            using="gist",
+            name="ex_account_coverage_no_overlap",
+        ),
         Index("ix_account_coverage_account_id_start_date", "account_id", "start_date"),
     )
 

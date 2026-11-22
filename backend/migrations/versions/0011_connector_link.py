@@ -15,15 +15,20 @@ models (reviewed by hand); everything autogenerate can't see is written out here
 - ``account_coverage`` (ADR 0035 §1): ENABLE + FORCE RLS, ``household_isolation`` and the
   RESTRICTIVE person policies of the account detail tables (0002): read needs the account's
   details visible, insert / update / delete need the account writable or a household-wide
-  session.
-- ``account.statement_key``: backfilled from ``external_account_id`` on imported accounts, and
-  the per-household unique key moves from ``(household_id, external_account_id) WHERE source =
-  'import'`` to ``(household_id, statement_key)``, so the key survives adoption.
-  ``account.adopted_at`` and ``account_guard_source`` (ADR 0033 §6): ``source`` changes only
-  ``import`` -> ``plaid``/``simplefin`` (with a production connection of that provider and
-  ``adopted_at`` in the same UPDATE) and back (un-adopt: no connector rows left, connection and
-  ``adopted_at`` cleared, ``external_account_id`` back to the statement key). A statement key is
-  final once set.
+  session. Intervals of one account never overlap (EXCLUDE with ``btree_gist``, a trusted
+  extension the owner role may create), start no earlier than 1990 and end no later than the day
+  they were written (UTC).
+- ``account.statement_key``: backfilled from ``external_account_id`` on imported accounts
+  (``legacy-<id>`` if that is NULL), and the per-household unique key moves from
+  ``(household_id, external_account_id) WHERE source = 'import'`` to ``(household_id,
+  statement_key)``, so the key survives adoption. Every ``import`` account has a key, and only an
+  ``import`` or adopted account has one (CHECKs). ``account.adopted_at`` and
+  ``account_guard_source`` (BEFORE INSERT OR UPDATE, ADR 0033 §6): an account is inserted with
+  no ``adopted_at`` and a key only if it is ``import``; the key never changes after insert (NULL
+  to a value included), so no manual, sandbox or native account can take over a statement's key;
+  ``source`` changes only ``import`` -> ``plaid``/``simplefin`` (with a production connection of
+  that provider and ``adopted_at`` in the same UPDATE) and back (un-adopt: no connector rows
+  left, connection and ``adopted_at`` cleared, ``external_account_id`` back to the key).
 - ``bank_connection.client_fp`` and status ``pending_setup``.
   ``balance_snapshot.bank_connection_id`` (``SET NULL``) marks connector-written snapshots, so
   un-adopt deletes only those (Bulwark, #62).
@@ -33,7 +38,12 @@ models (reviewed by hand); everything autogenerate can't see is written out here
 Grants: new tables get the owner's default privileges (SELECT/INSERT/UPDATE/DELETE for
 holdfast_app, no DDL); only ``plaid_link_slot`` is narrowed.
 
-Downgrade reverses everything. It is lossy by nature: ``pending_setup`` connections become
+Downgrade reverses everything, and **refuses to run** (nothing changed) while
+- any ``plaid_link_slot`` row is production and not ``abandoned``: dropping the ledger would reset
+  the slot count and let an 11th Item through (hard rule 4), or
+- any account is adopted (``adopted_at`` set): its statement key would be lost, and the next
+  statement import would make a twin. Un-adopt first.
+Otherwise it is lossy only where nothing is at stake: ``pending_setup`` connections become
 ``disconnected`` (nothing was ingested from them, and every scheduled job skips both).
 
 Revision ID: 0011_connector_link
@@ -45,6 +55,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0011_connector_link"
 down_revision: str | None = "0010_list_household_ids"
@@ -95,8 +106,18 @@ DECLARE
     conn_provider text;
     has_connector_rows boolean;
 BEGIN
-    IF OLD.statement_key IS NOT NULL
-       AND NEW.statement_key IS DISTINCT FROM OLD.statement_key THEN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.adopted_at IS NOT NULL THEN
+            RAISE EXCEPTION 'account % can be adopted only by an update', NEW.id
+                USING ERRCODE = '23514';
+        END IF;
+        IF NEW.statement_key IS NOT NULL AND NEW.source <> 'import' THEN
+            RAISE EXCEPTION 'only an imported account is created with a statement key'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.statement_key IS DISTINCT FROM OLD.statement_key THEN
         RAISE EXCEPTION 'the statement key of account % is final', OLD.id
             USING ERRCODE = '23514';
     END IF;
@@ -153,9 +174,10 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION account_guard_source() IS
-    'Adoption and un-adopt are the only source changes on an account (ADR 0033 section 6).';
+    'Statement keys are set on insert of an import account only; adoption and un-adopt are the'
+    ' only source changes (ADR 0033 section 6).';
 CREATE TRIGGER account_guard_source
-    BEFORE UPDATE ON account
+    BEFORE INSERT OR UPDATE ON account
     FOR EACH ROW EXECUTE FUNCTION account_guard_source();
 """
 
@@ -270,7 +292,10 @@ def upgrade() -> None:
     op.add_column("account", sa.Column("adopted_at", sa.DateTime(timezone=True), nullable=True))
     # FORCE RLS binds the owner, so without a household context this UPDATE would see no rows.
     op.execute("ALTER TABLE account NO FORCE ROW LEVEL SECURITY")
-    op.execute("UPDATE account SET statement_key = external_account_id WHERE source = 'import'")
+    op.execute(
+        "UPDATE account SET statement_key = coalesce(external_account_id, 'legacy-' || id)"
+        " WHERE source = 'import'"
+    )
     op.execute("ALTER TABLE account FORCE ROW LEVEL SECURITY")
     op.drop_index("uq_account_household_id_external_account_id_import", table_name="account")
     op.create_unique_constraint(
@@ -280,6 +305,16 @@ def upgrade() -> None:
         op.f("ck_account_adopted_is_connected"),
         "account",
         "adopted_at IS NULL OR (statement_key IS NOT NULL AND source IN ('plaid', 'simplefin'))",
+    )
+    op.create_check_constraint(
+        op.f("ck_account_import_has_statement_key"),
+        "account",
+        "source <> 'import' OR statement_key IS NOT NULL",
+    )
+    op.create_check_constraint(
+        op.f("ck_account_statement_key_is_imported"),
+        "account",
+        "statement_key IS NULL OR source = 'import' OR adopted_at IS NOT NULL",
     )
     op.execute(ACCOUNT_SOURCE_GUARD_SQL)
 
@@ -349,10 +384,40 @@ def upgrade() -> None:
     _restrictive("person_delete", "account_coverage", "DELETE", COVERAGE_WRITE, None)
 
 
+def _refuse_lossy_downgrade() -> None:
+    """Raise before changing anything if the downgrade would lose a counted slot or an
+    adoption (see the module docstring)."""
+    conn = op.get_bind()
+    # The owner-only SELECT policy lets the owner count every household's slots.
+    slots = conn.execute(
+        sa.text(
+            "SELECT count(*) FROM plaid_link_slot WHERE env = 'production' AND state <> 'abandoned'"
+        )
+    ).scalar_one()
+    if slots:
+        raise RuntimeError(
+            f"cannot downgrade 0011: the Plaid slot ledger counts {slots} production Item(s); "
+            "dropping it would reset the slot guard (hard rule 4)"
+        )
+    # FORCE RLS binds the owner, so without a household context this count would see no rows.
+    op.execute("ALTER TABLE account NO FORCE ROW LEVEL SECURITY")
+    adopted = conn.execute(
+        sa.text("SELECT count(*) FROM account WHERE adopted_at IS NOT NULL")
+    ).scalar_one()
+    op.execute("ALTER TABLE account FORCE ROW LEVEL SECURITY")
+    if adopted:
+        raise RuntimeError(
+            f"cannot downgrade 0011: {adopted} account(s) are adopted by a connection; "
+            "un-adopt them first, or their statement keys are lost"
+        )
+
+
 def downgrade() -> None:
-    # Dropping a table drops its policies, triggers and grants (DROP TABLE fires no DELETE
-    # trigger). Functions go after the tables whose triggers use them.
+    _refuse_lossy_downgrade()
+    # Dropping a table drops its policies, triggers, constraints and grants (DROP TABLE fires no
+    # DELETE trigger). Functions go after the tables whose triggers use them.
     op.drop_table("account_coverage")
+    op.execute("DROP EXTENSION IF EXISTS btree_gist")
     op.drop_table("plaid_link_slot")
     op.drop_table("connector_account_link")
     op.execute("DROP FUNCTION plaid_slot_count(text, text)")
@@ -377,7 +442,8 @@ def downgrade() -> None:
 
     op.execute("DROP TRIGGER account_guard_source ON account")
     op.execute("DROP FUNCTION account_guard_source()")
-    op.drop_constraint(op.f("ck_account_adopted_is_connected"), "account", type_="check")
+    for name in ("statement_key_is_imported", "import_has_statement_key", "adopted_is_connected"):
+        op.drop_constraint(op.f(f"ck_account_{name}"), "account", type_="check")
     op.drop_constraint(op.f("uq_account_household_id_statement_key"), "account", type_="unique")
     op.create_index(
         "uq_account_household_id_external_account_id_import",
@@ -510,6 +576,10 @@ def _create_plaid_link_slot() -> None:
             name=op.f("ck_plaid_link_slot_linked_has_item"),
         ),
         sa.CheckConstraint(
+            "state <> 'abandoned' OR item_id IS NULL",
+            name=op.f("ck_plaid_link_slot_abandoned_has_no_item"),
+        ),
+        sa.CheckConstraint(
             "(state = 'reserved') = (resolved_at IS NULL)",
             name=op.f("ck_plaid_link_slot_resolved_when_done"),
         ),
@@ -543,6 +613,7 @@ def _create_plaid_link_slot() -> None:
 
 
 def _create_account_coverage() -> None:
+    op.execute("CREATE EXTENSION IF NOT EXISTS btree_gist")
     op.create_table(
         "account_coverage",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
@@ -555,6 +626,13 @@ def _create_account_coverage() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.CheckConstraint("start_date <= end_date", name=op.f("ck_account_coverage_period_order")),
+        sa.CheckConstraint(
+            "start_date >= DATE '1990-01-01'", name=op.f("ck_account_coverage_start_plausible")
+        ),
+        sa.CheckConstraint(
+            "end_date <= (created_at AT TIME ZONE 'UTC')::date",
+            name=op.f("ck_account_coverage_not_after_written"),
+        ),
         sa.ForeignKeyConstraint(
             ["account_id", "household_id"],
             ["account.id", "account.household_id"],
@@ -572,6 +650,12 @@ def _create_account_coverage() -> None:
             ["household.id"],
             name=op.f("fk_account_coverage_household_id_household"),
             ondelete="CASCADE",
+        ),
+        postgresql.ExcludeConstraint(
+            ("account_id", "="),
+            (sa.text("daterange(start_date, end_date, '[]')"), "&&"),
+            using="gist",
+            name="ex_account_coverage_no_overlap",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_account_coverage")),
     )

@@ -120,6 +120,13 @@ uses too.
 6. sets the connection's `tx_cursor = NULL`, so a re-adoption replays the full history. Replay is
    idempotent through `upsert_external` and coverage.
 
+**Deleting a connection with adopted accounts (Ledger, PR #74).** The connection delete path
+refuses with `409 connection_has_adopted_accounts` until every account it adopted is un-adopted.
+Un-adopt is the one path that removes connector rows, snapshots and coverage together. Without
+this step, `SET NULL` on `account.bank_connection_id` and `balance_snapshot.bank_connection_id`
+would leave an adopted account with no connection and connector snapshots with no marker. The
+database keeps `SET NULL`, not a CHECK, so household cascades still work. P4 owns this check.
+
 The test un-adopts, re-adopts and syncs, and asserts the same live multiset and balances as the
 first adoption.
 
@@ -139,11 +146,19 @@ is tightened so the database holds the whole adoption shape, not just `source`:
   becomes `import`.
 - `adopted_at` changes only together with `source`. CHECK `adopted_is_connected`: an adopted
   account has a statement key and a connector source.
-- `statement_key` is final once set. `UNIQUE (household_id, statement_key)` replaces the 0006
-  partial index on `external_account_id`, and the backfill copies `external_account_id` for every
-  `import` account. The database does not force `import` accounts to carry a key, because a few
-  test helpers insert keyless ones. The resolver (`app/services/statement_accounts.py`) always
-  writes both, and an account without a key can't be adopted.
+- Statement keys (Bulwark M1 on PR #74). Without these rules, any account given a predictable
+  key would capture that statement's later imports. That includes a manual, sandbox or native
+  account, or another person's private one.
+  - `UNIQUE (household_id, statement_key)` replaces the 0006 partial index on
+    `external_account_id`.
+  - The backfill copies `external_account_id` for every `import` account, or writes
+    `legacy-<id>` when that is NULL.
+  - CHECK `import_has_statement_key`: every `import` account has a key.
+  - CHECK `statement_key_is_imported`: only an `import` or adopted account has one.
+  - The guard also runs `BEFORE INSERT`. An insert can't set `adopted_at`, and only an `import`
+    insert may carry a key.
+  - A key never changes after insert, including from NULL to a value.
+  - The resolver (`app/services/statement_accounts.py`) is the only writer of keys.
 - `connector_account_link.account_id` has no ON DELETE action. An account under a mapped link
   can't be deleted until the link is un-mapped. Deleting the connection deletes its links.
 - `balance_snapshot.bank_connection_id` (`SET NULL`) marks connector snapshots (Bulwark, #62).

@@ -54,6 +54,7 @@ async def _account(
                 household_id=hid,
                 source="import",
                 external_account_id=f"t:{aid}",
+                statement_key=f"t:{aid}",
                 name="Example Checking",
                 type="depository",
                 currency=currency,

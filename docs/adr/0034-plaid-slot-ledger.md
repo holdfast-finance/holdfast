@@ -56,8 +56,11 @@ Access and constraints:
   `owner_count`, `created_by_user_id`, `household_id` and `created_at` fixed, and a recorded
   `item_id` never changes.
 - CHECKs: `state = 'reserved' OR link_token_enc IS NULL` (Bulwark), `(state = 'reserved') =
-  (resolved_at IS NULL)`, a `linked` row has an `item_id`, a production row has an `owner_count`
-  (0 to 10), and `flag` is a short code, never free text.
+  (resolved_at IS NULL)`, a `linked` row has an `item_id` and an `abandoned` row has none, a
+  production row has an `owner_count` (0 to 10), and `flag` is a short code, never free text.
+- The downgrade of 0011 refuses to run while any production row is not `abandoned` (Bulwark M2
+  on #74). Dropping the ledger and upgrading again would otherwise reset the count and let an
+  11th Item through.
 - `created_by_user_id` has no FK, like `import_run.reviewed_by_user_id`, so the ledger outlives
   the user who linked.
 - `plaid_slot_count(client_fp, env)` counts the given `env`. Callers pass `'production'` for the

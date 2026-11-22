@@ -27,7 +27,10 @@ def _extensions(database_url: str) -> set[str]:
     try:
         with engine.connect() as conn:
             rows = conn.execute(
-                text("SELECT extname FROM pg_extension WHERE extname IN ('pg_trgm','pgcrypto')")
+                text(
+                    "SELECT extname FROM pg_extension"
+                    " WHERE extname IN ('pg_trgm', 'pgcrypto', 'btree_gist')"
+                )
             )
             return {r[0] for r in rows}
     finally:
@@ -46,11 +49,11 @@ def test_upgrade_downgrade_upgrade(migrations_database_url: str) -> None:
     cfg = _config(url)
     command.downgrade(cfg, "base")  # start clean even if a previous run left state
     command.upgrade(cfg, "head")
-    assert _extensions(url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto", "btree_gist"}
     command.downgrade(cfg, "base")
     assert _extensions(url) == set()
     command.upgrade(cfg, "head")
-    assert _extensions(url) == {"pg_trgm", "pgcrypto"}
+    assert _extensions(url) == {"pg_trgm", "pgcrypto", "btree_gist"}
 
 
 @pytest.mark.services
@@ -263,7 +266,8 @@ def test_category_migration_over_data(migrations_database_url: str) -> None:
 def test_connector_link_migration_over_data(migrations_database_url: str) -> None:
     """0011 over data: every imported account's statement key equals its external key (and no
     other account gets one), the import key moves to the statement key, and down then up keeps
-    both. Downgrade turns a ``pending_setup`` connection into ``disconnected``."""
+    both. Downgrade turns a ``pending_setup`` connection into ``disconnected``, and refuses to run
+    while a production slot still counts or an account is adopted (Bulwark M2, Ledger)."""
     url = migrations_database_url
     cfg = _config(url)
     command.downgrade(cfg, "base")
@@ -336,7 +340,51 @@ def test_connector_link_migration_over_data(migrations_database_url: str) -> Non
         assert import_index() == {"uq_account_household_id_statement_key"}
         with engine.begin() as c:
             ctx(c, hid)
-            c.execute(text("UPDATE bank_connection SET status = 'pending_setup'"))
+            c.execute(
+                text("UPDATE bank_connection SET status = 'pending_setup', env = 'production'")
+            )
+            slot = c.execute(
+                text(
+                    "INSERT INTO plaid_link_slot (household_id, client_fp, env, owner_count,"
+                    " created_by_user_id) VALUES (:h, '0123456789abcdef', 'production', 0,"
+                    " gen_random_uuid()) RETURNING id"
+                ),
+                {"h": hid},
+            ).scalar_one()
+            c.execute(
+                text(
+                    "UPDATE account SET source = 'plaid', bank_connection_id = :c,"
+                    " external_account_id = 'plaid-account-2', adopted_at = now()"
+                    " WHERE name = 'Imported A'"
+                ),
+                {"c": conn_id},
+            )
+
+        # A counted slot blocks the downgrade (the slot guard would reset), then an adoption
+        # does (the statement key would be lost). Nothing changes on a refusal.
+        with pytest.raises(RuntimeError, match="slot ledger counts 1"):
+            command.downgrade(cfg, "0010_list_household_ids")
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(
+                text(
+                    "UPDATE plaid_link_slot SET state = 'abandoned', link_token_enc = NULL,"
+                    " resolved_at = now() WHERE id = :i"
+                ),
+                {"i": slot},
+            )
+        with pytest.raises(RuntimeError, match="1 account"):
+            command.downgrade(cfg, "0010_list_household_ids")
+        with engine.begin() as c:
+            ctx(c, hid)
+            c.execute(
+                text(
+                    "UPDATE account SET source = 'import', bank_connection_id = NULL,"
+                    " adopted_at = NULL, external_account_id = statement_key"
+                    " WHERE name = 'Imported A'"
+                )
+            )
+        assert keys(hid) == first
 
         command.downgrade(cfg, "0010_list_household_ids")
         assert import_index() == {"uq_account_household_id_external_account_id_import"}

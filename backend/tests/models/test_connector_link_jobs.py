@@ -196,7 +196,7 @@ async def test_a_key_reused_by_another_requester_conflicts(
     first = await enqueue(deps.factory, H.queue, child, payload, requested_by=house.alex, **who)
     again = await enqueue(deps.factory, H.queue, child, payload, requested_by=house.alex, **who)
     assert first.run_id == again.run_id
-    with pytest.raises(IdempotencyConflict, match="different requester"):
+    with pytest.raises(IdempotencyConflict, match="different payload or requester"):
         await enqueue(deps.factory, H.queue, child, payload, requested_by=None, **who)
 
 
