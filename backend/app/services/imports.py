@@ -17,12 +17,14 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import uuid
 import weakref
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +36,13 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db_context import scoped_session
+from app.domain.file_kind import (
+    FileKind,
+    WideTextGuard,
+    detect_file_kind,
+    has_binary_bytes,
+    is_wide_text,
+)
 from app.domain.ledger_rules import InvalidAmountError
 from app.domain.statement_parse import (
     ParsedStatement,
@@ -41,10 +50,12 @@ from app.domain.statement_parse import (
     detect_profile,
     parse_statement,
 )
+from app.importers.export_statement import csv_statement, ofx_statement
 from app.importers.pdf_text import MAX_PDF_BYTES, pdf_to_text
-from app.importers.profile_loader import load_profiles
+from app.importers.profile_loader import load_csv_profiles, load_profiles
 from app.models import Account, Document, ImportRun
 from app.schemas.imports import (
+    ImportAccountOut,
     ImportBalanceOut,
     ImportBlockOut,
     ImportResultOut,
@@ -58,14 +69,54 @@ from app.services.errors import ApiError
 from app.services.sessions import Principal
 from app.services.statement_import import (
     AccountNotVisibleError,
+    AccountTarget,
+    AccountTargetError,
     BlockResult,
     DocumentMeta,
     import_statement,
     stored_review_reason,
 )
 
-PDF_MAGIC = b"%PDF-"
-ALLOWED_TYPES = frozenset({"application/pdf", "application/x-pdf", "application/octet-stream"})
+# The client's MIME type is only a coarse gate (browsers disagree on CSV and send nothing for
+# OFX/QFX); what a file really is comes from its bytes (``detect_file_kind``).
+ALLOWED_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/x-pdf",
+        "application/octet-stream",
+        "text/csv",
+        "application/csv",
+        "application/vnd.ms-excel",
+        "text/plain",
+        "application/x-ofx",
+        "application/ofx",
+        "application/vnd.intu.qfx",
+        "",
+    }
+)
+MAX_TEXT_BYTES = 10 * 1024 * 1024  # a CSV export is far smaller
+MAX_OFX_BYTES = 5 * 1024 * 1024  # OFX is tag-heavy: bound the parser's work separately
+EXTENSIONS: dict[FileKind, str] = {"pdf": "pdf", "csv": "csv", "ofx": "ofx"}
+MIME_TYPES: dict[FileKind, str] = {
+    "pdf": "application/pdf",
+    "csv": "text/csv",
+    "ofx": "application/x-ofx",
+}
+KIND_LABELS: dict[FileKind, str] = {"pdf": "PDF", "csv": "CSV", "ofx": "OFX"}
+SEPARATE_ACCOUNT_NOTICE = (
+    "This file went into its own new account. It is not matched to accounts from your "
+    "statements, so it may repeat transactions you already imported from them."
+)
+TARGET_MESSAGES = {
+    "joint_not_chosen": "Choose a joint account for this import, or sign in as a person.",
+    "account_kind_mismatch": "That file is the other kind (bank or card) than the chosen account.",
+    "target_needs_single_account": "That file has several accounts. Import it as a new account.",
+}
+OTHER_ACCOUNT_NOTICE = (
+    "This exact file is already in Holdfast under a different account, so nothing was added "
+    "to the account you chose."
+)
+UNSUPPORTED = "That file isn't a PDF, CSV or OFX/QFX export."
 UPLOADS_PER_MINUTE = 10
 CHUNK = 64 * 1024
 DEFAULT_LIMIT = 50
@@ -91,6 +142,15 @@ log = structlog.get_logger(__name__)
 _FILENAME_OK = re.compile(r"[^A-Za-z0-9 ._()\-]")
 
 
+@dataclass(frozen=True)
+class UploadFields:
+    """The form fields beside the file that say where a CSV/OFX goes (a PDF ignores them)."""
+
+    account: str | None = None  # "new" or the uuid of an existing import account
+    account_kind: str | None = None  # "bank" | "card", for a new CSV account
+    joint: str | None = None  # truthy: a joint (household) account rather than the uploader's
+
+
 class _Upload(Protocol):
     """The part of Starlette's UploadFile used here (also what the tests pass)."""
 
@@ -100,14 +160,19 @@ class _Upload(Protocol):
     async def read(self, size: int = -1, /) -> bytes: ...
 
 
-def sanitise_filename(raw: str | None) -> str:
-    """A display label: base name only, safe characters, bounded, always ``.pdf``."""
+def sanitise_filename(raw: str | None, ext: str = "pdf") -> str:
+    """A display label: base name only, safe characters, bounded, always ``.<ext>``."""
     name = (raw or "").replace("\\", "/").rsplit("/", 1)[-1]
     name = _FILENAME_OK.sub("_", name).strip(" .")
     name = re.sub(r"_{2,}", "_", name)
-    stem = name[:-4] if name.lower().endswith(".pdf") else name
-    stem = stem.strip(" ._")[: FILENAME_MAX - 4]
-    return f"{stem or 'statement'}.pdf"
+    suffix = f".{ext}"
+    # The bytes decided the kind, so a mismatched name ("a.pdf" holding a CSV) loses its extension.
+    stem = name
+    for known in (".pdf", ".csv", ".ofx", ".qfx"):
+        if name.lower().endswith(known):
+            stem = name[: -len(known)]
+    stem = stem.strip(" ._")[: FILENAME_MAX - len(suffix)]
+    return f"{stem or 'statement'}{suffix}"
 
 
 def _encode_cursor(at: datetime, run_id: uuid.UUID) -> str:
@@ -130,52 +195,113 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
 
 
 def _parse_pdf(path: Path) -> ParsedStatement:
-    """CPU-bound: run in a thread. Any failure becomes one fixed, content-free message."""
+    text = pdf_to_text(path)
+    profile = detect_profile(text, load_profiles())
+    if profile is None:
+        raise ApiError(
+            "validation_error", "Holdfast doesn't have a profile for this statement yet."
+        )
+    return parse_statement(text, profile)
+
+
+def _parse_file(
+    path: Path, kind: FileKind, id_key: bytes | None, account_kind: str = "bank"
+) -> ParsedStatement:
+    """CPU-bound: run in a thread. Any failure becomes one fixed, content-free message.
+
+    Parser messages can quote file content, so none is ever passed on, logged or returned.
+    """
+    label = KIND_LABELS[kind]
     try:
-        text = pdf_to_text(path)
-        profile = detect_profile(text, load_profiles())
-        if profile is None:
-            raise ApiError(
-                "validation_error", "Holdfast doesn't have a profile for this statement yet."
-            )
-        return parse_statement(text, profile)
+        if kind == "pdf":
+            return _parse_pdf(path)
+        data = path.read_bytes()
+        if kind == "ofx":
+            if id_key is None:
+                raise ApiError("server_error", "The statement couldn't be saved.")
+            return ofx_statement(data, id_key)
+        statement = csv_statement(data, load_csv_profiles(), account_kind)
+        if statement is None:
+            raise ApiError("validation_error", "Holdfast doesn't have a profile for this CSV yet.")
+        return statement
     except ApiError:
         raise
     except (StatementParseError, ValueError):
-        raise ApiError("validation_error", "That statement couldn't be read.") from None
-    except Exception:  # pdfplumber / pdfminer raise many types on malformed files
-        raise ApiError("validation_error", "That file isn't a readable PDF.") from None
+        what = "statement" if kind == "pdf" else label
+        raise ApiError("validation_error", f"That {what} couldn't be read.") from None
+    except Exception:  # pdfplumber / pdfminer / xml raise many types on malformed files
+        raise ApiError("validation_error", f"That file isn't a readable {label}.") from None
 
 
-async def _stream_to_temp(upload: _Upload, directory: Path) -> tuple[Path, str, int]:
-    """Copy the upload to a private temp file: (path, sha256 hex, size). Hard-capped."""
+def household_id_key(settings: Any, household_id: uuid.UUID) -> bytes | None:
+    """Key for the OFX id tokens (FITIDs, account ids), derived per household.
+
+    It comes from ``IMPORT_ID_KEY``, a dedicated secret that is never rotated: ``FERNET_KEY`` is
+    a rotating ring, and rotating it would change every token and make re-exports look new.
+    ``None`` when it is not set (an older ``.env``: ``make keys`` adds it to a new one).
+    """
+    secret = settings.import_id_key
+    if secret is None:
+        return None
+    return hmac.new(
+        secret.get_secret_value().encode(), b"ofx-fitid:" + household_id.bytes, hashlib.sha256
+    ).digest()
+
+
+async def _stream_to_temp(upload: _Upload, directory: Path) -> tuple[Path, str, int, FileKind]:
+    """Copy the upload to a private temp file: (path, sha256 hex, size, kind). Hard-capped.
+
+    The kind comes from the first chunk's bytes. A text file is checked chunk by chunk for
+    binary bytes, so nothing binary gets through as CSV or OFX.
+    """
     await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True, mode=0o700)
-    tmp = directory / f"{TEMP_PREFIX}{uuid.uuid4().hex}.pdf"
+    tmp = directory / f"{TEMP_PREFIX}{uuid.uuid4().hex}.part"
     digest = hashlib.sha256()
     size = 0
+    kind: FileKind | None = None
+    guard: WideTextGuard | None = None
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as out:
-            first = True
             while chunk := await upload.read(CHUNK):
-                if first:
-                    first = False
-                    if not chunk.startswith(PDF_MAGIC):
-                        raise UploadRefused("not_pdf", "validation_error", "That file isn't a PDF.")
+                if kind is None:
+                    kind = detect_file_kind(chunk)
+                    if kind is None:
+                        raise UploadRefused("unsupported_file", "validation_error", UNSUPPORTED)
+                    if is_wide_text(chunk):
+                        guard = WideTextGuard(chunk)
+                if kind != "pdf":
+                    # UTF-16/32 legitimately holds NUL bytes: check its decoded text instead.
+                    clean = guard.feed(chunk) if guard else not has_binary_bytes(chunk)
+                    if not clean:
+                        raise UploadRefused("unsupported_file", "validation_error", UNSUPPORTED)
                 size += len(chunk)
-                if size > MAX_PDF_BYTES:
+                limit = {"pdf": MAX_PDF_BYTES, "csv": MAX_TEXT_BYTES, "ofx": MAX_OFX_BYTES}[kind]
+                if size > limit:
                     raise UploadRefused(
-                        "too_large", "payload_too_large", "That PDF is over the 20 MiB limit."
+                        "too_large",
+                        "payload_too_large",
+                        f"That {KIND_LABELS[kind]} is over the {limit // (1024 * 1024)} MiB limit.",
                     )
                 digest.update(chunk)
                 out.write(chunk)
     except BaseException:
         tmp.unlink(missing_ok=True)  # a temp name, never a hash-named stored file
         raise
-    if size == 0:
+    if size == 0 or kind is None:
         tmp.unlink(missing_ok=True)
         raise UploadRefused("empty", "validation_error", "That file is empty.")
-    return tmp, digest.hexdigest(), size
+    if guard is not None and not guard.finish():
+        tmp.unlink(missing_ok=True)
+        raise UploadRefused("unsupported_file", "validation_error", UNSUPPORTED)
+    # The extractor picks its reader by suffix, so the temp file takes the detected kind's.
+    typed = tmp.with_suffix(f".{EXTENSIONS[kind]}")
+    try:
+        os.replace(tmp, typed)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return typed, digest.hexdigest(), size, kind
 
 
 class UploadRefused(ApiError):
@@ -302,21 +428,66 @@ class ImportService:
     # ------------------------------------------------------------------ upload
 
     async def upload(
-        self, upload: _Upload, raw_filename: str | None, slot: ParseSlot
+        self,
+        upload: _Upload,
+        raw_filename: str | None,
+        slot: ParseSlot,
+        fields: UploadFields | None = None,
     ) -> ImportResultOut:
         try:
-            return await self._upload(upload, raw_filename, slot)
+            return await self._upload(upload, raw_filename, slot, fields or UploadFields())
         except UploadRefused as exc:
             await self.refuse(exc.reason, exc.code, exc.message, exc.headers)
 
+    def _target(self, kind: FileKind, fields: UploadFields, sha: str) -> AccountTarget | None:
+        """Where a CSV/OFX goes. A PDF has none: its account follows its profile."""
+        if kind == "pdf":
+            return None
+        choice = (fields.account or "").strip().lower()
+        if not choice:
+            raise UploadRefused(
+                "account_required",
+                "validation_error",
+                "Choose which account this file belongs to, or a new account.",
+            )
+        account_id: uuid.UUID | None = None
+        if choice != "new":
+            try:
+                account_id = uuid.UUID(choice)
+            except ValueError:
+                raise UploadRefused(
+                    "bad_account", "validation_error", "That account choice isn't valid."
+                ) from None
+        if kind == "csv" and fields.account_kind not in ("bank", "card"):
+            raise UploadRefused(
+                "account_kind_required",
+                "validation_error",
+                "Say whether this CSV is a bank account or a card.",
+            )
+        joint = (fields.joint or "").strip().lower() in ("1", "true", "yes", "on")
+        if self.principal.person_id is None and not joint and account_id is None:
+            raise UploadRefused(
+                "joint_not_chosen", "validation_error", TARGET_MESSAGES["joint_not_chosen"]
+            )
+        return AccountTarget(
+            account_id=account_id,
+            joint=joint and account_id is None,
+            new_token=sha[:16] if kind == "csv" else None,
+            kind_from_file=kind == "ofx",
+            declared_kind=fields.account_kind if kind == "csv" else None,
+        )
+
     async def _upload(
-        self, upload: _Upload, raw_filename: str | None, slot: ParseSlot
+        self, upload: _Upload, raw_filename: str | None, slot: ParseSlot, fields: UploadFields
     ) -> ImportResultOut:
         if (upload.content_type or "").split(";")[0].strip().lower() not in ALLOWED_TYPES:
-            raise UploadRefused("bad_content_type", "validation_error", "That file isn't a PDF.")
+            raise UploadRefused(
+                "bad_content_type", "validation_error", "That file type can't be imported."
+            )
         # Temp files and stored originals share one filesystem so the final rename is atomic.
         store = self.ctx.settings.document_store / STORE_SUBDIR
-        tmp, sha, size = await _stream_to_temp(upload, store)
+        tmp, sha, size, kind = await _stream_to_temp(upload, store)
+        ext = EXTENSIONS[kind]
         lock_key = f"hf:import:lock:{self.principal.household_id}:{sha}"
         token = secrets.token_hex(16)
         locked = False
@@ -326,12 +497,13 @@ class ImportService:
                 raise UploadRefused(
                     "in_progress", "conflict", "That statement is already being imported."
                 )
-            statement = await self._parse(tmp, slot)
+            target = self._target(kind, fields, sha)
+            statement = await self._parse(tmp, slot, kind, fields.account_kind or "bank")
             household_dir = store / str(self.principal.household_id)
-            final = household_dir / f"{sha}.pdf"
+            final = household_dir / f"{sha}.{ext}"
             # Under the household's own directory, named by hash: nothing is shared across
             # households and no client text reaches the path.
-            relative = f"{STORE_SUBDIR}/{self.principal.household_id}/{sha}.pdf"
+            relative = f"{STORE_SUBDIR}/{self.principal.household_id}/{sha}.{ext}"
             await asyncio.to_thread(household_dir.mkdir, exist_ok=True, mode=0o700)
             if final.exists():
                 os.utime(final)  # in use again: a later sweep must not see an old orphan
@@ -339,12 +511,12 @@ class ImportService:
                 os.replace(tmp, final)
             # A failed import leaves the stored file: it is named by hash, and another request
             # may be using it. ``sweep_store`` removes orphans later.
-            result = await self._import(statement, sha, relative, size, raw_filename)
+            result = await self._import(statement, sha, relative, size, raw_filename, kind, target)
         finally:
             tmp.unlink(missing_ok=True)
             if locked:
                 await self.release(lock_key, token)
-        document_created, document_id, filename, blocks, balances_only = result
+        document_created, document_id, filename, blocks, balances_only, notice = result
         await audit.record(
             self.ctx.factory,
             "import.upload",
@@ -358,11 +530,14 @@ class ImportService:
                 "blocks": len(blocks),
                 "rows_inserted": sum(b.rows_inserted for b in blocks),
                 "size_bytes": size,
+                "kind": kind,
             },
         )
         return ImportResultOut(
             document_id=document_id,
             filename=filename,
+            file_kind=kind,
+            notice=notice,
             created=document_created,
             balances_only=balances_only,
             blocks=blocks,
@@ -378,8 +553,17 @@ class ImportService:
             else [],
         )
 
-    async def _parse(self, path: Path, slot: ParseSlot) -> ParsedStatement:
-        task = asyncio.ensure_future(asyncio.to_thread(_parse_pdf, path))
+    async def _parse(
+        self, path: Path, slot: ParseSlot, kind: FileKind, account_kind: str
+    ) -> ParsedStatement:
+        id_key = household_id_key(self.ctx.settings, self.principal.household_id)
+        if kind == "ofx" and id_key is None:
+            raise UploadRefused(
+                "id_key_missing", "server_error", "The statement couldn't be saved."
+            )
+        task = asyncio.ensure_future(
+            asyncio.to_thread(_parse_file, path, kind, id_key, account_kind)
+        )
         try:
             done, _ = await asyncio.wait({task}, timeout=PARSE_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
@@ -407,12 +591,15 @@ class ImportService:
         relative: str,
         size: int,
         raw_filename: str | None,
-    ) -> tuple[bool, uuid.UUID, str, list[ImportBlockOut], bool]:
+        kind: FileKind,
+        target: AccountTarget | None = None,
+    ) -> tuple[bool, uuid.UUID, str, list[ImportBlockOut], bool, str | None]:
         meta = DocumentMeta(
             sha256=sha,
-            filename=sanitise_filename(raw_filename),
+            filename=sanitise_filename(raw_filename, EXTENSIONS[kind]),
             storage_path=relative,
             size_bytes=size,
+            mime=MIME_TYPES[kind],
         )
         for block in statement.blocks:
             for value in (block.opening_balance, block.closing_balance):
@@ -426,6 +613,11 @@ class ImportService:
             existing = (
                 await s.execute(select(Document.id).where(Document.sha256 == sha))
             ).scalar_one_or_none()
+            known_accounts = set(
+                (await s.execute(select(Account.id).where(Account.source == "import")))
+                .scalars()
+                .all()
+            )
         try:
             result = await import_statement(
                 self.ctx.factory,
@@ -433,7 +625,10 @@ class ImportService:
                 statement,
                 meta,
                 person_id=self.principal.person_id,
+                target=target,
             )
+        except AccountTargetError as exc:
+            raise UploadRefused(exc.reason, "conflict", TARGET_MESSAGES[exc.reason]) from None
         except IntegrityError as exc:
             if _is_duplicate_document(exc):
                 # Imported at the same moment, or by someone whose copy this session can't see.
@@ -466,7 +661,15 @@ class ImportService:
                 await s.execute(select(Document.filename).where(Document.id == result.document_id))
             ).scalar_one()
         blocks = await self._blocks(result.blocks)
-        return existing is None, result.document_id, doc, blocks, result.balances_only
+        notice = None
+        # A new account made by a CSV/OFX while others exist: accounts are keyed by import
+        # profile, so the file is not matched to a statement's account (no cross-source dedupe).
+        new_account = any(r.created and r.account_id not in known_accounts for r in result.blocks)
+        if kind != "pdf" and known_accounts and new_account:
+            notice = SEPARATE_ACCOUNT_NOTICE
+        if result.in_other_account:
+            notice = OTHER_ACCOUNT_NOTICE
+        return existing is None, result.document_id, doc, blocks, result.balances_only, notice
 
     async def _blocks(self, results: tuple[BlockResult, ...]) -> list[ImportBlockOut]:
         if not results:
@@ -499,6 +702,7 @@ class ImportService:
                         "rows_parsed": run.rows_parsed,
                         "rows_inserted": r.rows_inserted,
                         "rows_duplicate": r.rows_duplicate,
+                        "rows_overlap": r.rows_overlap,
                         "created": r.created,
                         "reason": (r.reason or stored_review_reason(run))
                         if run.reconcile_status == "needs_review"
@@ -507,6 +711,28 @@ class ImportService:
                 )
             )
         return out
+
+    async def accounts(self) -> list[ImportAccountOut]:
+        stmt = (
+            select(Account)
+            .where(Account.source == "import", Account.closed_at.is_(None))
+            .order_by(Account.name, Account.id)
+        )
+        async with self._session() as s:
+            rows = (await s.execute(stmt)).scalars().all()
+        return [
+            ImportAccountOut(
+                id=a.id,
+                name=a.name,
+                type="card" if a.type == "credit" else "bank",
+                mask=a.mask,
+                currency=a.currency,
+                joint=a.owner_person_id is None,
+            )
+            for a in rows
+            # Visible is not writable: another person's shared account can be read, not added to.
+            if a.owner_person_id is None or a.owner_person_id == self.principal.person_id
+        ]
 
     # ------------------------------------------------------------------ runs
 

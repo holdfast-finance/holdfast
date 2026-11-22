@@ -34,8 +34,18 @@ def legacy(plaintext: str, raw_key: str) -> bytes:
     return Fernet(raw_key.encode()).encrypt(plaintext.encode())
 
 
+def bound(plaintext: str, raw_key: str, ctx: str | None) -> bytes:
+    assert ctx is not None
+    return crypto.seal(SecretToken(plaintext), ctx, key=SecretStr(raw_key))
+
+
 def sealed(plaintext: str, raw_key: str) -> bytes:
-    return crypto.seal(SecretToken(plaintext), key=SecretStr(raw_key))
+    return crypto.seal_unbound(SecretToken(plaintext), key=SecretStr(raw_key))
+
+
+def ctx_of(table: str, hid: uuid.UUID, row_key: str) -> str | None:
+    col = {"household_setting": "value_enc", "bank_connection": "access_token_enc"}.get(table)
+    return None if col is None else crypto.make_context(hid, table, col, row_key)
 
 
 @dataclass
@@ -48,6 +58,16 @@ class World:
     new: str
     canaries: dict[str, str]
 
+    def ctx(self, table: str) -> str | None:
+        key = {"household_setting": self.setting_key, "bank_connection": str(self.connection_id)}
+        return ctx_of(table, self.household_id, key.get(table, ""))
+
+    def current(self, blob: bytes, table: str) -> bool:
+        return crypto.is_current(blob, self.ring, bound=table != "app_user")
+
+    def opened(self, blob: bytes, table: str) -> str:
+        return crypto.open_with(blob, self.ring, self.ctx(table)).reveal()
+
     @property
     def ring(self) -> crypto.KeyRing:
         return crypto.load_ring(SecretStr(f"{self.new},{self.old}"))
@@ -57,20 +77,33 @@ class World:
 def world(app_engine: Engine, owner_engine: Engine) -> Iterator[World]:
     old, new = crypto.generate_key(), crypto.generate_key()
     canaries = {n: f"{n}-{secrets.token_hex(10)}" for n in ("setting", "token", "totp")}
+    conn_id = uuid.uuid4()
     with app_engine.begin() as c:
         hid = c.execute(text("SELECT create_household('Example Rotation')")).scalar_one()
         set_ctx(c, hid, wide=True)
         c.execute(
             text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
-            {"h": hid, "v": legacy(canaries["setting"], old)},
+            {
+                "h": hid,
+                "v": bound(
+                    canaries["setting"],
+                    old,
+                    crypto.make_context(hid, "household_setting", "value_enc", "k"),
+                ),
+            },
         )
-        conn_id = c.execute(
+        c.execute(
             text(
                 "INSERT INTO bank_connection"
-                " (household_id, provider, external_id, access_token_enc)"
-                " VALUES (:h,'plaid',:e,:v) RETURNING id"
+                " (id, household_id, provider, external_id, access_token_enc)"
+                " VALUES (:i,:h,'plaid',:e,:v) RETURNING id"
             ),
-            {"h": hid, "e": f"item-{uuid.uuid4()}", "v": legacy(canaries["token"], old)},
+            {
+                "i": conn_id,
+                "h": hid,
+                "e": f"item-{uuid.uuid4()}",
+                "v": bound(canaries["token"], old, ctx_of("bank_connection", hid, str(conn_id))),
+            },
         ).scalar_one()
         user_id = c.execute(
             text(
@@ -143,23 +176,40 @@ async def test_legacy_rows_rotate_to_the_primary_kid_and_second_run_is_a_no_op(
     new_kid = crypto.key_id(world.new)
     for t in TABLES:
         blob = read(app_engine, world, t)
-        assert blob is not None and blob.startswith(f"hf1.{new_kid}.".encode())
-        assert crypto.open_with(blob, world.ring).reveal() == world.canaries[CANARY[t]]
+        want = "hf1" if t == "app_user" else "hf2"
+        assert blob is not None and blob.startswith(f"{want}.{new_kid}.".encode())
+        assert world.opened(blob, t) == world.canaries[CANARY[t]]
     before = {t: read(app_engine, world, t) for t in TABLES}
     again = await run(factory, world)
     assert (again.rotated, again.already_current, again.failed) == (0, 3, 0)
     assert {t: read(app_engine, world, t) for t in TABLES} == before
 
 
-async def test_hf1_row_under_a_retired_kid_is_resealed(
+async def test_unbound_rows_in_gated_columns_fail_and_are_never_upgraded(
     app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
 ) -> None:
-    write(app_engine, world, "bank_connection", sealed("old-kid-canary", world.old))
+    """A copied TOTP seed (hf1) or a bare Fernet token must not be laundered into a binding."""
+    seed = sealed("copied-totp-seed", world.new)
+    bare = legacy("copied-bare", world.new)
+    write(app_engine, world, "household_setting", seed)
+    write(app_engine, world, "bank_connection", bare)
+    counts = await run(factory, world)
+    assert counts.failed == 2 and counts.residual == 2 and not counts.clean
+    assert read(app_engine, world, "household_setting") == seed
+    assert read(app_engine, world, "bank_connection") == bare
+
+
+async def test_hf2_row_under_a_retired_kid_is_resealed(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    ctx = world.ctx("bank_connection")
+    write(app_engine, world, "bank_connection", bound("old-kid-canary", world.old, ctx))
     counts = await run(factory, world)
     assert counts.rotated == 3 and counts.clean
     blob = read(app_engine, world, "bank_connection")
-    assert blob is not None and crypto.is_current(blob, world.ring)
-    assert crypto.open_with(blob, world.ring).reveal() == "old-kid-canary"
+    assert blob is not None and world.current(blob, "bank_connection")
+    assert blob.startswith(b"hf2.")
+    assert world.opened(blob, "bank_connection") == "old-kid-canary"
 
 
 async def test_null_totp_is_skipped_and_empty_fails_unchanged(
@@ -221,7 +271,7 @@ def _drift(app_engine_blobs: list[bytes], table_sql: str, params: dict[str, Any]
 async def test_failed_swap_rereads_and_seals_only_the_bytes_it_locked(
     app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
 ) -> None:
-    winner = legacy("winner-canary", world.old)
+    winner = bound("winner-canary", world.old, world.ctx("bank_connection"))
     hook = _drift(
         [winner],
         "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
@@ -230,15 +280,17 @@ async def test_failed_swap_rereads_and_seals_only_the_bytes_it_locked(
     counts = await run(factory, world, hook)
     assert counts.conflicted == 0 and counts.clean
     blob = read(app_engine, world, "bank_connection")
-    assert blob is not None and crypto.is_current(blob, world.ring)
-    assert crypto.open_with(blob, world.ring).reveal() == "winner-canary"
+    assert blob is not None and world.current(blob, "bank_connection")
+    assert world.opened(blob, "bank_connection") == "winner-canary"
     assert world.canaries["token"] != "winner-canary"
 
 
 async def test_failed_swap_against_an_already_current_winner_writes_nothing(
     app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
 ) -> None:
-    winner = sealed("winner-canary", world.new)
+    winner = crypto.seal(
+        SecretToken("winner-canary"), world.ctx("bank_connection"), key=SecretStr(world.new)
+    )
     hook = _drift(
         [winner],
         "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
@@ -252,7 +304,8 @@ async def test_failed_swap_against_an_already_current_winner_writes_nothing(
 async def test_second_failed_swap_is_a_conflict_and_leaves_the_row(
     app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
 ) -> None:
-    first, second = legacy("w1", world.old), legacy("w2", world.old)
+    ctx = world.ctx("bank_connection")
+    first, second = bound("w1", world.old, ctx), bound("w2", world.old, ctx)
     hook = _drift(
         [first, second],
         "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
@@ -272,8 +325,8 @@ async def test_two_concurrent_rotations_leave_one_envelope_with_the_right_plaint
     assert a.failed + b.failed + a.conflicted + b.conflicted == 0
     for t in TABLES:
         blob = read(app_engine, world, t)
-        assert blob is not None and crypto.is_current(blob, world.ring)
-        assert crypto.open_with(blob, world.ring).reveal() == world.canaries[CANARY[t]]
+        assert blob is not None and world.current(blob, t)
+        assert world.opened(blob, t) == world.canaries[CANARY[t]]
 
 
 async def test_plaintext_never_reaches_logs_or_stdout(
@@ -370,9 +423,15 @@ async def test_household_with_no_user_is_rotated_not_skipped(
         set_ctx(c, hid, wide=True)
         c.execute(
             text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
-            {"h": hid, "v": legacy(canary, old)},
+            {
+                "h": hid,
+                "v": bound(
+                    canary, old, crypto.make_context(hid, "household_setting", "value_enc", "k")
+                ),
+            },
         )
     try:
+        ctx = crypto.make_context(hid, "household_setting", "value_enc", "k")
         counts = await rotation.rotate(factory, ring, only=[hid])
         assert (counts.rotated, counts.residual, counts.failed) == (1, 0, 0)
         with app_engine.begin() as c:
@@ -383,8 +442,9 @@ async def test_household_with_no_user_is_rotated_not_skipped(
                     {"h": hid},
                 ).scalar_one()
             )
-        assert crypto.is_current(blob, ring)
-        assert crypto.open_with(blob, ring).reveal() == canary
+        assert crypto.is_current(blob, ring, bound=True)
+        assert blob.startswith(b"hf2.")
+        assert crypto.open_with(blob, ring, ctx).reveal() == canary
     finally:
         delete_household(owner_engine, hid)
 
@@ -499,3 +559,48 @@ async def test_audit_write_failure_does_not_mask_the_exit_code(
     monkeypatch.setattr(rotation, "get_settings", lambda: settings)
     monkeypatch.setattr(audit, "record", broken)
     assert await rotation._run() == 2
+
+
+async def test_moved_hf2_rows_are_refused_and_left_unchanged(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    """A blob sealed for another household, row, column or name fails the row, bytes untouched."""
+    other = uuid.uuid4()
+    foreign = {
+        "household_setting": [
+            crypto.make_context(other, "household_setting", "value_enc", "k"),
+            crypto.make_context(world.household_id, "household_setting", "value_enc", "other"),
+            crypto.make_context(world.household_id, "household_setting", "extra", "k"),
+        ],
+        "bank_connection": [
+            crypto.make_context(
+                other, "bank_connection", "access_token_enc", str(world.connection_id)
+            ),
+            crypto.make_context(world.household_id, "bank_connection", "access_token_enc", "x"),
+            crypto.make_context(
+                world.household_id, "household_setting", "value_enc", str(world.connection_id)
+            ),
+        ],
+    }
+    for table, ctxs in foreign.items():
+        for bad in ctxs:
+            blob = crypto.seal(SecretToken("moved-canary"), bad, key=SecretStr(world.new))
+            write(app_engine, world, table, blob)
+            counts = await run(factory, world)
+            assert counts.failed >= 1 and counts.residual >= 1 and not counts.clean
+            assert read(app_engine, world, table) == blob
+            write(app_engine, world, table, bound("fix", world.old, world.ctx(table)))
+            assert (await run(factory, world)).failed == 0
+
+
+async def test_hf2_in_the_totp_column_fails_and_totp_stays_hf1(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    blob = crypto.seal(
+        SecretToken("x"),
+        crypto.make_context(world.household_id, "app_user", "totp_secret_enc", str(world.user_id)),
+        key=SecretStr(world.new),
+    )
+    write(app_engine, world, "app_user", blob)
+    counts = await run(factory, world)
+    assert counts.failed == 1 and read(app_engine, world, "app_user") == blob

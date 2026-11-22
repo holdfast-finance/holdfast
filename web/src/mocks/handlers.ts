@@ -29,6 +29,7 @@ import {
   UPLOAD_ERRORS,
   balancesOnlyResult,
   importFile,
+  MOCK_IMPORT_ACCOUNTS,
   uploadErrorKey,
   type ScenarioError,
 } from '@/mocks/imports'
@@ -744,6 +745,10 @@ export const handlers = [
   ),
   // Statement import (I5 / I5b). Upload needs no step-up; accepting a run does.
   http.get(
+    path('/imports/accounts'),
+    authed(() => HttpResponse.json(MOCK_IMPORT_ACCOUNTS)),
+  ),
+  http.get(
     path('/imports/runs'),
     authed(({ request }) => {
       const params = new URL(request.url).searchParams
@@ -785,7 +790,8 @@ export const handlers = [
       const failure = uploadErrorKey(scenario)
       if (failure) return uploadFailure(UPLOAD_ERRORS[failure])
       if (scenario.includes('balances')) return HttpResponse.json(balancesOnlyResult(name))
-      return HttpResponse.json(importFile(name, content))
+      const account = /name="account"\r\n\r\n([^\r]*)/.exec(raw)?.[1] ?? 'new'
+      return HttpResponse.json(importFile(name, content, account))
     }),
   ),
   http.get(

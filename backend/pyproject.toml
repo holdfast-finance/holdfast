@@ -166,6 +166,19 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Connectors stay at the edge: no request, persistence or job code"
+type = "forbidden"
+source_modules = ["app.integrations"]
+forbidden_modules = [
+    "app.api",
+    "app.services",
+    "app.db",
+    "app.db_context",
+    "app.models",
+    "app.jobs",
+]
+
+[[tool.importlinter.contracts]]
 name = "Routers never touch ORM models or sessions (services own the unit of work)"
 type = "forbidden"
 source_modules = ["app.api"]

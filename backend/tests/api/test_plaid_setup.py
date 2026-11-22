@@ -324,12 +324,15 @@ async def test_http_redirect_uri_in_production_is_refused_without_asking_plaid(
 async def add_items(app: FastAPI, hid: uuid.UUID, n: int, env: str = "production") -> None:
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
         for i in range(n):
+            cid = uuid.uuid4()
+            ctx = crypto.make_context(hid, "bank_connection", "access_token_enc", str(cid))
             s.add(
                 BankConnection(
+                    id=cid,
                     household_id=hid,
                     provider="plaid",
                     external_id=f"item-{env}-{uuid.uuid4().hex}-{i}",
-                    access_token_enc=crypto.seal(SecretToken("access-sandbox-synthetic")),
+                    access_token_enc=crypto.seal(SecretToken("access-sandbox-synthetic"), ctx),
                     env=env,
                 )
             )
