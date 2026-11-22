@@ -10,6 +10,22 @@
 - Owner answers received 2026-11-22: (1) macOS ships an **unsigned `.pkg` plus the Homebrew and terminal route
   first**, with no Apple enrolment yet; (2) Windows signing uses **SignPath's free open-source tier**; (3) test
   machines: a personal Windows PC, **no Mac**.
+- **Keel decisions, 2026-11-22** (technical, $0, owner may veto; each is recorded where it applies):
+  - **Q4** yes: one Windows PowerShell 5.1 bootstrap file whose only job is to install or locate `pwsh` 7 and hand over,
+    with a narrow CLAUDE.md hard rule 10 amendment proposed in the same slice (IN-W1), Bulwark-gated (§5).
+  - **Q5** `.pkg` only for now; `.dmg` deferred (§6).
+  - **Q6** yes: Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built, **deployed from CI
+    on a `v*` tag only** (§4).
+  - **Q9** Docker Desktop is the default on Windows and macOS (the installer's licence line says it is free for personal
+    use), with Colima documented for macOS (§3).
+  - **Q10** Podman after the first usable run, Raspberry Pi (arm64) after Podman (§3, §7).
+  - **Q11** Keel creates the tap repository in the org when the Homebrew slice is built; winget later (§6).
+  - **N1** no installer channel before an upgrade path exists (§11).
+  - **N2** the key ring lives in the per-OS state directory, and host backups **include it, encrypted with a passphrase the
+    user sets at first run and never stored with the backup** (§11).
+  - **N4** GitHub Issues with templates. **N5** only Keel creates `v*` tags, enforced by a tag ruleset (§9).
+  - **Still owner-only, open:** Q3b (borrow or rent a Mac), Q7 (separate Cloudflare account and hardware-key 2FA), N3 (who the
+    self-host `.exe` is for, versus pointing novices to Cloud).
 - Read first: ADR 0018 (release artifacts), ADR 0021 (zero-config private access, the Docker floor), ADR 0015
   (key ring), ADR 0013 (free-tier CI), ADR 0009 (Cloudflare Pages note). Numbering: 0036 is PR #70.
 - Nothing here is built. `docs/planning/INSTALL-PLAN.md` holds the slices, the CI matrix and the owner questions.
@@ -248,9 +264,12 @@ assets; every byte that runs is verified (§8). But the **stub** comes from whic
 
 **Deploying it.** `cf` is the default tool (the repo has no Wrangler configuration, so the owner's rule picks `cf`);
 `npx wrangler` works on the same account and is allowed if a Wrangler config is ever added, at which point the owner's
-rule switches to it. v1: Keel deploys after cutting a release, from `infra/get-site/`, recorded in RELEASES.md, with no
-Cloudflare token in GitHub. A scoped token in a protected environment is owner question Q6. **This ADR creates no
-Cloudflare resource.**
+rule switches to it. **Keel decision (Q6, 2026-11-22, owner may veto):** Keel creates the `holdfast-get` Worker and the `get.`
+record with `cf` when IN-E1 is built, and releases deploy **from CI on a `v*` tag only**, from `infra/get-site/`. That needs
+a **scoped Cloudflare API token (Workers deploy for this one Worker, nothing else) stored as a secret of the protected
+release environment** (§9), which adds a stealable credential that can swap the stub. It is the reason for Q7 and for the
+tag controls in §9, and the deploy job reuses the tag guard (reachable from `main`, green `ci-required`). **This ADR
+itself creates no Cloudflare resource.**
 
 ### 5. Windows
 
@@ -274,8 +293,8 @@ Cloudflare resource.**
   Desktop if it is stopped, wait for the engine, `up`, open the browser. (After a reboot Docker Desktop is often not
   running, so a bookmarked `localhost:47800` just refuses to connect; the shortcut and `holdfast open` fix that.)
   `/VERYSILENT` never installs Docker and exits with a code naming what is missing.
-- **PowerShell 7 and hard rule 10.** Stock Windows has only 5.1. **Proposal for Keel**, scoped as tightly as the
-  rule allows: amend rule 10 to permit **one** bootstrap file, `installer/install.ps1`, written for 5.1 and 7, with a CI
+- **PowerShell 7 and hard rule 10.** Stock Windows has only 5.1. **Keel decision (Q4, 2026-11-22, owner may veto):**
+  yes, with the narrowest amendment the rule allows, proposed as a CLAUDE.md change inside slice IN-W1 and Bulwark-gated: amend rule 10 to permit **one** bootstrap file, `installer/install.ps1`, written for 5.1 and 7, with a CI
   test that it does nothing but get `pwsh` and hand off. Requirements (S6):
   - it forces TLS 1.2 (`[Net.ServicePointManager]::SecurityProtocol`);
   - if `winget` is missing it falls back to the PowerShell MSI from the PowerShell GitHub release, **hash-pinned** in
@@ -314,6 +333,9 @@ Cloudflare resource.**
 
 ### 6. macOS
 
+- **Keel decisions (2026-11-22):** `.pkg` only for now, `.dmg` deferred (Q5). Keel creates the `homebrew-tap` repository in the
+  org when the Homebrew slice (IN13) is built (Q11). Docker Desktop is the default runtime with Colima documented (Q9), and the
+  installer's licence line says Docker Desktop is free for personal use.
 - **Format (owner decision 2026-11-22): an unsigned `.pkg`, plus the Homebrew and terminal routes, first. No Apple
   enrolment yet.** The `.pkg` (built with `pkgbuild` and `productbuild`) installs `holdfast` and a small `Holdfast.app`
   launcher (runs `holdfast open`). A `.dmg` is deferred: it only helps when it carries a drag-to-install app.
@@ -365,6 +387,7 @@ Cloudflare resource.**
 - **No `.deb`, `.rpm`, Flatpak or AUR package from us.** A package only wraps this script, a signed apt or dnf repository
   is a new hosting service and key, and Flatpak cannot run a Docker daemon. An AUR `PKGBUILD` is welcome from the
   community.
+- **Order (Q10, Keel decision 2026-11-22, owner may veto):** Podman comes after the first usable run, and Raspberry Pi (arm64) after Podman. Multi-arch images still build earlier because Apple Silicon needs them.
 - **arm64 and Raspberry Pi:** 64-bit OS, once §2's images exist. Memory floor to be measured (IN-S0).
 - **Podman on Fedora:** after spike IN-L-S1, `install.sh` accepts a Podman setup that provides the `docker compose` plugin
   on `podman.sock`. Until then it says "not yet supported".
@@ -403,7 +426,7 @@ The one-liner is `stub | sh`. The stub runs nothing unverified beyond itself:
   the first beta"). Sigstore's public-good service is already named under rule 9 by ADR 0018.
 - **Who may create `v*` tags, and what the workflow refuses (S2).** With full autonomy any session with push rights could
   tag a commit that changes `release.yml`, and Fulcio would certify it. So: a **tag ruleset** limits `v*` creation to Keel's
-  identity (owner question N5); `release.yml` **refuses** unless the tagged commit is reachable from `main` and has a green
+  identity (**Keel decision N5, 2026-11-22**: only Keel creates `v*` tags, enforced by this ruleset); `release.yml` **refuses** unless the tagged commit is reachable from `main` and has a green
   `ci-required` on its PR head; the signing job runs in a **protected environment** with a required reviewer. Residual
   risk: a compromised Keel identity or GitHub org owner can still mint a validly signed release. That is the root of trust
   we are choosing, and it is the same root as the GHCR images.
@@ -440,8 +463,7 @@ At run time nothing contacts these except `holdfast update --check`, which is us
 
 **Update is backup-first and fails closed (B3).** `holdfast update`:
 1. Runs the Docker-floor check and the signature verification of §8, and refuses a downgrade or a version below the minimum.
-2. **Always takes a backup first**: `pg_dump`, the documents, and a copy of the key ring (kept in state with the same mode
-   as `.env`), written to a **host** path. **It verifies the backup** by restoring it into a scratch container and checking
+2. **Always takes a backup first**: `pg_dump`, the documents, and the key ring, **encrypted with the user's backup passphrase** (see below), written to a **host** path. **It verifies the backup** by restoring it into a scratch container and checking
    row counts, and **refuses to continue if the backup or the verification fails.** There is no "if a backup is configured".
 3. Stops `api` and `worker`, then runs the one-off `migrate` service as the owner role (hard rule 8).
 4. Keeps the previous bundle and image digests on disk (N-1).
@@ -452,15 +474,22 @@ rewrites (`hf1` to `hf2`, ADR 0015, PR #73), after which an older image cannot r
 (`postgres:16-alpine` is pinned at `docker-compose.yml:91`, and a 16 to 17 image cannot start on an old `pgdata`). Major
 bumps are done by dump and restore inside `update`, with a test. Each release's notes list which of these it contains.
 
-**No channel opens before there is an upgrade path (N1).** Default decision: **no installer channel (stub, `.exe`, `.pkg`,
+**No channel opens before there is an upgrade path (N1).** **Keel decision (2026-11-22, owner may veto): no installer channel (stub, `.exe`, `.pkg`,
 tap) is published while README says "no upgrade path before beta".** The alpha stays on the clone path. The first channel
-release is the first one with a tested `update`, `backup` and `restore` (IN15). The owner may override with an explicit
-"preview, no upgrade path" banner (owner question N1).
+release is the first one with a tested `update`, `backup` and `restore` (IN15). The owner may veto.
 
-**The recovery kit (N2).** The `FERNET_KEY` ring is shown once at first run for the user to store (password manager,
-print), with a confirmation. **Default:** off-host backups **exclude** the key ring (including it would defeat encryption
-at rest for the backup), and so are useless without the kit; the *local* pre-update snapshot includes a copy because it
-sits beside `.env` with the same protection. Owner question N2 confirms.
+**The key ring and backups (N2, Keel decision 2026-11-22, owner may veto).** The `FERNET_KEY` ring lives in the per-OS
+**state directory** (§2). **Host backups include it**, and every backup archive is **encrypted with a passphrase the user sets
+at first run, which is never stored with the backup** (nor in state beside it). So a backup is safe to copy off the machine
+and useless without the passphrase, and the passphrase plus the backup is enough to recover on a new machine. The first-run
+**recovery-kit step** shows the passphrase requirement and has the user confirm they stored it (password manager or print).
+Design points for Lattice and Bulwark in IN-B1, not settled here:
+- Scheduled, unattended backups must encrypt **without** the passphrase present. The intended shape is envelope encryption: a
+  backup key pair is generated at first run, the public half stays in state for unattended encryption, and the private half is
+  wrapped by the passphrase. A restore needs the passphrase. The primitive and its dependency (for example `age`) need a
+  maintenance and AGPL-compatibility check (security rule), and add no external service.
+- A lost passphrase makes backups unrecoverable by design, and the installer says so before the user confirms.
+- The pre-update local snapshot (§11 step 2) is encrypted the same way.
 
 **Uninstall (B2):** `holdfast uninstall` stops the stack and removes **code only**. It keeps state (`.env`, key ring,
 `install.json`, `backups/`) and the Docker volumes, and prints where they are. `--purge` removes the volumes **and then
@@ -549,4 +578,4 @@ README), Colima's Docker version, a Pi's memory floor, and whether SignPath acce
 | S10 SignPath dual-licensing | **Accepted.** Asked in the application; allowlist test that no Cloud-only code is signed (§5). |
 | S11 apex `install.sh` | **Resolved by fact.** Both URLs return 404 on 2026-11-22; nothing is deployed; wording fixed (§4). |
 | S12 PATH | **Accepted.** Stub checks PATH, offers the rc line with consent (§7, IN7, IN12). |
-| N1 to N5 | Added to the plan's owner questions (N1 upgrade-path gate, N2 key-ring escrow, N3 audience, N4 support channel, N5 who may tag). |
+| N1 to N5 | Added to the plan's owner questions. Keel decided N1, N2, N4, N5 (2026-11-22, owner may veto); N3 stays with the owner. |

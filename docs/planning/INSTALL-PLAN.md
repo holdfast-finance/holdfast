@@ -17,6 +17,11 @@ M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each 
   **pulls PA-D2 in as IN-A1 and replaces PA-D6 with IN-A2, IN7, IN10 and IN15**; ADR 0021's PA-D6 row now says so. The rest of
   Phase 8.5 (phone wizard, recover, docs, real-device acceptance) stays where it is. Until IN-A1 merges, any install is a
   labelled "preview" with a certificate warning.
+- **Keel decisions (2026-11-22, owner may veto):** Q4 one 5.1 bootstrap file plus a narrow rule 10 amendment (IN-W1, Bulwark-gated); Q5
+  `.pkg` only, `.dmg` deferred; Q6 Keel creates the Worker and record with `cf` at IN-E1, deployed from CI on a `v*` tag; Q9 Docker Desktop
+  default with Colima documented; Q10 Podman after the first usable run, Raspberry Pi after Podman; Q11 Keel creates the tap repo at the
+  Homebrew slice (the plan's IN13), winget later; N1 no channel before an upgrade path; N2 key ring in the state directory, host backups
+  include it, encrypted with a user passphrase never stored with the backup; N4 GitHub Issues with templates; N5 only Keel creates `v*` tags.
 - **Owner answers (2026-11-22):** macOS ships an unsigned `.pkg` plus the Homebrew and terminal route first, no Apple
   enrolment; Windows signing is SignPath's free open-source tier; the owner has a personal Windows PC and **no Mac**.
 
@@ -31,7 +36,7 @@ M = 2 to 3 runs, L = split before scheduling (ROADMAP units). Prefix `IN`. Each 
 
 ## Stories
 
-Format: `ID title — size — owner/model — reviewers — depends — acceptance (evidence that can fail)`.
+Format: `ID title — size — owner/model — reviewers — depends — acceptance (evidence that can fail)`. Keel's "IN-M2" for the tap is this plan's **IN13**.
 
 ### E-I0 First usable run, data safety, and the Ubuntu-only assumptions (do first)
 
@@ -59,7 +64,10 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN-B1 State directory, local backup and restore** — M — Harbor + Tide/sonnet; contract by Lattice — Bulwark — IN1 —
   (a) state directory per OS separate from code (ADR 0037 §2) holding `.env`, `install.json`, `backups/`; (b) `holdfast backup`
   and `holdfast restore` write and read a dump plus documents on the **host filesystem**; (c) scheduled backup on by default on
-  Windows (Task Scheduler) and macOS (launchd), offered on Linux; (d) a backup runs before the first import. Acceptance: the
+  Windows (Task Scheduler) and macOS (launchd), offered on Linux; **every archive is encrypted with a passphrase the user sets at first run and
+  never stored with the backup, and the key ring is included (N2)**; unattended runs use envelope encryption (public half in state, private half
+  wrapped by the passphrase), a design Lattice and Bulwark settle and the chosen primitive gets the maintenance and AGPL-compatibility check; (d) a backup runs before the first import. Acceptance: a backup restored with the wrong passphrase fails and with the right one reproduces the data; grepping the archive and the state
+  directory finds no passphrase and no plaintext `FERNET_KEY` in the archive (test); the
   backup directory is a host path, never a volume (test); restore into a scratch container reproduces row counts and the
   documents' hashes; scheduled task exists after install and is gone after `--purge`. This overlaps Phase 9 (offsite restic),
   which layers on top; Lattice writes the contract so Phase 9 does not redo it.
@@ -69,7 +77,8 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN3 `holdfast keys` with a host shim** — S — Harbor/sonnet — Bulwark — IN1, IN-B1 — the api image's generator writes to
   **stdout**; the host shim creates `.env`: POSIX `umask 077`, Windows an ACL for the current user only (`icacls`, asserted in
   Pester). **Refuses to write when state holds `.env` or the `pgdata` volume exists.** All five secrets filled, a canary test greps
-  the job log for the generated values, and the **recovery-kit step** shows the key ring once with a confirmation. `make keys` and
+  the job log for the generated values, and the **recovery-kit step** has the user set the backup passphrase and confirm they stored it, and says plainly that a lost passphrase makes backups
+  unrecoverable. `make keys` and
   `dev.ps1 keys` call the same command (parity test).
 - **IN4 Multi-arch images** — M — Harbor/sonnet — Bulwark (`release.yml` is protected) — IN1 — the images job builds
   `linux/amd64,linux/arm64`; `docker buildx imagetools inspect` lists both; the arm64 image starts the stack on `ubuntu-24.04-arm`
@@ -91,7 +100,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 ### E-I1 Release integrity (before any channel opens)
 
 - **IN-T1 Tag control and release guard (S2)** — S — Harbor/sonnet — Bulwark — none — a tag ruleset limits `v*` creation to Keel's
-  identity (Q-N5); `release.yml` refuses unless the tagged commit is reachable from `main` and its PR head had a green
+  identity (Keel decision N5); `release.yml` refuses unless the tagged commit is reachable from `main` and its PR head had a green
   `ci-required`; signing runs in a protected environment with a required reviewer. Test: a tag on an unmerged branch commit fails the
   `verify` job.
 - **IN-T2 Signed `CHANNEL` and minimum version (S3)** — S — Harbor/sonnet — Bulwark — IN-T1 — `release.yml` signs `SHA256SUMS` and a
@@ -104,13 +113,15 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
   enabled (`[10042]`); no Pages projects; the account also holds unrelated Workers; the apex returns 404 for `/install.sh` and
   `/install.ps1`. No change made. `cf` is the default tool; `npx wrangler` works on the same account and is used only if a Wrangler
   config is ever committed.
-- **IN-E1 `get.holdfastfinance.app` Worker** — S — Harbor/sonnet; deploy by Keel with `cf` — Bulwark — IN7, Q6, Q7 — `infra/get-site/`
+- **IN-E1 `get.holdfastfinance.app` Worker** — S — Harbor/sonnet; Keel creates the Worker and DNS record with `cf` (Q6) — Bulwark — IN7, IN-T1 —
+  **deployed from CI on a `v*` tag only**, using a Cloudflare API token scoped to this one Worker, stored as a secret of the protected release
+  environment (it can swap the stub, so it is the credential Q7 is about). The deploy job reuses IN-T1's tag guard. `infra/get-site/`
   holds the stubs, `_headers`, `_redirects`, `latest.json`. After deploy: `curl -sI` shows `text/plain`, `nosniff`, `no-cache`; `/latest`
   302s to the GitHub Release; `workers.dev` and preview URLs are off; the Worker has no script and no bindings; a CAA record exists
   for the CA in use; the deployed `install.sh` hash equals the Release asset's (test fails otherwise). **The install page lists the
   GitHub-URL one-liner and the stub hash from the Release notes.**
-- **IN-E2 Deploy step in RELEASES.md** — S — Beacon + Harbor — Keel — IN-E1 — the release checklist has the `cf` command and the
-  hash-comparison step.
+- **IN-E2 Deploy step in RELEASES.md** — S — Beacon + Harbor — Keel — IN-E1 — RELEASES.md describes the CI deploy on a `v*` tag, the manual `cf`
+  fallback, token rotation, and the hash-comparison step.
 
 ### E-I3 Linux and other Unix
 
@@ -132,12 +143,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 
 ### E-I4 Windows
 
-- **IN10 `install.ps1` stub and core** — M — Harbor/sonnet — Bulwark, Gadfly — IN1, IN-A2, IN-T2, IN5, IN6, Q4 — Pester: tampered hash 20,
+- **IN10 `install.ps1` stub and core** — M — Harbor/sonnet — Bulwark, Gadfly — IN1, IN-A2, IN-T2, IN5, IN6 (the rule 10 amendment is IN-W1) — Pester: tampered hash 20,
   bad bundle 21, downgrade 22; `-DryRun`; PSScriptAnalyzer clean; **under 80 lines**; a test proves it only gets `pwsh` and hands off
   (reads no secret, writes only to a temp directory, runs no repo content before verification). **A CI job runs the bootstrap under
   `powershell.exe` 5.1 on `windows-2025`**, forces TLS 1.2, and takes the hash-pinned PowerShell MSI path when `winget` is absent
   (simulated). A **preflight** reports build, edition, firmware virtualization, RAM, disk, winget, WSL and `pwsh` *before any download*.
-  Pester covers the paranoid path including `Unblock-File`. If Q4 is refused, the stub is the two-step form with the same acceptance.
+  Pester covers the paranoid path including `Unblock-File`. If the amendment is refused, the stub is the two-step form with the same acceptance.
 - **IN11 Inno Setup `.exe`** — M — Harbor/sonnet — Bulwark — IN10, IN-O1 — `windows-2025` builds it (Inno Setup is preinstalled), installs
   silently to a temp per-user dir, checks files, the Start-menu shortcut and the Apps entry, uninstalls, and asserts the code directory
   is gone, **the state directory is untouched**, and nothing under `%ProgramFiles%` was written. `/VERYSILENT` never installs Docker.
@@ -145,8 +156,12 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN-W-S1 Spike: WSL 2 on a hosted runner** — S — Harbor/sonnet — none — IN1 — **assume the answer is no** and plan the owner-hardware
   path already (IN-S0, IN-W3): hosted Windows runners do not run WSL 2 or Linux containers in practice (Gadfly S8). The spike runs once
   to record the evidence; if it unexpectedly passes, a hosted stack test is added.
-- **IN-W1 Reboot-resume and WSL path** — M — Harbor/sonnet — none — IN11 — on the owner's personal PC (or a clean Windows VM): no WSL, no Docker
-  → the installer elevates once, reboots, resumes, reaches a healthy stack. Evidence: a log of steps and exit codes.
+- **IN-W1 Reboot-resume, WSL path, and the rule 10 amendment** — M — Harbor/sonnet — Bulwark (CLAUDE.md change) — IN11 — (a) on the owner's personal PC
+  (or a clean Windows VM): no WSL, no Docker → the installer elevates once, reboots, resumes, reaches a healthy stack, with a log of steps and
+  exit codes; (b) **the same slice proposes the narrow CLAUDE.md hard rule 10 amendment** (Keel decision Q4): exactly one PowerShell 5.1 bootstrap
+  file, `installer/install.ps1`, whose only job is to install or locate `pwsh` 7 and hand over. Acceptance for (b): Bulwark signs off the text, and
+  the IN10 test that the file does nothing else fails if the file gains any other behaviour. If Bulwark or the owner rejects it, IN10 falls back to
+  the two-step form.
 - **IN-W2 SignPath signing** — M — Harbor/sonnet — Bulwark — IN11 — apply to SignPath Foundation, **asking whether `v0.0.0-alpha` meets
   "released"** and stating that no Cloud-only code ships in a signed file; then the signing job runs in the protected environment on
   tag jobs. `Get-AuthenticodeSignature` in CI is `Valid` with the right signer; a test fails if the signed file list differs from an
@@ -162,7 +177,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN12 macOS path of `install.sh`** — M — Harbor/sonnet — Bulwark — IN7 — runs under `/bin/sh` on a macOS arm64 runner with `--dry-run`
   and fake `docker` shims; uses `shasum -a 256`; no GNU-only flag (shellcheck plus BSD tools); asserts a `curl`-downloaded file has no
   quarantine attribute (settles an UNVERIFIED); PATH check for zsh.
-- **IN13 Homebrew tap formula** — S — Harbor/sonnet — Bulwark — IN12, Q11 — `brew install --build-from-source` and `brew test` pass from our
+- **IN13 Homebrew tap formula** — S — Harbor/sonnet — Bulwark — IN12 — Keel creates `holdfast-finance/homebrew-tap` when this slice is built (Q11) — `brew install --build-from-source` and `brew test` pass from our
   tap on a macOS runner; the formula pins URL and SHA256; `brew audit --strict` is clean. (The runner has no Docker, so the test is the
   formula and the script, not the stack.)
 - **IN14 Unsigned `.pkg` (owner decision 1)** — M — Harbor/sonnet — Bulwark — IN12, IN-O1 — `pkgbuild`/`productbuild` job on a macOS runner;
@@ -174,7 +189,7 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN-M3 macOS stack acceptance** — M — Sounding/sonnet — Keel — IN12, IN14, IN-A1, IN-B1, **Q3b** — **blocked until a Mac exists.** On an
   Apple-silicon Mac with Docker Desktop, then Colima: the one-liner reaches a healthy arm64 stack (`docker image inspect` shows `arm64`);
   passkeys in Safari (ADR 0021 U-7) and Chrome; the loopback probe from a second host does not answer; the Docker Desktop reset drill passes.
-- **IN-M4 `.dmg` wrapper** — S — Harbor/sonnet — none — IN14 — only on request.
+- **IN-M4 `.dmg` wrapper** — S — Harbor/sonnet — none — IN14 — **deferred** (Keel decision Q5: `.pkg` only for now).
 - **IN-M5 Notarized `.pkg`** — M — Harbor/sonnet — Bulwark — IN14, Apple enrolment — **deferred by owner decision.** Listed so the work is not lost.
 
 ### E-I6 Update, uninstall, phone access, docs
@@ -189,8 +204,8 @@ Format: `ID title — size — owner/model — reviewers — depends — accepta
 - **IN16 Phone access per platform** — S — Harbor/sonnet — Bulwark — IN-A2, IN-W3, IN-M3 — the sidecar overlay starts on Linux and Docker
   Desktop (Windows now, macOS when available) with ADR 0021's serve-config test; `holdfast phone off` returns to loopback only.
 - **IN17 Install docs, release notes, support** — S — Beacon/sonnet — Harbor — IN7 — `docs/setup/install.md` per OS: the one-liners (both
-  origins), the paranoid path, verify commands, the "unsigned preview" banner, where data lives, how to back up, uninstall. Issue templates
-  ask for a log with a redaction warning (N4). A link-check job passes and a test asserts every command in the page appears in a CI job.
+  origins), the paranoid path, verify commands, the "unsigned preview" banner, where data lives, how to back up, uninstall. GitHub Issues templates (N4, Keel decision)
+  ask for a log with a redaction warning. A link-check job passes and a test asserts every command in the page appears in a CI job.
 
 ## macOS without a Mac
 
@@ -242,8 +257,9 @@ runners and should be amended by Keel or Harbor.
 2. **IN0, IN1**, then in parallel **IN-A1** (local ingress), **IN-B1** (state and backup), **IN3**, **IN5**, then **IN2**, **IN4**, **IN6**.
    After this a Windows user can reach a usable app and cannot lose data silently.
 3. **IN-A2** (wrapper) and **IN-O1** (launcher), then **IN-T1 and IN-T2** (tag control, `CHANNEL`).
-4. **IN10, IN11, IN-W1, IN-W2** (Windows stub, `.exe`, reboot path, SignPath), then **IN-W3** acceptance on the personal PC.
-5. **IN7, IN8, IN9** (Linux script, distros, acceptance). Cheap, so it may run in parallel with step 4 when a window is free.
+4. **IN10, IN11, IN-W1, IN-W2** (Windows stub, `.exe`, reboot path plus the rule 10 amendment, SignPath), then **IN-W3** acceptance on the personal PC.
+5. **IN7, IN8, IN9** (Linux script, distros, acceptance). Cheap, so it may run in parallel with step 4 when a window is free. **Podman (IN-L-S1)
+   comes after the first usable run, and Raspberry Pi (arm64 acceptance) after Podman** (Q10).
 6. **IN12, IN13, IN14** (macOS script, tap, unsigned `.pkg`), CI-only.
 7. **IN15** (backup-first update, restore, reinstall-decrypts), then **IN-E1/E2** (endpoints), then **IN17** (docs). **No installer channel is published
    before IN15 passes (N1 default).**
@@ -251,24 +267,31 @@ runners and should be amended by Keel or Harbor.
 
 ## Owner questions
 
-Answered 2026-11-22: macOS unsigned `.pkg` plus Homebrew and terminal first, no Apple enrolment; Windows signing via SignPath; test
-hardware is a personal Windows PC and no Mac. Remaining, each with cost and what it unlocks:
+**Answered by the owner 2026-11-22:** macOS unsigned `.pkg` plus Homebrew and terminal first, no Apple enrolment; Windows signing via SignPath; test
+hardware is a personal Windows PC and no Mac.
+
+**Decided by Keel 2026-11-22, owner may veto** (technical and $0, so Keel's under full autonomy):
+
+| # | Decision | Where it lands |
+|---|---|---|
+| Q4 | Yes: one Windows PowerShell 5.1 bootstrap file whose only job is to install or locate `pwsh` 7 and hand over; a narrow CLAUDE.md hard rule 10 amendment is proposed in the same slice, Bulwark-gated | IN-W1, IN10 |
+| Q5 | `.pkg` only for now; `.dmg` deferred | IN14, IN-M4 |
+| Q6 | Keel creates the `holdfast-get` Worker and the `get.` record with `cf` when IN-E1 is built; deployed from CI on a `v*` tag only (scoped token in the protected environment) | IN-E1, IN-E2 |
+| Q9 | Docker Desktop is the default on Windows and macOS (the installer's licence line says it is free for personal use); Colima documented for macOS | IN10, IN12, IN17 |
+| Q10 | Podman after the first usable run; Raspberry Pi (arm64) after Podman | IN-L-S1, slice order |
+| Q11 | Keel creates the tap repo in the org when the Homebrew slice is built; winget later | IN13, IN-W4 |
+| N1 | No channel (stub, `.exe`, `.pkg`, tap) before an upgrade path exists | slice order, IN15 |
+| N2 | Key ring in the per-OS state directory; host backups include it, encrypted with a passphrase set at first run and never stored with the backup | IN3, IN-B1 |
+| N4 | GitHub Issues with templates (redaction warning) | IN17 |
+| N5 | Only Keel creates `v*` tags, enforced by a tag ruleset | IN-T1 |
+
+**Still open, owner-only:**
 
 | # | Question | Cost | Unlocks |
 |---|---|---|---|
-| Q3b | A **Mac for Docker Desktop and Safari testing**: borrow one, or rent an Apple-silicon host for a few acceptance sessions? (No macOS VM on non-Apple hardware: Apple's licence.) | A rental, price UNVERIFIED (hourly or monthly exist; get quotes). A borrowed Mac: $0 | `IN-M3`, ADR 0021 U-7, the macOS phone-access check; before it, macOS is "script- and package-tested, stack unverified". |
-| Q4 | Amend **hard rule 10** to permit exactly one 5.1-compatible bootstrap file, `installer/install.ps1` (at most 80 lines, test-enforced to only fetch `pwsh` and hand off)? Keel rules on CLAUDE.md. | $0 | A true one-line Windows command on a stock PC; `IN10`. Otherwise two lines. |
-| Q5 | `.pkg` only, or also a `.dmg` wrapper? | $0, one small slice | `IN-M4`. |
-| Q6 | Authorise Keel to create the `holdfast-get` assets-only Worker and the `get.` custom domain with `cf`, and decide how releases deploy: by hand, or a scoped Cloudflare token as a protected-environment secret? | $0 on the free plan (static assets free and unlimited) | `IN-E1`, `IN-E2`. |
-| Q7 | Move Holdfast to its **own Cloudflare account** (this one also holds unrelated projects), with hardware-key 2FA, a **CAA record pinned to the CA in use**, and DNSSEC kept on? Cloudflare is the code-execution root for every `get.` one-liner (ADR 0037 §4). | $0 (registrar at cost unchanged); a zone move has a short DNS-gap risk | Smaller blast radius for the one place a swapped stub could come from. The GitHub-URL one-liner needs no answer. |
-| Q9 | Docker Desktop is free for personal and small-business use and paid for larger organisations. Default to it on Windows and macOS with Colima and Docker-in-WSL as the free routes, or make the free routes the default? | $0 | Wording and defaults in `IN10`, `IN12`, docs. |
-| Q10 | Priority of **Podman** (the owner runs Fedora with podman sockets) and **Raspberry Pi** (arm64): now or after Windows and macOS? | arm64 build minutes are free on a public repo | Order of `IN-L-S1`, `IN4`, `IN8`'s distro tail. Default: after. |
-| Q11 | Create `holdfast-finance/homebrew-tap` and a winget publisher identity under the org? | $0 | `IN13`, `IN-W4`. |
-| **N1** | Do we publish any one-liner, `.exe`, `.pkg` or tap **before an upgrade path exists** (beta)? Default in ADR 0037: **no**; the first channel release is the first with a tested backup-first `update` and `restore`. | $0; the cost is a later first release | Whether strangers can install a version they cannot upgrade from. |
-| **N2** | **Key-ring escrow:** where does a non-technical user keep `FERNET_KEY`, and do off-host backups include it? Including it defeats encryption at rest for the backup; excluding it makes the backup useless without the kit. Default: exclude it from off-host backups, show a one-time recovery kit, keep a protected copy beside `.env` for local rollback. | $0 | `IN3`, `IN-B1`, `IN15`. |
-| **N3** | **Who is the self-host `.exe` for?** BRAND frames self-host as builder-to-builder. Should a non-technical person who has never heard of Docker be pointed at Holdfast Cloud instead of a Docker Desktop install? | $0 | Installer copy, how much hand-holding the preflight and launcher carry, and docs tone. |
-| **N4** | **Support channel:** failed installs will arrive as public issues with logs. Approve issue templates with a redaction warning, and say who triages before launch? | $0 | `IN17`. |
-| **N5** | **Who may create `v*` tags?** Proposal: Keel's identity only, enforced by a tag ruleset, with `release.yml` refusing a commit not on `main`. | $0 | `IN-T1`, the trust in every signature. |
+| Q3b | A **Mac for Docker Desktop and Safari testing**: borrow one, or rent an Apple-silicon host for a few acceptance sessions? (No macOS VM on non-Apple hardware: Apple's licence.) | A rental, price UNVERIFIED (get quotes). A borrowed Mac: $0 | `IN-M3`, ADR 0021 U-7, the macOS phone-access check. Before it, macOS is "script- and package-tested, stack unverified". |
+| Q7 | Move Holdfast to its **own Cloudflare account** (this one also holds unrelated projects), with hardware-key 2FA, a **CAA record pinned to the CA in use**, and DNSSEC kept on? Cloudflare is the code-execution root for every `get.` one-liner, and Q6 puts a deploy token there. | $0 (registrar at cost unchanged); a zone move has a short DNS-gap risk | A smaller blast radius for the one place a swapped stub could come from. The GitHub-URL one-liner needs no answer. |
+| N3 | **Who is the self-host `.exe` for?** BRAND frames self-host as builder-to-builder. Should a non-technical person who has never heard of Docker be pointed at Holdfast Cloud instead of a Docker Desktop install? | $0 | Installer copy, how much hand-holding the preflight and launcher carry, docs tone. |
 
-Removed: the old Q1 (Apple enrolment: deferred by owner decision, `IN-M5` waits), Q2 (answered: SignPath), Q3 (answered, and its self-hosted-runner
-option is forbidden), and Q8 (public-repo timing: moot, the repo is public).
+Removed earlier: Apple enrolment (deferred by owner decision, `IN-M5` waits), SignPath versus Azure (answered), the self-hosted-runner option for test
+machines (forbidden), and public-repo timing (moot: the repo is public).
