@@ -118,6 +118,7 @@ class PlaidClient:
             transport=transport,
             timeout=timeout,
             follow_redirects=False,
+            trust_env=False,
             headers={"Plaid-Version": API_VERSION, "User-Agent": "holdfast"},
         )
 
@@ -138,22 +139,27 @@ class PlaidClient:
     async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """POST ``body`` to ``path`` and return the decoded object (numbers with a fraction are
         ``Decimal``). Raises :class:`PlaidError` or :class:`PlaidUnavailable`."""
-        headers = {
-            # The only place the keys leave their wrappers.
-            "PLAID-CLIENT-ID": self._credentials.client_id.reveal(),
-            "PLAID-SECRET": self._credentials.secret.reveal(),
-        }
+        # HTTPX encodes string header values as ASCII. Validate only the credentials here,
+        # so errors from serializing the body or sending the request retain their own meaning.
+        if not (
+            self._credentials.client_id.reveal().isascii()
+            and self._credentials.secret.reveal().isascii()
+        ):
+            raise self._unavailable(path, "bad_credentials") from None
         try:
-            response = await self._http.post(path, json=body, headers=headers)
+            response = await self._http.post(
+                path,
+                json=body,
+                headers={
+                    "PLAID-CLIENT-ID": self._credentials.client_id.reveal(),
+                    "PLAID-SECRET": self._credentials.secret.reveal(),
+                },
+            )
         except httpx.TimeoutException:
             raise self._unavailable(path, "timeout") from None
         except httpx.HTTPError:
             # ``from None``: the chained httpx error holds the request, headers included.
             raise self._unavailable(path, "network") from None
-        except (UnicodeError, ValueError):
-            # A key with a character that cannot go in a header (a stray non-ASCII byte from a
-            # copy-paste). The original error quotes the offending character, so drop it.
-            raise self._unavailable(path, "bad_credentials") from None
         try:
             data = json.loads(
                 response.content, parse_float=Decimal, parse_constant=_reject_constant
@@ -161,6 +167,7 @@ class PlaidClient:
         except (ValueError, UnicodeDecodeError):
             raise self._unavailable(path, "bad_response") from None
         if not isinstance(data, dict):
+            del data
             raise self._unavailable(path, "bad_response")
         if not response.is_success or "error_code" in data:
             error = PlaidError(
@@ -170,6 +177,8 @@ class PlaidClient:
                 error_code=_code(data.get("error_code"), "UNKNOWN"),
                 request_id=_request_id(data.get("request_id")),
             )
+            # The raw payload can echo credentials in its free text.
+            del data, response
             log.warning(
                 "plaid_error",
                 path=path,

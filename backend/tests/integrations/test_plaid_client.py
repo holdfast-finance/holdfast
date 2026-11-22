@@ -51,6 +51,8 @@ async def test_numbers_with_a_fraction_parse_as_decimal_never_float() -> None:
     assert str(balances["current"]) == "110.10"  # the digits as sent, not a binary float
     assert balances["available"] == Decimal("0.1")
     assert type(balances["current"]) is Decimal
+    # Counts stay int. Money conversion happens at the typed ingest boundary.
+    assert type(data["total"]) is int
     assert data["total"] == 3
 
     def no_floats(value: object) -> None:
@@ -287,3 +289,58 @@ async def test_non_finite_numbers_are_refused_not_parsed_as_float(constant: byte
         with pytest.raises(PlaidUnavailable) as info:
             await plaid.post("/accounts/get", {})
     assert info.value.reason == "bad_response"
+
+
+async def test_counts_stay_int() -> None:
+    async with client_for(lambda request: httpx.Response(200, json={"count": 3})) as plaid:
+        data = await plaid.post("/institutions/get", {})
+    assert type(data["count"]) is int
+    assert data["count"] == 3
+
+
+@pytest.mark.parametrize("error_type", [PlaidError, PlaidUnavailable])
+async def test_exception_traceback_locals_do_not_expose_keys(
+    error_type: type[PlaidError] | type[PlaidUnavailable],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if error_type is PlaidUnavailable:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(
+            400,
+            json={
+                "error_code": "INVALID_API_KEYS",
+                "error_message": f"echo {CLIENT_ID} {SECRET}",
+            },
+        )
+
+    async with client_for(handler) as plaid:
+        with pytest.raises(error_type) as info:
+            await plaid.institutions_get(country_codes=["US"])
+    tb = info.value.__traceback__
+    while tb is not None:
+        for value in tuple(tb.tb_frame.f_locals.values()):
+            rendered = repr(value)
+            assert CLIENT_ID not in rendered and SECRET not in rendered
+        tb = tb.tb_next
+
+
+async def test_https_proxy_from_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    async with PlaidClient(creds()) as plaid:
+        assert plaid._http.trust_env is False
+        assert plaid._http._mounts == {}
+
+
+@pytest.mark.parametrize(
+    "raised", [ValueError("unrelated"), UnicodeEncodeError("ascii", "é", 0, 1, "unrelated")]
+)
+async def test_unrelated_value_errors_propagate(raised: ValueError) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise raised
+
+    async with client_for(handler) as plaid:
+        with pytest.raises(type(raised)) as info:
+            await plaid.post("/institutions/get", {})
+    assert info.value is raised
