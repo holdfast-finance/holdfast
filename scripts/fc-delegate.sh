@@ -12,9 +12,9 @@
 #
 # --confine is a filesystem view under the lead's own user and groups, not a user boundary. It
 # hides the project's checkouts and common secret stores but no sockets, so this script also
-# hides the container sockets, the session bus, the systemd user manager, the accessibility bus,
-# the keyring and agent sockets, the X11 cookie, Git credential prompt sockets and the lead's
-# scratch directory, and drops the display and bus variables from the worker's environment.
+# hides the whole per-user runtime directory, the container, Tailscale and system bus sockets and
+# the lead's scratch directory, and drops the display and bus variables from the worker's
+# environment.
 #
 # Environment:
 #   HOLDFAST_PRIVATE_DIR  the private data directory; must exist. "none" on a machine with no
@@ -55,28 +55,30 @@ if [ "$private" != "none" ]; then
 fi
 
 candidates=(
+  # System-wide sockets a worker could abuse: the container engine (root-equivalent for the
+  # docker group), the Tailscale daemon (world-writable socket, so a worker could run
+  # `tailscale serve` or `funnel` and publish the stack), and the system bus (polkit actions).
   /run/docker.sock
   /var/run/docker.sock
   /run/podman
-  "$runtime/docker.sock"
-  "$runtime/docker"
-  "$runtime/podman"
-  "$runtime/libpod"
-  "$runtime/bus"
-  "$runtime/systemd"
-  "$runtime/at-spi"
-  "$runtime/keyring"
-  "$runtime/gnupg"
-  "$runtime/gcr"
-  "$runtime/cc-socks"
-  "$runtime/pipewire-0"
-  "$runtime/pulse"
-  "$runtime"/.mutter-Xwaylandauth.*
-  "$runtime"/vscode-git-*.sock
-  "$runtime"/vscode-ipc-*.sock
-  "$runtime"/ssh-askpass-*.sock
+  /run/tailscale
+  /var/run/tailscale
+  /run/dbus
+  /var/run/dbus
   "/tmp/claude-$uid"
 )
+# Every entry of the per-user runtime directory (session bus, systemd user manager, keyring,
+# agent and credential-prompt sockets, Wayland, PipeWire, the X11 cookie, ...), except the few
+# a worker needs to start at all. An allowlist, because a denylist here always missed something.
+# fnm_multishells holds the Node shims the Codex CLI is launched through.
+RUNTIME_KEEP=(fnm_multishells)
+for entry in "$runtime"/* "$runtime"/.*; do
+  name=${entry##*/}
+  case "$name" in . | ..) continue ;; esac
+  keep=0
+  for k in "${RUNTIME_KEEP[@]}"; do [ "$name" = "$k" ] && keep=1; done
+  [ "$keep" = 1 ] || candidates+=("$entry")
+done
 for path in "${candidates[@]}"; do
   if [ -e "$path" ] || [ -S "$path" ]; then
     hides+=("$(realpath "$path")")
