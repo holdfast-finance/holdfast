@@ -57,6 +57,7 @@ class OfxStatement(TransactionExport):
     period_end: date | None
     ledger_as_of: date | None = None  # LEDGERBAL DTASOF: when the closing balance was struck
     corrections: tuple[OfxCorrection, ...] = ()
+    kind: str = "bank"  # "card" for a CCSTMTRS statement
 
 
 def _decode(source: str | bytes) -> str:
@@ -255,6 +256,7 @@ def _statement(
         period_end=period_end,
         ledger_as_of=ledger_as_of,
         corrections=tuple(corrections),
+        kind="bank" if element.tag == "STMTRS" else "card",
     )
 
 

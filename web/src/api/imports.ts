@@ -29,6 +29,8 @@ export interface ReconcileNumbers {
 /** The importer refuses larger PDFs (20 MiB); the route takes a 21 MiB body (ADR 0020). */
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 export const MAX_UPLOAD_LABEL = '20 MiB'
+/** CSV and OFX/QFX are text: the importer caps them at 10 MiB. */
+export const MAX_TEXT_UPLOAD_BYTES = 10 * 1024 * 1024
 
 export const RUNS_PAGE_SIZE = 20
 
@@ -76,7 +78,7 @@ function uploadErrorFrom(status: number, body: unknown, retryHeader: string | nu
     return new UploadError(
       status,
       'payload_too_large',
-      `That PDF is over the ${MAX_UPLOAD_LABEL} limit.`,
+      `That file is over the ${MAX_UPLOAD_LABEL} limit.`,
       null,
     )
   }

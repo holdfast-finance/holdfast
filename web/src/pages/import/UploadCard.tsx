@@ -5,6 +5,7 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 
 import {
+  MAX_TEXT_UPLOAD_BYTES,
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_LABEL,
   UploadError,
@@ -19,16 +20,22 @@ import { ReauthCancelledError } from '@/stores/reauth'
 import { resultHeadline } from './format'
 import { ResultView } from './ResultView'
 
+const isText = (f: File): boolean => /\.(csv|ofx|qfx)$/i.test(f.name)
+
 const schema = z.object({
   file: z
-    .custom<File>((v) => v instanceof File, 'Choose a PDF statement.')
+    .custom<File>((v) => v instanceof File, 'Choose a statement file.')
     .refine(
-      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'),
-      'That is not a PDF. Choose the statement PDF from your bank.',
+      (f) => /\.(pdf|csv|ofx|qfx)$/i.test(f.name) || f.type === 'application/pdf',
+      'That is not a PDF, CSV or OFX/QFX file. Choose the export from your bank.',
     )
     .refine(
-      (f) => f.size <= MAX_UPLOAD_BYTES,
-      `That file is over the ${MAX_UPLOAD_LABEL} upload limit. Export a smaller PDF and try again.`,
+      (f) => isText(f) || f.size <= MAX_UPLOAD_BYTES,
+      `That file is over the ${MAX_UPLOAD_LABEL} upload limit. Export a smaller file and try again.`,
+    )
+    .refine(
+      (f) => !isText(f) || f.size <= MAX_TEXT_UPLOAD_BYTES,
+      'That file is over the 10 MiB upload limit. Export a smaller file and try again.',
     ),
 })
 type FormValues = z.infer<typeof schema>
@@ -96,8 +103,8 @@ export function UploadCard({
       <CardHeader>
         <CardTitle className="font-heading text-lg">Import a statement</CardTitle>
         <CardDescription>
-          PDF only, up to {MAX_UPLOAD_LABEL}. Your statement is stored with your household's
-          documents. Upload the same file twice and nothing is added.
+          PDF, CSV or OFX/QFX, up to {MAX_UPLOAD_LABEL} (10 MiB for CSV and OFX). Your statement is
+          stored with your household's documents. Upload the same file twice and nothing is added.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -125,7 +132,7 @@ export function UploadCard({
               >
                 <FileUp aria-hidden="true" className="size-5 shrink-0 text-primary-text" />
                 <span className="min-w-0 flex-1 truncate">
-                  {file ? file.name : 'Choose a statement PDF'}
+                  {file ? file.name : 'Choose a statement file'}
                 </span>
                 {file && (
                   <span className="shrink-0 text-xs text-muted-foreground">{size(file.size)}</span>
@@ -134,10 +141,10 @@ export function UploadCard({
                   ref={inputRef}
                   id={inputId}
                   type="file"
-                  accept="application/pdf,.pdf"
+                  accept="application/pdf,.pdf,.csv,text/csv,.ofx,.qfx"
                   className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                   disabled={busy}
-                  aria-label="Statement PDF"
+                  aria-label="Statement file"
                   aria-invalid={fileError ? true : undefined}
                   onChange={(e) => {
                     upload.reset()

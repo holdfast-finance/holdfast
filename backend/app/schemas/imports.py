@@ -81,6 +81,9 @@ class ImportBalanceOut(Model):
 class ImportResultOut(Model):
     document_id: uuid.UUID
     filename: str
+    # What the file's bytes said it is (the name and MIME type are not trusted): ``pdf``, ``csv``
+    # or ``ofx`` (which covers QFX).
+    file_kind: Literal["pdf", "csv", "ofx"]
     # False: the file (same SHA-256) was already stored; the response describes the earlier import.
     created: bool
     balances_only: bool

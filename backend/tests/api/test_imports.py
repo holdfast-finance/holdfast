@@ -167,7 +167,7 @@ async def test_non_pdf_with_a_pdf_name_is_refused_and_stores_nothing(
     r = await upload(owner.client, b"MZ\x90\x00 not a pdf at all", "statement.pdf")
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "validation_error"
-    wrong_type = await upload(owner.client, pdf_bytes(NFCU_CARD), "s.pdf", "text/plain")
+    wrong_type = await upload(owner.client, pdf_bytes(NFCU_CARD), "s.pdf", "image/png")
     assert wrong_type.status_code == 422
     assert (await upload(owner.client, b"", "empty.pdf")).status_code == 422
     # Looks like a PDF but isn't readable.
@@ -587,13 +587,13 @@ async def test_refused_uploads_are_audited_with_a_reason_code_only(
     hid = uuid.UUID(owner.household["id"])
     await upload(owner.client, b"MZ not a pdf", "SECRETNAME.pdf")
     await upload(owner.client, b"MZ again", "SECRETNAME.pdf")  # same reason: one row a minute
-    await upload(owner.client, pdf_bytes(NFCU_CARD), "s.pdf", "text/plain")
+    await upload(owner.client, pdf_bytes(NFCU_CARD), "s.pdf", "image/png")
     await owner.client.post("/api/imports/statements", json={})
     rows = await audit_rows(app, hid, "import.upload_refused")
     assert sorted(r.detail["reason"] for r in rows) == [
         "bad_content_type",
         "not_multipart",
-        "not_pdf",
+        "unsupported_file",
     ]
     assert all(
         r.detail["outcome"] == "failure" and set(r.detail) == {"reason", "outcome"} for r in rows

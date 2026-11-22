@@ -47,7 +47,7 @@ async def upload_statement(request: Request, ctx: Ctx) -> ImportResultOut:
     await service.throttle()
     if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
         await service.refuse(
-            "not_multipart", "validation_error", "Send the PDF as multipart form data."
+            "not_multipart", "validation_error", "Send the file as multipart form data."
         )
     token = await service.begin()  # one upload in flight per user
     try:
@@ -67,7 +67,7 @@ async def upload_statement(request: Request, ctx: Ctx) -> ImportResultOut:
                 part = form.get("file")
                 if not isinstance(part, UploadFile):
                     await service.refuse(
-                        "no_file", "validation_error", "Attach one PDF as the `file` part."
+                        "no_file", "validation_error", "Attach one file as the `file` part."
                     )
                 return await service.upload(part, part.filename, slot)
             finally:
