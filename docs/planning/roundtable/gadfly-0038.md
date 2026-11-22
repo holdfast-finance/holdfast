@@ -1,6 +1,7 @@
 # Gadfly on ADR 0038 (PR #83, `docs/local-model-adr`)
 
-> Copied into PR #83 by Pilot. Per S10, two hardware identifiers of the reference host were generalised; nothing else changed.
+> Copied into PR #83 by Pilot. Per S10 and Bulwark's L9, reference-host hardware details (chip, distro, measured
+> throughput, GPU vendor hints) were generalised. No finding was changed.
 
 Read: `docs/adr/0038-local-advisor-model.md`, `docs/planning/LOCAL-MODEL-PLAN.md` at `origin/docs/local-model-adr`,
 checked against CLAUDE.md hard rules 5, 7, 9, 12, 13, ADR 0019, ADR 0037 (§8, §9, §11), PLAN §10,
@@ -105,7 +106,7 @@ have holes.
   tool selection can hide a regression in number faithfulness.
 - Weak checks: number faithfulness checks only that a figure *appears* in a tool result, so last month's total
   quoted as this month's passes. A banned-claim regex for "CPA" misses "C.P.A." and "certified public accountant".
-- Compute: a 9B model on tier (a) at the ADR's own speeds (190 tok/s prefill, 10 to 12 tok/s generation) takes
+- Compute: a 9B model on tier (a) at the ADR's own throughput estimates takes
   roughly 6 to 8 hours per full run, on the host that runs the owner's live instance. A 27B model (tier c) fits
   no $0 machine, so every tier-(c) lock change needs a rented GPU. That cost is not in O1.
 - **Fix:**
@@ -172,14 +173,14 @@ have holes.
    template. Keep an active-model state file with a "user-pinned" flag. Add a signed `revoked_sha256` list in
    `CHANNEL` that refuses to load listed files.
 6. **The Windows and macOS path.** A CPU-only container takes about a minute per turn, so it is not usable.
-   NVIDIA cards do get CUDA through WSL 2, and pwsh detection misses that. The "run native Ollama or LM Studio"
+   CUDA-capable discrete GPUs do get CUDA through WSL 2, and pwsh detection misses that. The "run native Ollama or LM Studio"
    advice invites `OLLAMA_HOST=0.0.0.0` or LM Studio's network-serving toggle, which breaks hard rule 12. No Mac
    exists to test on (ADR 0037).
    *Fix:* the default is a native runtime on `127.0.0.1`, reached through `host.docker.internal`, with a
-   reachability test and docs that forbid binding to `0.0.0.0`. Detect NVIDIA and use `server-cuda`. Make no
+   reachability test and docs that forbid binding to `0.0.0.0`. Detect a CUDA-capable GPU and use `server-cuda`. Make no
    macOS claims until Q3b is answered.
 7. **The hard rule 9 table is incomplete.** Missing: the quantiser's repo (Unsloth), the HF Xet/CDN hosts, the
-   NVIDIA CUDA base image and the host's Container Toolkit, the fetch helper image, and Kaggle or RunPod named
+   vendor CUDA base image and the host's container toolkit, the fetch helper image, and Kaggle or RunPod named
    as a choice instead of "RunPod-class". *Fix:* name each one, or move GPU rental to its own ADR.
 8. **The hard rule 12 proof does not exist yet.** `scripts/check-compose-ports.py` checks ports only, not
    network membership or `internal: true`. LM-D1 says `make ports` proves no egress. *Fix:* extend the check
@@ -187,19 +188,19 @@ have holes.
    that `llm` cannot connect out.
 9. **Owner money and accounts the plan does not ask for.** RunPod and Kaggle accounts (a card, phone
    verification), a spend cap with auto-terminate (a forgotten pod at ~$1.5/h runs all month), GPU time for the
-   eval on every tier-(c) change, the owner's Windows PC for the CPU path, the HF write token living on the host
+   eval on every tier-(c) change, a Windows test machine for the CPU path, the HF write token living on the host
    that holds real data, and 6 to 8 hours of host time per eval run.
    *Fix:* add O6 (accounts, a prepaid cap, auto-terminate), extend O1 to cover eval compute, and state the host
    time.
 10. **Hard rule 13 and privacy.** A public ADR defines tier (a) by the owner's exact host model and RAM.
     *Fix:* define tiers generically (memory, GPU backend). Detect by measurement, never by device ID. Call the
     owner's machine "reference host" and keep SKU-level numbers out of the public repo.
-11. **Stability on the owner's desktop GPU (*verify*).**
-    - Vulkan compute on the display iGPU can cause GPU ring timeouts that reset the desktop.
-    - SELinux on Fedora and a render group id that differs per distro both affect `/dev/dri` passthrough.
-    - The Mesa inside the image, not the host's, decides whether the iGPU works at all.
+11. **Stability on an integrated GPU that drives the display (*verify*).**
+    - GPU compute on the display iGPU can cause GPU ring timeouts that reset the desktop.
+    - Host access-control labelling and a render group id that differs per host both affect GPU device passthrough.
+    - The GPU driver userspace inside the image, not the host's, decides whether the iGPU works at all.
 
-    *Fix:* LM-S0 runs inside the container, records the image's Mesa version, and runs a 1-hour soak test. Fall
+    *Fix:* LM-S0 runs inside the container, records the image's GPU driver version, and runs a 1-hour soak test. Fall
     back to the CPU image automatically on a GPU fault.
 12. **Redaction scope.** Add a test that `redact()` runs for `openai_compatible` pointed at `llm`, with no knob
     to turn redaction off for local providers. Also redact local output before it lands in findings or the

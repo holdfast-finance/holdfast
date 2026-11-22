@@ -54,10 +54,10 @@ Sizes follow MODEL-ROUTING: S = 1 run, M = 2–3 runs, L = 4–6 runs. One usage
 
 - **LM-S0 Reference-host spike** — M — Pilot/sonnet; the owner runs one script — Bulwark — Phase 8 provider.
   The script runs **inside the pinned `server-vulkan` container** and loads no real data. It must:
-  - record the image's Mesa version, plus SELinux labelling and render-group passthrough;
-  - measure 4B and 9B tok/s (generate and prefill) at 4K and 16K;
+  - record the image's GPU driver version, plus access-control labelling and render-group passthrough;
+  - measure 4B and 9B generation and prefill throughput at 4K and 16K;
   - measure p95 free RAM with the full stack up during a PDF import;
-  - *verify* whether GTT allocations are charged to the cgroup, and the TTM limit;
+  - *verify* whether shared GPU memory is charged to the cgroup, and the kernel's GPU memory limit;
   - *verify* whether Gated DeltaNet layers run on Vulkan;
   - run a 1-hour soak test, and confirm that a GPU fault falls back to the CPU image;
   - compare 30 eval cases across the Vulkan, CPU and CUDA backends.
@@ -71,12 +71,16 @@ Sizes follow MODEL-ROUTING: S = 1 run, M = 2–3 runs, L = 4–6 runs. One usage
   - The report is counts and pass rates only, bound to the weights sha256, image digest, template hash,
     prompt-pack version and sampler settings.
   - CI rejects a report whose dataset id is not the frozen set's hash.
+  - The harness refuses to write transcripts unless the dataset id is the frozen synthetic hash, so an owner run on
+    a real instance yields counts only. The transcript directory is in `.gitignore` and every `.dockerignore`.
 - **LM-C1 Provider routing and `llama-server` parameters** — M — Pilot/sonnet — Bulwark, Lattice — Phase 8.
   - `AI_PROVIDER=none` is the only default, and per-mode provider choice is always explicit.
   - The `llama-server` parameter layer covers schema-constrained arguments, thinking off and sampler settings.
   - Local providers get no write tools (a test enforces it).
-  - Tests: redaction runs for `openai_compatible` pointed at `llm` and has no off switch; local output is redacted
-    before storage.
+  - Tests: redaction runs on every provider and every URL (`llm`, `host.docker.internal`, Ollama, cloud) and has no
+    off switch; local output is redacted before storage, and it is delimited as untrusted when a cloud provider
+    later reads it.
+  - Pydantic repair-retry errors log field paths and error types only, never values.
 - **LM-G1 Control-token neutraliser and pinned templates** — M — Pilot/sonnet — Bulwark — LM-C1.
   - `guardrails.neutralise_control_tokens()` runs on every tool result for every provider. Its token list comes
     from each pinned `tokenizer_config.json` plus the template's tool tags.
@@ -100,14 +104,24 @@ Sizes follow MODEL-ROUTING: S = 1 run, M = 2–3 runs, L = 4–6 runs. One usage
   - Where the build runs: a main-only CI job if 4B and 9B fit in the runner's disk (*verify*), or a rented box for 27B.
 - **LM-D1 `llm` service, network and hardening** — M — Harbor/sonnet — Bulwark — LM-C1.
   - The service: profile `local-ai`, `llm_internal` with `internal: true`, non-root, `read_only`,
-    `cap_drop: [ALL]`, `no-new-privileges`, `--no-webui`, `--no-slots`, `--api-key` from `LLM_API_KEY`.
+    `cap_drop: [ALL]`, `no-new-privileges`, `--no-webui`, `--no-slots`, and an API key from `LLM_API_KEY` passed by
+    environment variable or file (never in argv).
+  - `llm_internal` gets a pinned subnet outside `TRUSTED_PROXIES`.
   - Memory: `oom_score_adj` 1000 for `llm`, negative for `db`, and the worker job lock.
-  - Checks: `check-compose-ports.py` is extended to cover network membership, internal-only, and no `ports` or
-    `network_mode`; a runtime test proves `llm` has no egress; a canary log test proves no content is logged.
+  - The port check runs on `docker compose --profile local-ai config` and fails if:
+    - `llm` is missing;
+    - `llm` is on any network but `llm_internal`;
+    - `llm_internal` is not internal;
+    - `llm` has `ports` or `network_mode`;
+    - `model-fetch` is on `llm_internal` or `default`.
+
+    `make ports`, `dev.ps1 ports` and the `ci.yml` step all pass `--profile local-ai`.
+  - A runtime test proves `llm` has no egress.
+  - A canary log test greps `llm`, `api` and `worker` logs and proves no content is logged.
   - Flag names are verified against the pinned build.
 - **LM-D2 `model-fetch` and `holdfast model` commands** — M — Harbor/sonnet — Bulwark — LM-D1, LM-B1, ADR 0037 IN-A2.
   - `model-fetch` reuses the api image and writes into the labelled volume, after the host has verified the lock
-    signature.
+    signature. It gets no `env_file` and no secrets, and the models volume is its only mount.
   - The commands are install, remove, rollback, status and pin, in bash and pwsh 7.
   - Install has a ≥ 2.2× free-space preflight and resumes downloads.
   - A model swap stops the old model, starts the new one, smoke-checks and reverts on failure.
@@ -118,16 +132,19 @@ Sizes follow MODEL-ROUTING: S = 1 run, M = 2–3 runs, L = 4–6 runs. One usage
   - The Advisor page offers Claude, an endpoint or a local model, and states the tier-(a) limits.
   - Disk-reclaim docs for Docker Desktop.
 - **LM-W1 Windows path** — M — Harbor/sonnet — Bulwark — LM-D2, ADR 0037 IN-S0.
-  - Detects NVIDIA and uses `server-cuda` through WSL 2. Otherwise installs a native `llama-server` on
-    `127.0.0.1`, pinned by sha256, reached through `host.docker.internal`, with a reachability test.
+  - Detects a CUDA-capable discrete GPU and uses `server-cuda` through WSL 2.
+  - Otherwise installs a native `llama-server` on `127.0.0.1`, reached through `host.docker.internal`, with a
+    reachability test. Its sha256 is pinned in the signed lock, and it runs with the same flags as the
+    container: the pinned template, logging off, `--no-webui`, `--no-slots`, and the key by environment variable.
   - Refuses when the VM's memory is below stack + model + 2 GiB.
   - The docs forbid `0.0.0.0`.
-  - Runs on the owner's Windows PC.
+  - Acceptance runs on a Windows test machine.
 - **LM-R1 Weights release gate and image bump** — S — Harbor/sonnet — Bulwark, Sounding — LM-E1, LM-D2.
   - A `models.lock.json` change needs a passing eval report on the exact hashes.
   - The monthly image bump runs Trivy, the smoke check and the eval.
 - **LM-S2 NPU spike** (later) — S — Pilot/sonnet — Bulwark — LM-S0.
-  - FastFlowLM on the reference host: closest supported model, tok/s, and `/dev/accel` passthrough in a container.
+  - NPU runtimes are vendor-specific, so this is a later spike. It finds the closest supported model, measures
+    throughput, and checks whether device passthrough into a container works.
 
 **Order:**
 1. LM-S0, LM-E1 and LM-C1: one window.
