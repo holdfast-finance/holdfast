@@ -7,6 +7,7 @@ Anything secret is a ``SecretStr`` so it cannot leak through ``repr()`` or logs.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -130,6 +131,15 @@ class Settings(BaseSettings):
 
     # Edge
     web_upstream: str = "web:80"
+
+    @field_validator("redis_password")
+    @classmethod
+    def _redis_password_charset(cls, value: SecretStr | None) -> SecretStr | None:
+        # arq's RedisSettings.from_dsn never URL-decodes, so reserved characters would reach the
+        # worker still encoded. gen-keys only produces this alphabet.
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value.get_secret_value()):
+            raise ValueError("REDIS_PASSWORD may only contain A-Z a-z 0-9 _ - (run make keys)")
+        return value
 
     @field_validator("plaid_products", "plaid_country_codes", "trusted_proxies", mode="before")
     @classmethod

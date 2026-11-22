@@ -14,7 +14,7 @@ help: ## Show this help
 
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
-	@grep -qE '^REDIS_PASSWORD=.+' .env || { echo "error: REDIS_PASSWORD is missing from .env. Run 'make keys-add-missing' (adds it, changes nothing else)." >&2; exit 1; }
+	@grep -qE '^REDIS_PASSWORD=[A-Za-z0-9_-]+$$' .env || { echo "error: REDIS_PASSWORD is missing (or has characters outside A-Za-z0-9_-) in .env. Run 'make keys-add-missing' (adds it, changes nothing else)." >&2; exit 1; }
 
 # The backend image runs as uid 10001; hand it ./data/documents using that same image (as root,
 # no extra image pulled). Host-side reads of stored documents then need sudo, by design.

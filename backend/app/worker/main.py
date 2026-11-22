@@ -24,6 +24,20 @@ from app.security import crypto
 
 log = get_logger(__name__)
 
+
+class MaskedRedisSettings(RedisSettings):
+    """RedisSettings whose repr never shows the password (arq logs it at startup)."""
+
+    def __repr__(self) -> str:
+        shown = {k: ("***" if k == "password" and v else v) for k, v in self.__dict__.items()}
+        return f"MaskedRedisSettings({shown})"
+
+    @classmethod
+    def from_dsn(cls, dsn: str) -> MaskedRedisSettings:
+        # arq's from_dsn builds a plain RedisSettings, so rebuild it as this class.
+        return cls(**vars(RedisSettings.from_dsn(dsn)))
+
+
 # Each running job holds three pooled connections at most: the household lock, the handler's
 # session and one side session from JobContext.factory (handlers open one at a time). 5 jobs x 3
 # = 15 = SQLAlchemy's default pool (5 + 10 overflow), so a full worker never waits on the pool.
@@ -60,7 +74,7 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
-    redis_settings = RedisSettings.from_dsn(get_settings().redis_dsn)
+    redis_settings = MaskedRedisSettings.from_dsn(get_settings().redis_dsn)
     # Plain functions, not staticmethod(): arq builds the Worker from this class's __dict__, so a
     # wrapper would reach it as-is. tests/test_worker.py pins what arq actually receives.
     job_serializer = queue.dumps

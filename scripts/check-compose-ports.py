@@ -28,11 +28,14 @@ def redis_auth_problem(services: dict[str, dict]) -> str | None:
     command = redis.get("command") or []
     if isinstance(command, str):
         command = command.split()
-    if "--requirepass" not in command:
+    if redis.get("entrypoint"):
+        return "redis: a custom entrypoint could bypass --requirepass; use the image default"
+    indexes = [i for i, arg in enumerate(command) if arg == "--requirepass"]
+    if not indexes:
         return "redis: no --requirepass in its command, Redis must require a password"
-    index = command.index("--requirepass")
-    if index + 1 >= len(command) or not str(command[index + 1]).strip():
-        return "redis: --requirepass has an empty password"
+    for index in indexes:
+        if index + 1 >= len(command) or not str(command[index + 1]).strip():
+            return "redis: --requirepass has an empty password"
     return None
 
 

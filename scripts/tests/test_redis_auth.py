@@ -65,6 +65,18 @@ class PortsRedisAuth(unittest.TestCase):
             self.assertIn("redis:", err)
 
 
+class PortsRedisHardening(unittest.TestCase):
+    def test_any_empty_requirepass_fails(self) -> None:
+        command = ["redis-server", "--requirepass", "ok", "--requirepass", ""]
+        self.assertEqual(_run_ports({"services": {"redis": {"command": command}}})[0], 1)
+
+    def test_custom_entrypoint_fails(self) -> None:
+        svc = {"command": AUTHED, "entrypoint": ["sh", "-c", "redis-server"]}
+        code, err = _run_ports({"services": {"redis": svc}})
+        self.assertEqual(code, 1)
+        self.assertIn("entrypoint", err)
+
+
 class AddMissing(unittest.TestCase):
     def _env(self, text: str) -> Path:
         path = Path(tempfile.mkdtemp()) / ".env"
@@ -82,7 +94,7 @@ class AddMissing(unittest.TestCase):
             self.assertEqual(keys.add_missing(path), 0)
         text = path.read_text()
         self.assertTrue(text.startswith(original))
-        added = text[len(original) :].strip()
+        added = next(x for x in text[len(original) :].splitlines() if x.startswith("REDIS_PASSWORD="))
         self.assertTrue(added.startswith("REDIS_PASSWORD=") and len(added) > 20)
         self.assertNotIn(added.split("=", 1)[1], out.getvalue())
         self.assertNotIn("keep-me", out.getvalue())
@@ -100,7 +112,25 @@ class AddMissing(unittest.TestCase):
         self.assertEqual(path.read_text(), first)
 
     def test_never_mints_values_that_must_match_existing_data(self) -> None:
-        self.assertEqual(keys.ADDABLE, ("REDIS_PASSWORD",))
+        path = self._env("A=1\n")
+        with redirect_stdout(io.StringIO()):
+            keys.add_missing(path)
+        names = {x.split("=", 1)[0] for x in path.read_text().splitlines()}
+        for unsafe in keys.NEVER_ADD:
+            self.assertNotIn(unsafe, names)
+        self.assertIn("REDIS_PASSWORD", names)
+
+    def test_adds_every_other_generated_key_and_keeps_export_lines(self) -> None:
+        path = self._env("export REDIS_PASSWORD=\nexport SESSION_SECRET=keep\nFERNET_KEY=\n")
+        with mock.patch.object(keys, "generate", lambda: {"REDIS_PASSWORD": "r" * 30, "IMPORT_ID_KEY": "i" * 30, "FERNET_KEY": "f", "SESSION_SECRET": "x"}):
+            with redirect_stdout(io.StringIO()) as out:
+                keys.add_missing(path)
+        lines = path.read_text().splitlines()
+        self.assertEqual(lines[0], "export REDIS_PASSWORD=" + "r" * 30)
+        self.assertEqual(lines[1], "export SESSION_SECRET=keep")
+        self.assertEqual(lines[2], "FERNET_KEY=")
+        self.assertEqual(lines[3], "IMPORT_ID_KEY=" + "i" * 30)
+        self.assertNotIn("i" * 30, out.getvalue())
 
     def test_cli_missing_env_and_bad_combination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

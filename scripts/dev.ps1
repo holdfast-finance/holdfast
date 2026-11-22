@@ -61,8 +61,8 @@ function Assert-Env {
     if (-not (Test-Path '.env')) {
         Write-Error "error: .env not found. Run './scripts/dev.ps1 keys' to create it from .env.example."
     }
-    if (-not (Get-EnvValue 'REDIS_PASSWORD')) {
-        Write-Error "error: REDIS_PASSWORD is missing from .env. Run './scripts/dev.ps1 keys-add-missing' (adds it, changes nothing else)."
+    if ((Get-EnvValue 'REDIS_PASSWORD') -notmatch '^[A-Za-z0-9_-]+$') {
+        Write-Error "error: REDIS_PASSWORD is missing (or has characters outside A-Za-z0-9_-) in .env. Run './scripts/dev.ps1 keys-add-missing' (adds it, changes nothing else)."
     }
 }
 

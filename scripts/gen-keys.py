@@ -5,7 +5,7 @@
     python3 scripts/gen-keys.py --write    # create .env from .env.example with secrets filled in
     python3 scripts/gen-keys.py --write --force   # replace an existing .env
     python3 scripts/gen-keys.py --add-missing     # existing .env: add only the generated values
-                                                  # it lacks (REDIS_PASSWORD); nothing else changes
+                                                  # it lacks (e.g. REDIS_PASSWORD); nothing else changes
 
 Stdlib only (uses `cryptography` for the Fernet key when it is installed; the fallback produces
 the identical format: urlsafe base64 of 32 random bytes). With --write nothing secret is printed.
@@ -46,10 +46,10 @@ def generate() -> dict[str, str]:
     }
 
 
-# Generated values an install made before they existed may lack. Only values that are safe to mint
-# late: the Postgres passwords must match the existing pgdata volume and FERNET_KEY the stored
+# Generated values an install made before they existed may lack: any key generate() knows, except
+# the ones that are unsafe to mint late: the Postgres passwords must match the existing pgdata volume and FERNET_KEY the stored
 # ciphertext, so those are never generated for an existing .env.
-ADDABLE = ("REDIS_PASSWORD",)
+NEVER_ADD = ("FERNET_KEY", "POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD", "POSTGRES_APP_PASSWORD")
 
 
 # URL key -> the password variable whose value replaces its CHANGE_ME placeholder.
@@ -59,7 +59,7 @@ URL_PASSWORDS = {
 }
 
 
-LINE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
+LINE = re.compile(r"^(?:export\s+)?(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 
 
 def render(template: str, values: dict[str, str]) -> str:
@@ -109,7 +109,7 @@ def write_env(example: Path, target: Path, force: bool) -> int:
 
 
 def add_missing(target: Path) -> int:
-    """Fill ADDABLE keys that are absent (or empty) in an existing .env. Other lines are kept
+    """Fill generated keys (not NEVER_ADD) that are absent (or empty) in an existing .env. Other lines are kept
     as they are, and no value is printed."""
     if not target.is_file():
         print(f"error: {target} not found; run 'make keys' to create it", file=sys.stderr)
@@ -118,16 +118,19 @@ def add_missing(target: Path) -> int:
     present: dict[str, int] = {}
     for i, line in enumerate(lines):
         m = LINE.match(line)
-        if m and m["key"] in ADDABLE:
+        if m:
             present[m["key"]] = i
     values = generate()
     added: list[str] = []
-    for key in ADDABLE:
+    for key in values:
+        if key in NEVER_ADD:
+            continue
         if key in present:
             current = LINE.match(lines[present[key]])
             if current is not None and current["value"].strip() != "":
                 continue
-            lines[present[key]] = f"{key}={values[key]}"
+            prefix = "export " if lines[present[key]].lstrip().startswith("export") else ""
+            lines[present[key]] = f"{prefix}{key}={values[key]}"
         else:
             lines.append(f"{key}={values[key]}")
         added.append(key)
