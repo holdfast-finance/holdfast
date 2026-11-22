@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
+from app.domain.category_precedence import SOURCE_RANK
 from app.domain.money import CENT, MONEY_CONTEXT, ZERO
 
 # NUMERIC(14,2): 12 integer digits.
@@ -39,6 +40,23 @@ class SplitError(LedgerRuleError):
 
 class TransferPairError(LedgerRuleError):
     pass
+
+
+class SupersedeConflict(LedgerRuleError):
+    """The winner carries transfer state the replaced row can't take over (PHASE-2 3.3).
+
+    Nothing is written and both rows stay live. The caller counts it.
+    """
+
+
+def outranks(source: str | None, other: str | None) -> bool:
+    """True when ``source`` is strictly higher than ``other`` (user > rule > plaid > ml > none)."""
+    return SOURCE_RANK.get(source or "", 0) > SOURCE_RANK.get(other or "", 0)
+
+
+def first_present(preferred: str | None, fallback: str | None) -> str | None:
+    """``preferred`` unless it is empty (None or ""), else ``fallback``."""
+    return preferred if preferred else fallback
 
 
 def validate_amount(amount: Decimal) -> Decimal:

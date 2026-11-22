@@ -275,3 +275,20 @@ def test_scanner_allows_reads_and_unrelated_amounts() -> None:
     ]
     for src in clean:
         assert violations(src) == [], src
+
+
+def test_supersede_verbs_live_only_in_the_writer() -> None:
+    """P2a owns both supersede verbs (PHASE-2 3.3): no other module defines one."""
+    verbs = {"supersede_transaction", "unsupersede_transaction"}
+    for path in APP.rglob("*.py"):
+        rel = path.relative_to(APP).as_posix()
+        defs = {
+            n.name
+            for n in ast.walk(ast.parse(path.read_text()))
+            if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
+        }
+        if rel == WRITER:
+            assert verbs <= defs
+        else:
+            assert not defs & verbs, rel
+    assert violations("x.superseded_by_id = other") != []
