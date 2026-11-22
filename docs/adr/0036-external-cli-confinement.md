@@ -177,7 +177,7 @@ These stay open until the target in point 7 exists:
 - **Grok read workers have a shell with permissions bypassed.** Removing its two edit tools
   doesn't stop it writing through the shell. "Read" for Grok is a role, not a capability.
 - **Codex's own sandbox is only partly verified.** Its filesystem side was checked: under
-  `workspace-write`, writes to `$HOME` and `fnm_multishells` were refused. Loopback and Unix
+  `workspace-write`, writes to `$HOME` and `fnm_multishells` were refused (tested by Bulwark during its review of PR #72, 2026-11-22). Loopback and Unix
   sockets remain untested, so we don't count it as a layer there.
 - **Some rules are only in the prompt.** "Do not commit, push or merge" and the lane limits are
   instructions. Hidden credential stores and Git prompt sockets make a push unlikely to
