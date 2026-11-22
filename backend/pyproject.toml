@@ -172,3 +172,9 @@ source_modules = ["app.api"]
 forbidden_modules = ["app.models", "app.db", "app.db_context"]
 # Direct imports only: routers reach these through services, which is the point.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Request code never imports the job runner (worker-only, household-wide paths; ADR 0016)"
+type = "forbidden"
+source_modules = ["app.api", "app.services"]
+forbidden_modules = ["app.jobs.runner"]
