@@ -10,8 +10,11 @@ no-op)::
     retrying ─claim─^    │ └──fail (attempts left)──> retrying
     running (orphan) ─^  └──fail (no attempts left)─> failed
 
-A ``running`` row may be re-claimed only by a runner holding the household lock: while the lock
-is held nobody else can be running that household's jobs, so the row is an orphan of a dead
+A ``running`` row may be re-claimed only by a runner holding the household lock, and only once
+its ``started_at`` is older than the job's timeout plus arq's backstop margin
+(``JobSpec.orphan_after``). The lock alone isn't proof: if the lock connection drops mid-run,
+Postgres releases the lock while the handler keeps going. By ``orphan_after`` the runner's
+timeout and arq's backstop have both cancelled that execution, so the row is an orphan of a dead
 worker. Every mark after a claim also matches the attempt number it claimed, so an execution
 that lost its row to a re-claim can't overwrite the newer attempt's outcome.
 
@@ -35,8 +38,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
@@ -44,12 +48,18 @@ from app.jobs.queue import JobQueue
 from app.jobs.registry import JobPayload, JobSpec, check_idempotency_key
 from app.logging import get_logger
 from app.models import JobRun
+from app.services.errors import ApiError
 
 log = get_logger(__name__)
 
 ERROR_MAX = 200
 CLAIMABLE = ("queued", "retrying", "running")
 PENDING = ("queued", "retrying")
+# Enqueue waits at most this long for a row lock (a referenced row another transaction holds
+# FOR UPDATE, or a concurrent enqueue of the same key), then answers 409 busy.
+ENQUEUE_LOCK_TIMEOUT = "2s"
+_SET_LOCK_TIMEOUT = text(f"SET LOCAL lock_timeout = '{ENQUEUE_LOCK_TIMEOUT}'")
+LOCK_NOT_AVAILABLE = "55P03"  # SQLSTATE lock_not_available: lock_timeout expired
 
 
 class IdempotencyConflict(ValueError):
@@ -83,8 +93,15 @@ async def _check_references(
     could update directly. ``KEY SHARE`` is the weakest row lock (it blocks only deletes and key
     changes) and lasts until enqueue commits. Locking needs the UPDATE privilege on the table:
     a table the app can't update has nothing for a job to write either, so use ``access="read"``.
+
+    References are checked in id order (then table name), so two enqueues that lock the same
+    rows always take them in the same order and can't deadlock each other.
     """
-    for field, ref in spec.payload.refs.items():
+    refs = sorted(
+        spec.payload.refs.items(),
+        key=lambda item: (getattr(payload, item[0]), item[1].model.__table__.name),
+    )
+    for field, ref in refs:
         table = ref.model.__table__
         stmt = select(table.c.id).where(
             table.c.id == getattr(payload, field),
@@ -145,7 +162,9 @@ async def enqueue[P: JobPayload](
     Raises ``InvalidJobPayload`` / ``InvalidIdempotencyKey`` before touching Postgres or Redis,
     and ``JobReferenceNotVisible`` (nothing recorded or queued) if the payload names another
     household or a row the requester can't use. The check runs for duplicates too, so a key
-    can't be used to probe someone else's run.
+    can't be used to probe someone else's run. ``ApiError("busy")`` (409, nothing recorded or
+    queued) if a referenced row or the key stays locked by another transaction for
+    ``ENQUEUE_LOCK_TIMEOUT``.
 
     ``requested_by`` is recorded on the run (``job_run.requested_by``) and handed to the handler
     as ``JobContext.requested_by``. A handler that enqueues a follow-up passes it on, so a
@@ -190,9 +209,61 @@ async def _enqueue[P: JobPayload](
         raise JobReferenceNotVisible(f"{spec.name}: household_id not found")
     body = validated.model_dump(mode="json")
 
+    try:
+        run_id, status, created, next_attempt_at = await _record(
+            factory,
+            spec,
+            validated,
+            body,
+            household_id,
+            requested_by,
+            household_wide,
+            idempotency_key,
+        )
+    except OperationalError as exc:
+        if getattr(exc.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
+            raise
+        log.info("job.enqueue_busy", job=spec.name)
+        raise ApiError("busy", "That item is busy. Try again in a moment.") from None
+
+    pushed = await push(
+        queue,
+        spec.name,
+        household_id,
+        run_id,
+        validated.model_dump_json(),
+        status,
+        next_attempt_at,
+    )
+    log.info(
+        "job.enqueued",
+        job=spec.name,
+        run_id=str(run_id),
+        created=created,
+        status=status,
+        pushed=pushed,
+    )
+    return EnqueueResult(run_id=run_id, created=created, status=status)
+
+
+async def _record(
+    factory: async_sessionmaker[AsyncSession],
+    spec: JobSpec[Any],
+    validated: JobPayload,
+    body: dict[str, Any],
+    household_id: uuid.UUID,
+    requested_by: uuid.UUID | None,
+    household_wide: bool,
+    idempotency_key: str,
+) -> tuple[uuid.UUID, str, bool, datetime | None]:
+    """Check references and insert (or find) the run, in one transaction with a lock timeout.
+
+    Returns ``(run_id, status, created, next_attempt_at)``.
+    """
     async with scoped_session(
         factory, household_id, requested_by, household_wide=household_wide
     ) as s:
+        await s.execute(_SET_LOCK_TIMEOUT)
         await _check_references(s, spec, validated, household_id)
         stmt = (
             insert(JobRun)
@@ -234,25 +305,7 @@ async def _enqueue[P: JobPayload](
                 )
             run_id, status, created = row.id, row.status, False
             next_attempt_at = row.next_attempt_at
-
-    pushed = await push(
-        queue,
-        spec.name,
-        household_id,
-        run_id,
-        validated.model_dump_json(),
-        status,
-        next_attempt_at,
-    )
-    log.info(
-        "job.enqueued",
-        job=spec.name,
-        run_id=str(run_id),
-        created=created,
-        status=status,
-        pushed=pushed,
-    )
-    return EnqueueResult(run_id=run_id, created=created, status=status)
+    return run_id, status, created, next_attempt_at
 
 
 @dataclass(frozen=True)
@@ -339,22 +392,29 @@ class Claim:
     requested_by: uuid.UUID | None  # job_run.requested_by, recorded at enqueue
 
 
+def _orphaned(spec: JobSpec[Any]) -> Any:
+    """A ``running`` row old enough that no execution of it can still be live."""
+    return (JobRun.status == "running") & (JobRun.started_at < func.now() - spec.orphan_after)
+
+
 async def claim(
     factory: async_sessionmaker[AsyncSession],
     household_id: uuid.UUID,
     run_id: uuid.UUID,
-    job_name: str,
+    spec: JobSpec[Any],
 ) -> Claim | None:
     """Mark the run ``running`` and count the attempt. Call only while holding the household
     lock. Returns the attempt number and the stored payload, or None when the run isn't
-    claimable (done, failed, unknown, another job's run, or an orphan with no attempts left,
-    which is marked failed here)."""
-    mine = _where(run_id, CLAIMABLE) & (JobRun.job_name == job_name)
+    claimable: done, failed, unknown, another job's run, ``running`` for less than
+    ``spec.orphan_after`` (maybe still live), or an orphan with no attempts left, which is
+    marked failed here."""
+    pending = JobRun.status.in_(PENDING)
+    mine = (JobRun.id == run_id) & (JobRun.job_name == spec.name)
     async with scoped_session(factory, household_id, None) as s:
         row = (
             await s.execute(
                 update(JobRun)
-                .where(mine, JobRun.attempts < JobRun.max_attempts)
+                .where(mine, pending | _orphaned(spec), JobRun.attempts < JobRun.max_attempts)
                 .values(
                     status="running",
                     attempts=JobRun.attempts + 1,
@@ -368,7 +428,7 @@ async def claim(
             # A worker died on the last attempt: close the run out.
             await s.execute(
                 update(JobRun)
-                .where(_where(run_id, ("running",)), JobRun.job_name == job_name)
+                .where(mine, _orphaned(spec))
                 .values(
                     status="failed",
                     finished_at=func.now(),

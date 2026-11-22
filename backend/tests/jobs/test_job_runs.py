@@ -19,13 +19,13 @@ from typing import Annotated, Any
 import pytest
 from arq import Retry, Worker
 from redis.asyncio import Redis
-from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy import Engine, event, func, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.db_context import is_household_wide, scoped_session, unscoped_session
 from app.jobs import queue
-from app.jobs.lock import household_lock
+from app.jobs.lock import LOCK_NAMESPACE, household_lock, lock_key
 from app.jobs.queue import arq_pool
 from app.jobs.registry import (
     HouseholdSessions,
@@ -50,6 +50,7 @@ from app.jobs.runner import (
 )
 from app.models import Account, AppUser, AuditLog, JobRun, Person
 from app.services import jobs as job_runs
+from app.services.errors import ApiError
 from app.services.jobs import (
     EnqueueResult,
     IdempotencyConflict,
@@ -503,10 +504,14 @@ async def test_orphaned_running_run_is_reclaimed_under_the_lock(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, effect, hid)
-    claimed = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)
+    claimed = await job_runs.claim(deps.factory, hid, res.run_id, effect)
     assert claimed is not None and claimed.attempt == 1  # a worker that then died
     ATTEMPTS_SEEN.clear()
-    assert await execute(deps, effect, args, job_try=2) == "succeeded"
+    # Not before it is older than the job's timeout + arq's margin: it might still be live.
+    assert await execute(deps, effect, args, job_try=2) == "skipped"
+    assert ATTEMPTS_SEEN == []
+    await _age(deps, hid, res.run_id, started_at=effect.orphan_after + timedelta(seconds=1))
+    assert await execute(deps, effect, args, job_try=3) == "succeeded"
     assert ATTEMPTS_SEEN == [2]
     assert await _effects(deps, hid) == 1
 
@@ -516,8 +521,12 @@ async def test_orphan_with_no_attempts_left_is_closed_out(
 ) -> None:
     hid, _ = households
     res, args = await _enqueue(deps, one_shot, hid)
-    assert await job_runs.claim(deps.factory, hid, res.run_id, one_shot.name) is not None
+    assert await job_runs.claim(deps.factory, hid, res.run_id, one_shot) is not None
+    # A live last attempt is never closed out by a second delivery.
     assert await execute(deps, one_shot, args, job_try=2) == "skipped"
+    assert (await _run(deps, hid, res.run_id)).status == "running"
+    await _age(deps, hid, res.run_id, started_at=one_shot.orphan_after + timedelta(seconds=1))
+    assert await execute(deps, one_shot, args, job_try=3) == "skipped"
     run = await _run(deps, hid, res.run_id)
     assert (run.status, run.last_error) == ("failed", "WorkerLost")
     assert await _effects(deps, hid) == 0
@@ -818,8 +827,9 @@ async def test_a_stale_attempt_cannot_mark_a_re_claimed_run(
 ) -> None:
     hid, _ = households
     res, _ = await _enqueue(deps, effect, hid)
-    first = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)
-    second = await job_runs.claim(deps.factory, hid, res.run_id, effect.name)  # orphan re-claim
+    first = await job_runs.claim(deps.factory, hid, res.run_id, effect)
+    await _age(deps, hid, res.run_id, started_at=effect.orphan_after + timedelta(seconds=1))
+    second = await job_runs.claim(deps.factory, hid, res.run_id, effect)  # orphan re-claim
     assert first is not None and second is not None
     assert (first.attempt, second.attempt) == (1, 2)
 
@@ -1092,7 +1102,7 @@ async def _strand(deps: RunnerDeps, hid: uuid.UUID, status: str, spec: JobSpec[I
     if status == "queued":  # crash between the commit and the push
         await _age(deps, hid, res.run_id, enqueued_at=old)
     else:
-        claimed = await job_runs.claim(deps.factory, hid, res.run_id, spec.name)
+        claimed = await job_runs.claim(deps.factory, hid, res.run_id, spec)
         assert claimed is not None
         if status == "retrying":  # record_cancelled ran, then arq's backstop finished the job
             await job_runs.mark_retrying(
@@ -1131,13 +1141,13 @@ async def test_sweeper_re_pushes_only_runs_arq_has_lost(
 
     fresh, _ = await _enqueue(deps, effect, hid, key="fresh")  # arq still has it
     live, _ = await _enqueue(deps, effect, hid, key="live")
-    assert await job_runs.claim(deps.factory, hid, live.run_id, effect.name) is not None
+    assert await job_runs.claim(deps.factory, hid, live.run_id, effect) is not None
     # Running for longer than the margins but within its own timeout + margins: maybe live.
     long, _ = await _enqueue(deps, slow_timeout, hid, key="long")
-    assert await job_runs.claim(deps.factory, hid, long.run_id, slow_timeout.name) is not None
+    assert await job_runs.claim(deps.factory, hid, long.run_id, slow_timeout) is not None
     await _age(deps, hid, long.run_id, started_at=timedelta(minutes=30))
     later, _ = await _enqueue(deps, flaky, hid, key="later")
-    claimed = await job_runs.claim(deps.factory, hid, later.run_id, flaky.name)
+    claimed = await job_runs.claim(deps.factory, hid, later.run_id, flaky)
     assert claimed is not None
     await job_runs.mark_retrying(
         deps.factory, hid, later.run_id, claimed.attempt, "RuntimeError", timedelta(hours=1)
@@ -1247,7 +1257,7 @@ async def test_a_run_arqs_backstop_dropped_is_revived_once_through_arq(
     pool = arq_pool(redis, queue_name=qname)
     payload = ItemPayload(household_id=hid, item_id=await _account(deps, hid))
     first = await enqueue(deps.factory, pool, effect, payload, **_as(hid), idempotency_key="bk")
-    claimed = await job_runs.claim(deps.factory, hid, first.run_id, effect.name)
+    claimed = await job_runs.claim(deps.factory, hid, first.run_id, effect)
     assert claimed is not None
     await job_runs.mark_retrying(
         deps.factory, hid, first.run_id, claimed.attempt, CANCELLED, timedelta(0)
@@ -1285,7 +1295,7 @@ async def test_a_run_arqs_backstop_dropped_is_revived_once_through_arq(
     assert (run.status, run.attempts) == ("succeeded", 2)
 
 
-async def test_sweep_all_covers_households_with_a_login(
+async def test_sweep_all_covers_every_household_even_without_a_login(
     deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
     with_login, without = households
@@ -1304,4 +1314,147 @@ async def test_sweep_all_covers_households_with_a_login(
     q = RecordingQueue()
     await sweep_all(deps, q, REG)
     pushed = {c[2] for c in q.calls}
-    assert str(a.run_id) in pushed and str(b.run_id) not in pushed
+    assert {str(a.run_id), str(b.run_id)} <= pushed  # list_household_ids(), not app_user
+
+
+# ------------------------------------------------------- F2c: a lost lock can't start a second run
+
+GATED: dict[str, Any] = {}
+
+
+@REG.job("test.gated", payload=ItemPayload, retry=FAST)
+async def gated(ctx: JobContext, payload: ItemPayload) -> None:
+    GATED["starts"] += 1
+    GATED["started"].set()
+    await GATED["release"].wait()
+    await _side_effect(ctx, payload)
+
+
+_LOCK_HOLDER = text(
+    "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+    " AND classid = CAST(:ns AS int)::oid AND objid = CAST(:key AS int)::oid"
+)
+
+
+async def _lock_holders(deps: RunnerDeps, hid: uuid.UUID) -> list[int]:
+    params = {"ns": LOCK_NAMESPACE, "key": lock_key(hid)}
+    async with deps.engine.connect() as c:
+        return list((await c.execute(_LOCK_HOLDER, params)).scalars().all())
+
+
+async def test_a_re_push_after_the_lock_connection_drops_cannot_start_a_second_run(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Postgres frees the advisory lock when its connection dies, while the handler (on its own
+    connection) keeps running. A redelivery then gets the lock, but the row is ``running`` and
+    younger than ``orphan_after``, so the claim refuses it: one execution, one side effect."""
+    hid, _ = households
+    GATED.update(starts=0, started=asyncio.Event(), release=asyncio.Event())
+    res, args = await _enqueue(deps, gated, hid)
+    first = asyncio.create_task(execute(deps, gated, args, job_try=1))
+    try:
+        await asyncio.wait_for(GATED["started"].wait(), timeout=5)
+        (pid,) = await _lock_holders(deps, hid)
+        async with deps.engine.connect() as c:
+            assert (await c.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})).scalar()
+        for _ in range(100):  # the backend exits asynchronously
+            if not await _lock_holders(deps, hid):
+                break
+            await asyncio.sleep(0.02)
+        assert await _lock_holders(deps, hid) == []
+
+        assert await execute(deps, gated, args, job_try=2) == "skipped"  # lock free, row live
+        assert GATED["starts"] == 1
+        run = await _run(deps, hid, res.run_id)
+        assert (run.status, run.attempts) == ("running", 1)
+    finally:
+        GATED["release"].set()
+        # The first execution still records its outcome; only releasing its dead lock fails.
+        await asyncio.gather(first, return_exceptions=True)
+    run = await _run(deps, hid, res.run_id)
+    assert (run.status, run.attempts) == ("succeeded", 1)
+    assert await _effects(deps, hid) == 1 and GATED["starts"] == 1
+
+
+# ------------------------------------------------- F2c: enqueue lock timeout and lock order
+
+
+async def test_a_locked_reference_answers_busy_after_the_lock_timeout(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    hid, _ = households
+    item = await _account(deps, hid)
+    q = RecordingQueue()
+    loop = asyncio.get_running_loop()
+    async with scoped_session(deps.factory, hid, None, household_wide=True) as holder:
+        # Another transaction (a sync, say) holds the row FOR UPDATE.
+        await holder.execute(select(Account.id).where(Account.id == item).with_for_update())
+        started = loop.time()
+        with pytest.raises(ApiError) as info:
+            await enqueue(
+                deps.factory,
+                q,
+                effect,
+                ItemPayload(household_id=hid, item_id=item),
+                **_as(hid),
+                idempotency_key="busy",
+            )
+        waited = loop.time() - started
+        # A read-only reference takes no lock, so it isn't held up.
+        read = await enqueue(
+            deps.factory,
+            q,
+            reads,
+            ReadPayload(household_id=hid, item_id=item),
+            **_as(hid),
+            idempotency_key="read",
+        )
+    assert (info.value.code, info.value.status) == ("busy", 409)
+    assert str(item) not in info.value.message
+    assert job_runs.ENQUEUE_LOCK_TIMEOUT == "2s" and 1.5 <= waited < 10
+    assert read.created and len(q.calls) == 1
+    assert await _count(deps, hid, JobRun, JobRun.job_name == effect.name) == 0
+
+
+class PairPayload(JobPayload):
+    source_id: Annotated[uuid.UUID, Ref(Account)]
+    target_id: Annotated[uuid.UUID, Ref(Account)]
+
+
+@REG.job("test.pair", payload=PairPayload, retry=FAST)
+async def pair(ctx: JobContext, payload: PairPayload) -> None:
+    return None
+
+
+async def test_references_are_locked_in_id_order_under_a_local_lock_timeout(
+    deps: RunnerDeps, households: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Two enqueues naming the same rows lock them in the same order, so they can't deadlock."""
+    hid, _ = households
+    low, high = sorted([await _account(deps, hid), await _account(deps, hid)])
+    seen: list[tuple[str, list[uuid.UUID]]] = []
+
+    def record(_c: Any, _cur: Any, statement: str, params: Any, *_a: Any) -> None:
+        values = params.values() if isinstance(params, dict) else ()
+        seen.append((statement, [v for v in values if v in (low, high)]))
+
+    sync_engine = deps.engine.sync_engine
+    event.listen(sync_engine, "before_cursor_execute", record)
+    try:
+        for key, (source, target) in {"hl": (high, low), "lh": (low, high)}.items():
+            seen.clear()
+            payload = PairPayload(household_id=hid, source_id=source, target_id=target)
+            q = RecordingQueue()
+            await enqueue(deps.factory, q, pair, payload, **_as(hid), idempotency_key=key)
+            statements = [s for s, _ in seen]
+            locks = [ids for s, ids in seen if "FOR KEY SHARE" in s]
+            assert locks == [[low], [high]], key
+            set_timeout = next(
+                i for i, s in enumerate(statements) if "SET LOCAL lock_timeout = '2s'" in s
+            )
+            assert set_timeout < next(i for i, s in enumerate(statements) if "FOR KEY SHARE" in s)
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", record)
+    # SET LOCAL ends with the transaction: pooled connections go back with the default.
+    async with deps.engine.connect() as c:
+        assert (await c.execute(text("SHOW lock_timeout"))).scalar_one() == "0"

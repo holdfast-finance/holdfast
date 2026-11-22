@@ -55,6 +55,8 @@ export const ERROR_CODES = {
   lastCredential: 'last_credential',
   /** 409: e.g. an email that already belongs to a user, or deleting a person who has a user account. */
   conflict: 'conflict',
+  /** 409: the item is locked by other work (a sync or import touching it). Retry shortly. */
+  busy: 'busy',
   /** 404: the referenced row does not exist in this household. */
   notFound: 'not_found',
   /** 429: login/assertion rate limit or lockout. `message` says when to retry. */

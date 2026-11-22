@@ -16,6 +16,7 @@ from arq.connections import RedisSettings
 from app import __version__
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
+from app.integrations.registry import registry as connector_registry
 from app.jobs import queue
 from app.jobs.registry import discover_jobs
 from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function, sweep_stalled_runs
@@ -23,6 +24,20 @@ from app.logging import configure_logging, get_logger
 from app.security import crypto
 
 log = get_logger(__name__)
+
+
+class MaskedRedisSettings(RedisSettings):
+    """RedisSettings whose repr never shows the password (arq logs it at startup)."""
+
+    def __repr__(self) -> str:
+        shown = {k: ("***" if k == "password" and v else v) for k, v in self.__dict__.items()}
+        return f"MaskedRedisSettings({shown})"
+
+    @classmethod
+    def from_dsn(cls, dsn: str) -> MaskedRedisSettings:
+        # arq's from_dsn builds a plain RedisSettings, so rebuild it as this class.
+        return cls(**vars(RedisSettings.from_dsn(dsn)))
+
 
 # Each running job holds three pooled connections at most: the household lock, the handler's
 # session and one side session from JobContext.factory (handlers open one at a time). 5 jobs x 3
@@ -38,6 +53,7 @@ async def heartbeat(ctx: dict[str, Any]) -> None:
 
 async def startup(ctx: dict[str, Any]) -> None:
     configure_logging()
+    connector_registry.freeze()  # no registration after startup
     if (key := get_settings().fernet_key) is not None:
         crypto.load_ring(key)  # malformed or duplicate keys fail startup
     engine = create_engine(get_settings())
@@ -60,7 +76,7 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
-    redis_settings = RedisSettings.from_dsn(get_settings().redis_url.get_secret_value())
+    redis_settings = MaskedRedisSettings.from_dsn(get_settings().redis_dsn)
     # Plain functions, not staticmethod(): arq builds the Worker from this class's __dict__, so a
     # wrapper would reach it as-is. tests/test_worker.py pins what arq actually receives.
     job_serializer = queue.dumps
