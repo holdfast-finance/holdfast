@@ -66,6 +66,7 @@ from app.security.ratelimit import RateLimiter
 from app.services import audit
 from app.services.context import RequestContext
 from app.services.errors import ApiError
+from app.services.plaid_slots import assert_can_import
 from app.services.sessions import Principal
 from app.services.statement_import import (
     AccountNotVisibleError,
@@ -610,6 +611,11 @@ class ImportService:
                         "An amount in that statement is out of range.",
                     )
         async with self._session() as s:
+            # ADR 0033 section 7: no real statement beside a sandbox connection.
+            try:
+                await assert_can_import(s, self.principal.household_id)
+            except ApiError as exc:
+                raise UploadRefused(exc.code, exc.code, exc.message) from None
             existing = (
                 await s.execute(select(Document.id).where(Document.sha256 == sha))
             ).scalar_one_or_none()

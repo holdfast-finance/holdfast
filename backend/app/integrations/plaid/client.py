@@ -13,6 +13,7 @@ only (hard rule 3).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -37,6 +38,11 @@ _ID_MAX = 64
 _KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 
 log = structlog.get_logger(__name__)
+
+# httpx logs every request line at INFO. Keep it, and httpcore, at WARNING so no request detail
+# (and nothing a future change adds to a URL or body) reaches a log.
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 @dataclass(frozen=True)
@@ -224,15 +230,26 @@ class PlaidClient:
         redirect_uri: str | None = None,
         transactions_days_requested: int | None = None,
         statements_range: tuple[str, str] | None = None,
+        optional_products: list[str] | None = None,
+        access_token: SecretToken | None = None,
     ) -> dict[str, Any]:
-        """Create a Link token. It creates no Item and uses no Trial slot."""
+        """Create a Link token. It creates no Item and uses no Trial slot.
+
+        With ``access_token`` this is update mode: Plaid takes no ``products`` then. No
+        ``webhook`` is ever sent (contract 5.1).
+        """
         body: dict[str, Any] = {
             "user": {"client_user_id": client_user_id},
             "client_name": client_name,
-            "products": products,
             "country_codes": country_codes,
             "language": language,
         }
+        if access_token is not None:
+            body["access_token"] = access_token.reveal()
+        else:
+            body["products"] = products
+            if optional_products:
+                body["optional_products"] = optional_products
         if redirect_uri is not None:
             body["redirect_uri"] = redirect_uri
         if transactions_days_requested is not None and "transactions" in products:
@@ -243,3 +260,47 @@ class PlaidClient:
                 "end_date": statements_range[1],
             }
         return await self.post("/link/token/create", body)
+
+    async def link_token_get(self, link_token: SecretToken) -> dict[str, Any]:
+        """Read a Link token's sessions: which Items, if any, its Link flows created."""
+        return await self.post("/link/token/get", {"link_token": link_token.reveal()})
+
+    async def item_public_token_exchange(self, public_token: SecretToken) -> ExchangedItem:
+        """Trade a ``public_token`` for the Item's access token. This is where the Item is
+        confirmed to exist. The plaintext goes straight into a :class:`SecretToken`."""
+        data = await self.post(
+            "/item/public_token/exchange", {"public_token": public_token.reveal()}
+        )
+        access, item_id = data.get("access_token"), data.get("item_id")
+        if not isinstance(access, str) or not access or not _valid_item_id(item_id):
+            del data
+            raise self._unavailable("/item/public_token/exchange", "bad_response")
+        token = SecretToken(access)
+        del data, access
+        return ExchangedItem(access_token=token, item_id=str(item_id))
+
+    async def accounts_get(self, access_token: SecretToken) -> list[dict[str, Any]]:
+        """The Item's accounts as plain dicts (no balances are read here)."""
+        data = await self.post("/accounts/get", {"access_token": access_token.reveal()})
+        accounts = data.get("accounts")
+        if not isinstance(accounts, list):
+            del data
+            raise self._unavailable("/accounts/get", "bad_response")
+        return [a for a in accounts if isinstance(a, dict)]
+
+
+@dataclass(frozen=True)
+class ExchangedItem:
+    """Result of a public-token exchange. ``access_token`` stays wrapped."""
+
+    access_token: SecretToken
+    item_id: str
+
+
+def _valid_item_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 128
+        and value.isascii()
+        and value.replace("-", "").replace("_", "").isalnum()
+    )

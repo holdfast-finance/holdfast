@@ -15,11 +15,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urlsplit
 
-StepState = Literal["done", "action", "blocked", "optional", "unchecked"]
+StepState = Literal["done", "action", "blocked", "optional", "unchecked", "warn"]
 ProbeResult = Literal["ok", "rejected", "unreachable", "error"]
 
 # Never valid in a Link token's ``products``: Balance is implied by every Item.
 IMPLICIT_PRODUCTS: frozenset[str] = frozenset({"balance"})
+# The only products Link may request (contract 5.1). Anything else is refused, never probed.
+ALLOWED_PRODUCTS: frozenset[str] = frozenset({"transactions", "liabilities", "investments"})
 # Trial plan cap (PLAN 3.2). Removing an Item does not free a slot.
 ITEM_SLOTS = 10
 SLOT_CONFIRM_AT = 8
@@ -44,6 +46,10 @@ class PreflightFacts:
     # Where Link's OAuth return route lives on this install; what the person should register.
     suggested_redirect_uri: str
     production_items_used: int = 0
+    # From the slot ledger and the stored connections (ADR 0034 section 3).
+    tokens_unreadable: int = 0
+    ledger_orphans: int = 0
+    webhook_url_set: bool = False
     # Probes are None until a live check has run.
     keys: Probe | None = None
     product_probes: dict[str, Probe] = field(default_factory=dict)
@@ -61,7 +67,7 @@ class Step:
 @dataclass(frozen=True)
 class ProductStatus:
     product: str
-    state: Literal["enabled", "not_enabled", "implicit", "unchecked", "error"]
+    state: Literal["enabled", "not_enabled", "implicit", "unchecked", "error", "not_allowed"]
     reason: str | None = None
 
 
@@ -76,13 +82,16 @@ class Preflight:
     suggested_redirect_uri: str
     item_slots_used: int
     item_slots_total: int
+    tokens_unreadable: int = 0
+    ledger_orphans: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 def requestable_products(products: tuple[str, ...]) -> tuple[str, ...]:
     """The configured products that may go in a Link token, in order, without duplicates."""
     seen: list[str] = []
     for p in products:
-        if p not in IMPLICIT_PRODUCTS and p not in seen:
+        if p in ALLOWED_PRODUCTS and p not in seen:
             seen.append(p)
     return tuple(seen)
 
@@ -126,6 +135,9 @@ def _product_statuses(facts: PreflightFacts) -> tuple[ProductStatus, ...]:
         if product in IMPLICIT_PRODUCTS:
             out.append(ProductStatus(product, "implicit"))
             continue
+        if product not in ALLOWED_PRODUCTS:
+            out.append(ProductStatus(product, "not_allowed", "product_not_allowed"))
+            continue
         probe = facts.product_probes.get(product)
         if probe is None:
             out.append(ProductStatus(product, "unchecked"))
@@ -139,8 +151,18 @@ def _product_statuses(facts: PreflightFacts) -> tuple[ProductStatus, ...]:
 
 
 def _products_step(facts: PreflightFacts, statuses: tuple[ProductStatus, ...]) -> Step:
-    asked = [s for s in statuses if s.state != "implicit"]
+    step = _products_probe_step(facts, statuses)
+    if step.state == "done" and any(s.state == "not_allowed" for s in statuses):
+        # Link would refuse this configuration (409 product_not_allowed), so it is not ready.
+        return Step("products", "warn", "product_not_allowed")
+    return step
+
+
+def _products_probe_step(facts: PreflightFacts, statuses: tuple[ProductStatus, ...]) -> Step:
+    asked = [s for s in statuses if s.state not in {"implicit", "not_allowed"}]
     if not asked:
+        if any(s.state == "not_allowed" for s in statuses):
+            return Step("products", "warn", "product_not_allowed")
         return Step("products", "action", "no_products_configured")
     if facts.keys is None and all(s.state == "unchecked" for s in asked):
         return Step("products", "unchecked")
@@ -235,4 +257,7 @@ def evaluate(facts: PreflightFacts) -> Preflight:
         suggested_redirect_uri=facts.suggested_redirect_uri,
         item_slots_used=0 if facts.env == "sandbox" else facts.production_items_used,
         item_slots_total=ITEM_SLOTS,
+        tokens_unreadable=facts.tokens_unreadable,
+        ledger_orphans=facts.ledger_orphans,
+        warnings=("webhook_url_set",) if facts.webhook_url_set else (),
     )

@@ -1,7 +1,8 @@
 """Fernet key rotation: ``python -m app.security.rotation`` (``make rotate-keys``). ADR 0015.
 
-Re-seals exactly three columns under the primary ``FERNET_KEY`` entry. The two gated columns
-(``household_setting.value_enc``, ``bank_connection.access_token_enc``) are opened and sealed as
+Re-seals exactly four columns under the primary ``FERNET_KEY`` entry. The three gated columns
+(``household_setting.value_enc``, ``bank_connection.access_token_enc``,
+``plaid_link_slot.link_token_enc``) are opened and sealed as
 ``hf2`` with their own row context, so a row moved from elsewhere fails (not rewritten, counted
 as failed) and an ``hf1`` or legacy row there is a failure (never upgraded: that would bind a copied
 unbound value to its new place). ``app_user.totp_secret_enc`` stays
@@ -59,6 +60,8 @@ class Target:
 TARGETS: tuple[Target, ...] = (
     Target("household_setting", "value_enc", ("household_id", "key"), True, True, True),
     Target("bank_connection", "access_token_enc", ("id",), True, True, True),
+    # The sealed Link token, kept only while a reservation is open (ADR 0034 section 3).
+    Target("plaid_link_slot", "link_token_enc", ("id",), True, False, True),
     Target("app_user", "totp_secret_enc", ("id",), False, False),
 )
 

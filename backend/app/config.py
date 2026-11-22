@@ -88,14 +88,8 @@ class Settings(BaseSettings):
     plaid_secret_sandbox: SecretStr | None = None
     plaid_secret_production: SecretStr | None = None
     plaid_products: CsvList = Field(
-        default_factory=lambda: [
-            "transactions",
-            "auth",
-            "balance",
-            "investments",
-            "liabilities",
-            "statements",
-        ]
+        # Link products are an allowlist (PHASE-2 contract 5.1): anything else is refused.
+        default_factory=lambda: ["transactions", "liabilities", "investments"]
     )
     plaid_country_codes: CsvList = Field(default_factory=lambda: ["US"])
     plaid_redirect_uri: str | None = None

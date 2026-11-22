@@ -230,8 +230,7 @@ def test_sandbox_never_reports_production_slot_use() -> None:
     assert step(result, "item_slots").state == "optional"
 
 
-def test_requestable_products_drop_balance_and_duplicates_in_order() -> None:
-    assert requestable_products(("transactions", "balance", "auth", "transactions")) == (
-        "transactions",
-        "auth",
-    )
+def test_requestable_products_keep_only_allowlisted_products_without_duplicates() -> None:
+    assert requestable_products(
+        ("transactions", "balance", "auth", "liabilities", "transactions", "statements")
+    ) == ("transactions", "liabilities")

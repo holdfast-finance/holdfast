@@ -7,6 +7,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -19,10 +20,11 @@ from sqlalchemy import select
 from app.config import Settings
 from app.db_context import scoped_session
 from app.integrations.plaid.client import PlaidClient, PlaidCredentials
-from app.models import AuditLog, BankConnection
+from app.models import AuditLog, BankConnection, PlaidLinkSlot
 from app.security import crypto
 from app.security.secret_token import SecretToken
 from app.services import plaid_setup
+from app.services.plaid_slots import client_fp
 from tests.api.conftest import Owner, make_client, seed_household
 from tests.api.test_imports import member_client
 
@@ -41,7 +43,7 @@ def settings(settings: Settings) -> Settings:
             "plaid_client_id": CLIENT_ID,
             "plaid_secret_sandbox": SecretStr(SANDBOX_SECRET),
             "plaid_secret_production": SecretStr(PRODUCTION_SECRET),
-            "plaid_products": ["transactions", "balance", "investments", "statements"],
+            "plaid_products": ["transactions", "balance", "investments", "liabilities"],
         }
     )
 
@@ -194,13 +196,13 @@ async def test_check_passes_and_probes_each_requestable_product(
         ("transactions", "enabled"),
         ("balance", "implicit"),
         ("investments", "enabled"),
-        ("statements", "enabled"),
+        ("liabilities", "enabled"),
     ]
     assert fake.paths() == ["/institutions/get", *["/link/token/create"] * 3]
     asked = [b["products"] for b in fake.link_bodies()]
-    assert asked == [["transactions"], ["investments"], ["statements"]]  # never balance
+    assert asked == [["transactions"], ["investments"], ["liabilities"]]  # never balance
     assert fake.link_bodies()[0]["transactions"] == {"days_requested": 730}
-    assert set(fake.link_bodies()[2]["statements"]) == {"start_date", "end_date"}
+    assert all("webhook" not in b for b in fake.link_bodies())
     assert all(
         b["user"]["client_user_id"].startswith("holdfast-setup-") for b in fake.link_bodies()
     )
@@ -275,13 +277,13 @@ async def test_plaid_down_is_blocked_not_a_500(owner: Owner, fake: FakePlaid) ->
 async def test_a_product_the_plan_lacks_is_reported_and_setup_stays_ready(
     owner: Owner, fake: FakePlaid
 ) -> None:
-    fake.not_enabled = ("statements",)
+    fake.not_enabled = ("liabilities",)
     body = (await owner.client.post("/api/plaid/setup/check")).json()
     assert body["ready"] is True
     assert steps(body)["products"]["reason"] == "some_products_unavailable"
     by_product = {p["product"]: p for p in body["products"]}
-    assert by_product["statements"] == {
-        "product": "statements",
+    assert by_product["liabilities"] == {
+        "product": "liabilities",
         "state": "not_enabled",
         "reason": "INVALID_PRODUCT",
     }
@@ -321,35 +323,41 @@ async def test_http_redirect_uri_in_production_is_refused_without_asking_plaid(
 # --------------------------------------------------------------------------- slots
 
 
-async def add_items(app: FastAPI, hid: uuid.UUID, n: int, env: str = "production") -> None:
+async def add_items(
+    app: FastAPI, hid: uuid.UUID, n: int, env: str = "production", state: str = "linked"
+) -> None:
+    """Ledger rows for this test's Plaid client (the slot ledger, ADR 0034)."""
+    fp = client_fp(CLIENT_ID)
     async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
         for i in range(n):
-            cid = uuid.uuid4()
-            ctx = crypto.make_context(hid, "bank_connection", "access_token_enc", str(cid))
             s.add(
-                BankConnection(
-                    id=cid,
+                PlaidLinkSlot(
                     household_id=hid,
-                    provider="plaid",
-                    external_id=f"item-{env}-{uuid.uuid4().hex}-{i}",
-                    access_token_enc=crypto.seal(SecretToken("access-sandbox-synthetic"), ctx),
+                    client_fp=fp,
                     env=env,
+                    state=state,
+                    owner_count=0 if env == "production" else None,
+                    item_id=None if state == "abandoned" else f"item-{uuid.uuid4().hex}-{i}",
+                    created_by_user_id=uuid.uuid4(),
+                    resolved_at=datetime.now(UTC),
                 )
             )
 
 
-async def test_production_slots_count_only_this_households_production_items(
+async def test_production_slots_come_from_the_ledger_across_households(
     owner: Owner, app: FastAPI, fake: FakePlaid
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
-    await add_items(app, hid, 8)
+    await add_items(app, hid, 6)
     await add_items(app, hid, 3, env="sandbox")
+    await add_items(app, hid, 2, state="abandoned")
     other, _, _ = await seed_household(app, "Other Example Household", "Bo Other", "bo@example.com")
     await add_items(app, other, 2)
     app.state.settings.plaid_env = "production"
     body = (await owner.client.get("/api/plaid/setup")).json()
     assert (body["item_slots_used"], body["item_slots_total"]) == (8, 10)
     assert steps(body)["item_slots"]["reason"] == "few_slots_left"
+    assert body["ledger_orphans"] == 9  # this household's linked rows (any env) with no connection
 
     await add_items(app, hid, 2)
     body = (await owner.client.post("/api/plaid/setup/check")).json()
@@ -360,6 +368,51 @@ async def test_production_slots_count_only_this_households_production_items(
         "request_id": None,
     }
     assert body["ready"] is False
+
+
+async def test_off_allowlist_products_warn_and_are_never_probed(
+    owner: Owner, app: FastAPI, fake: FakePlaid
+) -> None:
+    app.state.settings.plaid_products = ["transactions", "auth", "statements"]
+    body = (await owner.client.post("/api/plaid/setup/check")).json()
+    assert steps(body)["products"]["state"] == "warn"
+    assert steps(body)["products"]["reason"] == "product_not_allowed"
+    assert body["ready"] is False
+    by_product = {p["product"]: p["state"] for p in body["products"]}
+    assert by_product == {
+        "transactions": "enabled",
+        "auth": "not_allowed",
+        "statements": "not_allowed",
+    }
+    assert [b["products"] for b in fake.link_bodies()] == [["transactions"]]
+
+
+async def test_webhook_url_warns(owner: Owner, app: FastAPI, fake: FakePlaid) -> None:
+    app.state.settings.plaid_webhook_url = "https://example.com/hook"
+    body = (await owner.client.get("/api/plaid/setup")).json()
+    assert body["warnings"] == ["webhook_url_set"]
+
+
+async def test_unreadable_tokens_are_counted_without_revealing_them(
+    owner: Owner, app: FastAPI, fake: FakePlaid
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    good, moved = uuid.uuid4(), uuid.uuid4()
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        for cid, bind_to in ((good, good), (moved, good)):
+            ctx = crypto.make_context(hid, "bank_connection", "access_token_enc", str(bind_to))
+            s.add(
+                BankConnection(
+                    id=cid,
+                    household_id=hid,
+                    provider="plaid",
+                    external_id=f"item-{uuid.uuid4().hex}",
+                    access_token_enc=crypto.seal(SecretToken("access-sandbox-synthetic"), ctx),
+                    env="sandbox",
+                )
+            )
+    body = (await owner.client.get("/api/plaid/setup")).json()
+    assert body["tokens_unreadable"] == 1  # the copy bound to another row's context
 
 
 # --------------------------------------------------------------------------- access, audit, logs
@@ -455,7 +508,7 @@ async def test_interrupted_product_probe_stops_and_audits_calls(
     monkeypatch.setattr(plaid_setup, "open_client", open_client)
     app.state.settings.plaid_redirect_uri = REDIRECT
     if failure == "offline":
-        app.state.settings.plaid_products = ["transactions", "auth", "investments"]
+        app.state.settings.plaid_products = ["transactions", "liabilities", "investments"]
         app.state.settings.plaid_redirect_uri = None
     if failure == "deadline":
         monkeypatch.setattr(plaid_setup, "CHECK_TIMEOUT_SECONDS", 0)
@@ -478,7 +531,7 @@ async def test_interrupted_product_probe_stops_and_audits_calls(
     link_calls = 2 if failure == "offline" else 1
     assert fake.paths() == ["/institutions/get", *["/link/token/create"] * link_calls]
     if failure == "offline":
-        assert [b["products"] for b in fake.link_bodies()] == [["transactions"], ["auth"]]
+        assert [b["products"] for b in fake.link_bodies()] == [["transactions"], ["liabilities"]]
     [row] = await audit_rows(app, uuid.UUID(owner.household["id"]))
     assert row.detail["calls"] == {"/institutions/get": 1, "/link/token/create": link_calls}
     assert (
