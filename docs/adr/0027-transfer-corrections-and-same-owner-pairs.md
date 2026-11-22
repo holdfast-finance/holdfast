@@ -1,7 +1,7 @@
 # 0027. Transfer pairs need one owner, moves between owners are links, and "not a transfer" is stored
 
 - Status: Accepted
-- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised three times the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel
 
 ## Context
@@ -46,8 +46,14 @@ Review of the first draft added these points:
        the other account's mask. Evidence on one leg never marks another person's leg** (Bulwark).
        That's stricter than auto-pairing, where one leg's mask hint is enough.
      - `person`: someone accepted a cross-owner suggestion, marking the legs they may write. A link
-       also becomes `person` when a person marks one of a `job` link's legs (a guarded single-column
-       update), so the job never undoes a person's mark. Only household-wide code deletes links.
+       also becomes `person` when a person marks one of a `job` link's legs, so the job never
+       undoes a person's mark. Only household-wide code deletes links.
+       - The conversion is a guarded update (`transfer_link_guard`, accepted by Bulwark): a full
+         column comparison, so every column except `origin` is unchanged; `job` → `person` only,
+         never back; `search_path` pinned.
+       - **Residual:** a person who can't see the link can't convert it, because their UPDATE
+         matches zero rows, silently. If the other side unmarks later, step 0 can still undo that
+         person's re-mark. It's rare and reversible.
    - Each leg's writers can unmark their own leg.
    - **Undoing a leg:**
      - A person who can see the link and unmarks a leg writes a `pair` rejection for the edge.
@@ -97,8 +103,9 @@ Review of the first draft added these points:
 7. **Locks decide races.**
    - **Owners first** (Bulwark): before `_lock_group`, every pair and link writer, manual and
      automatic, takes `SELECT … FOR SHARE` on both legs' account rows, in id order. `_check_pair`
-     reads the owners from those locked rows. An ownership change takes `FOR UPDATE` on the account
-     first, so a pair can't commit against an owner change in flight.
+     reads the owners from those locked rows. An ownership change takes `FOR NO KEY UPDATE` on the account
+     first, so a pair can't commit against an owner change in flight. `FOR NO KEY UPDATE` still
+     conflicts with the pair writers' `FOR SHARE`, but not with FK checks' `FOR KEY SHARE`.
      - A person can lock only accounts they may write, because account RLS applies to row locks. A
        pair needs both locked. A person's link locks their own account only, because a link is
        valid between any owners.
@@ -134,18 +141,19 @@ Review of the first draft added these points:
        have one owner. It refuses the delete if any row still has the group id afterwards.
      - A link's leg column is set NULL when its row is deleted, and step 0 unmarks the survivor.
      - `unmark_transfer` accepts a group with one surviving leg.
-   - **Superseding is the Phase 2 clause**, `LedgerWriter.supersede(loser_id, winner_id)`
-     (`PHASE-2-contract.md` §3.3). It moves transfer state, category, splits, tax, receipt and
-     notes. Phase 4 adds:
-     - step 7: rejections and links naming the loser are rewritten to the winner
-     - step 8: recurring members
-     - step 9: suggestions and leg offers are deleted
-
-     All in the writer's unit of work. Those steps can only move what the session sees. So outside
-     a household-wide session, `supersede` and its reverse refuse unless the row moved from was
-     inserted in the same unit of work (statement import's reverse matcher call), and P4's un-adopt
-     runs its reverse in a job. Supersession never leaves an account (0005), so visibility doesn't
-     change.
+   - **Superseding is defined once, in `PHASE-2-contract.md` §3.3:**
+     `LedgerWriter.supersede_transaction(old_id, new_id)` and `unsupersede_transaction(old_id)`,
+     built by P2a. They move category by rank (C3b adds `category_rule_id`), splits, transfer
+     state, tax, receipt and notes.
+     - Phase 4's trigger, `transaction_supersede_repoint` (M3, extended by M4), re-points
+       rejections, links and recurring members in both directions, and deletes stale suggestions
+       and leg offers.
+     - It runs household-wide in the same statement, so it moves rows the calling session can't
+       see. Un-adopt can therefore stay in the person session.
+     - `unsupersede_transaction` clears the winner's transfer state before `remove_external`
+       deletes it. When it can't, the orphan refusal stands and un-adopt returns `409
+       unadopt_blocked`.
+     - Supersession never leaves an account (0005), so visibility doesn't change.
 
 ## Alternatives considered
 - **Cross-owner pairs with a shared group id:** the other member would see a pair they can't

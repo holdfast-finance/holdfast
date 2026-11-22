@@ -1,7 +1,7 @@
 # 0028. Recurring series keep their identity across runs; status is computed when read
 
 - Status: Accepted
-- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised three times the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel
 
 ## Context
@@ -49,9 +49,10 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
    - Member sets are disjoint across series (`UNIQUE (transaction_id)` on `recurring_member`).
    - **A label implies `confirmed`** unless the series is `dismissed`. Naming a series is
      confirming it, so "the label sticks" holds.
-   - **Supersession keeps identity.** When a member row is superseded, supersede step 8
-     (`PHASE-2-contract.md` §3.3, added by C5b) moves its `recurring_member` row to the winner in
-     the same unit of work, or deletes it when the winner is already in that series. A series whose
+   - **Supersession keeps identity.** When a member row is superseded (`PHASE-2-contract.md`
+     §3.3), the re-point trigger (M4, C5b) moves its `recurring_member` row to the winner in the
+     same statement, or deletes it when the winner is already in that series. Unsupersede moves it
+     back the same way. A series whose
      rows are all superseded keeps its id, members and state. Listings count and show live members
      only.
 2. **The job never overwrites a choice made while it runs.**
@@ -92,7 +93,7 @@ with no charge. The review on PR #52 asks consumers to distrust confidence at or
 - **Replace all series on every run:** it loses confirmations, dismissals and labels.
 - **Mapping member ids through `superseded_by_id` inside `reconcile_series`:** it works for
   reconciliation, but every reader would need the same mapping. Moving them once, in the supersede's
-  unit of work, keeps the stored members true.
+  statement, keeps the stored members true.
 - **Largest overlap always wins:** simple, but a partial Plaid supersession leaves the confirmation
   on the stale statement history.
 - **Optimistic concurrency (a version column checked on write):** a conflict would fail the whole

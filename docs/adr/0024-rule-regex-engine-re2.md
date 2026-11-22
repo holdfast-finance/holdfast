@@ -1,7 +1,7 @@
 # 0024. Rule patterns run on RE2 (google-re2), not Python `re`
 
 - Status: Accepted
-- Date: 2026-11-21 (revised twice the same day after Bulwark's reviews of PR #59)
+- Date: 2026-11-21 (revised three times the same day after Bulwark's reviews of PR #59)
 - Deciders: Lattice (architect); Keel. Bulwark verdict required on the implementing PR (C3d).
 
 ## Context
@@ -109,13 +109,18 @@ Lattice's measurements, 2026-11-21:
      \w \W \s \S \pL \PL \pN`), POSIX classes and `.`. Each atom also gets 32 subjects drawn half from
      its alphabet and half from the pattern's literal characters. A pattern with more than 16
      distinct class atoms is rejected as too complex." (`MAX_CLASS_ATOMS`.)
-   - **Two amendments, both measured:**
+   - **Three amendments, all measured:**
      - **Per-literal mixed families.** The "half from the pattern's literal characters" subjects
-       are drawn per literal: for each literal character (up to 32), 32 subjects, half from the
-       atom's alphabet and half that one character. A family that mixes all the literals together
+       are drawn per literal: for each literal character, 32 subjects, half from the atom's
+       alphabet and half that one character. There's no cap on literals. Above 32 distinct
+       literals, each gets 8 subjects (Bulwark round 3). A family that mixes all the literals together
        still accepted `\w*Q\w{20}#` (128 µs per search on subjects over `{Q,A}`) and
        `[[:digit:]]*1[[:digit:]]{20}#` (65 µs over `{0,1}`), because the terminator `#` keeps
        breaking the chain the blow-up needs.
+     - **Literal-run families** (Bulwark round 3). Each adjacent run of 2 to 3 literal characters
+       (`QJ`, `XZ`) gets 32 subjects, half from each atom's alphabet and half that run. A
+       two-character trigger otherwise passes, because each of its characters alone breaks the
+       chain.
      - **The limit applies to each family's mean, not the whole set's.** With up to 16 atoms, one
        costly family is a small share of the set, and decoy atoms would dilute it below the limit.
        The probe stops at the first family over the limit.
@@ -179,8 +184,10 @@ Lattice's measurements, 2026-11-21:
      corpus pattern, 1,024-character subjects over the union of every atom's alphabet, plus the
      probe families. The corpus adds decoy-class (five or more classes), escape-class,
      negated-class and POSIX variants of the three shapes."
-   - The corpus also holds Lattice's two per-literal cases (`\w*Q\w{20}#`,
-     `[[:digit:]]*1[[:digit:]]{20}#`).
+   - The corpus also holds:
+     - Lattice's two per-literal cases (`\w*Q\w{20}#`, `[[:digit:]]*1[[:digit:]]{20}#`)
+     - Bulwark's four round-3 cases (`(?:0123456789ABCDEFGHIJKLMNOPRSTUVW)?\w*Q\w{20}#`, where
+       the trigger is the 33rd literal; `\w*QJ\w{20}#`; `[A-Z]*XZ[A-Z]{20}#`; `.*QJ.{20}#`)
    - The subjects are truncated to 256 by `search`, as in production.
    - The three shapes can only pass by rejection: they take 12–28 s.
    - Measured locally:
@@ -190,11 +197,32 @@ Lattice's measurements, 2026-11-21:
    - That leaves better than 6× headroom for free-tier runners. C3d records its CI numbers in the
      PR.
 8. **Cap: 25 enabled `regex` rules per household.** The `rule_caps` trigger enforces it, counting
-   every person's rules (PHASE-4 contract 3.1). With 4b's class coverage, every accepted pattern
-   costs at most the probe limit on its own alphabet. The cap then bounds ingest and preview at
-   about 25 × 10 µs per row. The count crosses people, so a 409 at the cap tells one person how
+   every person's rules (PHASE-4 contract 3.1). The cap and the 256-character subject bound the
+   damage of a pattern the probe misses at about 25 × 140 µs per row. Point 9 turns that into a
+   hard stop. (The revision-3 claim that "every accepted pattern costs at most the probe limit on
+   its own alphabet" was false: a trigger can be any sub-pattern, Bulwark round 3.) The count
+   crosses people, so a 409 at the cap tells one person how
    many enabled pattern rules exist in total, `own` ones included. That's accepted (ADR 0026 point
    4).
+9. **Run-time budget, fail closed** (Bulwark round 3, text as written):
+   - "The matcher sums the time spent in regex `search`."
+   - "Preview, apply and clear stop at 10 s of regex time and return 503 `rules_too_slow` with
+     nothing written. Apply and clear recompute and compare the token, so a stopped run can never
+     write a different count."
+   - "Ingest checks every 1,000 rows. Above 0.5 ms of regex time per row, it skips `regex` rules for
+     the rest of that import. The import result says 'Some pattern rules were skipped because they
+     were too slow'."
+   - "One audit row `rule.too_slow {rule_id}` names the costliest rule, and one log line carries
+     counts only."
+   - "A later retroactive apply catches the rows up."
+
+   Timing decides only whether a run stops, never what a completed run matches. So preview count =
+   applied count still holds for every run that completes. Under load a legitimate run may stop
+   early. That's the safe side, and the person can retry.
+
+   Re-measured with 4b's round-3 families: Bulwark's four round-3 cases are rejected at save too
+   (worst family 111, 78, 65 and 79 µs), and the benign set is unchanged at 0.9–1.8 µs. The budget
+   is still required, because the probe remains a heuristic.
 
 ## Alternatives considered
 - **Python `re` with the C3a validator:** measured at 0.95 s per search on a pattern that passes it.

@@ -1,7 +1,7 @@
 # 0026. Who sees and who writes rules, transfer suggestions, links and recurring series
 
 - Status: Accepted
-- Date: 2026-11-21 (revised twice the same day after the Gadfly and Bulwark reviews of PR #59)
+- Date: 2026-11-21 (revised three times the same day after the Gadfly and Bulwark reviews of PR #59)
 - Deciders: Lattice (architect); Keel. Amends ADR 0008 (adds per-person policies for `rule` and
   five new tables).
 
@@ -125,8 +125,8 @@ Two leaks are easy to build by accident:
      change only `user_state` and `label`. A guard trigger enforces this, because both writers are
      `holdfast_app` and column grants can't tell them apart. The UPDATE policy has both USING and
      WITH CHECK.
-   - Some trigger work must see rows the caller can't: the `rule_caps` count, the account owner
-     guard, the orphan-pair check. These triggers follow the 0002/0005 pattern: they switch
+   - Some trigger work must see rows the caller can't: the supersede re-point, the `rule_caps`
+     count, the account owner guard, the orphan-pair check. These triggers follow the 0002/0005 pattern: they switch
      `app.household_wide` on for their own fixed statements and restore it. Those statements touch
      only rows named by the triggering row.
 6. **Summary-only viewers see none of these rows**, the same as transactions.

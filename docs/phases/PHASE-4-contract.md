@@ -7,8 +7,9 @@ amendment lands in this file before the code merges.
 
 Revision 2 (2026-11-21) answers Gadfly's two critiques (`docs/phases/reviews/PHASE-4-gadfly.md`,
 `PHASE-4-contract-gadfly.md`) and Bulwark's review of PR #59. Revision 3 (the same day) answers
-Bulwark's second review and Gadfly's round 2 at `f651389`, and aligns with the Phase 2 contract's
-supersede clause and shared migration and file order (`PHASE-2-contract.md` §3.3). Section 11
+Bulwark's second review and Gadfly's round 2 at `f651389`. Revision 4 answers Bulwark's third
+review at `cc7949d` and aligns with the Phase 2 contract's round 3: one supersede verb pair and the
+shared migration and file order (`PHASE-2-contract.md` §3.3). Section 11
 lists every item and where it was closed.
 
 **Problem.** Three engines are merged as pure code and nothing runs them:
@@ -93,7 +94,7 @@ the run records its value in `docs/phases/PHASE-4.md` (R as counts and rates onl
 | D12 | Step-up re-auth | None of the Phase 4 endpoints (section 5.6) | here |
 | D13 | `merchant_key` | Pure, versioned `app/domain/merchant.py`, computed when read, not stored. Rules store the version they were written against | here |
 | D14 | Account ownership | `PATCH /accounts/{id}` (A1) makes an account joint, lets the household owner claim a joint account, and changes visibility. Handing an account to another person isn't in Phase 4 (ADR 0008: reassignment is household-wide). A1 refuses an owner change while the account has pairs. From C4c it dissolves them in the same unit of work, and a DB trigger refuses an owner change while pairs remain. The joint-claim role check lives in the service only | ADR 0027 |
-| D15 | Deleted and superseded legs | Supersession is the Phase 2 clause, `LedgerWriter.supersede(loser_id, winner_id)` (`PHASE-2-contract.md` §3.3, built by P2a). Phase 4 adds its steps 7 (C4c), 8 (C5b) and 9 (C4d). A deleted pair leg's partner is unpaired, whoever made the pair | ADR 0027, 0028 |
+| D15 | Deleted and superseded legs | Superseding (PHASE-2 §3.3) moves category by rank, splits, transfer state, tax, receipt and notes in `LedgerWriter`. The trigger re-points rejections, links and recurring members in both directions. A deleted pair leg's partner is unpaired, whoever made the pair | ADR 0027, 0028 |
 
 ---
 
@@ -131,6 +132,8 @@ MAX_PATTERN_LENGTH = 128
 MAX_SUBJECT_LENGTH = 256          # ADR 0024 point 5 (was 1,024; measured, see the ADR)
 PROBE_LIMIT_MICROSECONDS = 10     # ADR 0024 point 4b, per probe family
 MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
+REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
+INGEST_REGEX_MS_PER_ROW = 0.5     # ADR 0024 point 9: ingest, checked every 1,000 rows
 def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationError
 ```
 - **C3c deletes the C3a `re` validator** (`_REGEX_TOKEN`, `_compile_safe_regex`, the `re`
@@ -151,6 +154,16 @@ def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationEr
   - C3d adds `google-re2` to `backend/pyproject.toml` + `uv.lock`. It needs network for `uv lock`,
     so it isn't a Codex slice.
 - `RuleValidationError` moves to `rule_regex.py`. `rules.py` re-exports it.
+- **Run-time budget** (ADR 0024 point 9, Bulwark round 3). The probe can't be the only bound.
+  - `CompiledPattern.search` adds its elapsed time to a caller-supplied `RegexClock`.
+  - The pure matcher raises `RegexBudgetExceeded(rule_id)` past a budget. It names the rule with the
+    most regex time.
+  - Preview, apply and clear stop at `REGEX_BUDGET_SECONDS` and return 503 `rules_too_slow`, with
+    nothing written.
+  - Ingest checks every 1,000 rows. Above `INGEST_REGEX_MS_PER_ROW`, it skips `regex` rules for the
+    rest of that import.
+  - Timing decides only whether a run stops, never what a completed run matches. Apply and clear
+    recompute and compare the token, so a stopped run can never write a different count.
 
 ### 2.3 `app/domain/rules.py` v2 (C3c)
 - `Rule` gains:
@@ -330,17 +343,19 @@ def detect_rows(rows: Sequence[RowTuple]) -> tuple[DetectedSeries, ...]   # the 
 One migration per slice. The migration token order is shared with the Phase 2 contract
 (`PHASE-2-contract.md` §3.3) and fixed:
 
-**`0010_list_household_ids` (#31) → M1 `<n>_rules` (C3b) → `<n>_connector_link` (P4a, Phase 2)
-→ M2 `<n>_import_run_reason_final` (I1d, Tide) → M3 `<n>_transfer_corrections` (C4c) → M4
+**`0010_list_household_ids` (#31, merged) → `<n>_connector_link` (P4a, Phase 2) → M1 `<n>_rules`
+(C3b) → M2 `<n>_import_run_reason_final` (I1d, Tide) → M3 `<n>_transfer_corrections` (C4c) → M4
 `<n>_recurring_series` (C5b).**
 
 - A builder may write a migration before holding the token, but numbers it and rebases only once
   they hold it.
-- If the next holder has no open PR one window after the token frees, the following slice may take
-  it once. Keel notes the skip in SPRINTS.
+- **Skip rule:** if the next holder has no open PR **with both verdicts** one window after the
+  token frees, the following slice may take it once. Keel notes the skip in SPRINTS.
 - Other shared files have fixed orders too:
-  - `backend/app/services/ledger_service.py`: P2a → C3b → C4c → C5b
-  - `backend/app/services/statement_import.py`: P4a → C3e
+  - `backend/app/services/ledger_service.py`: P2a → C3b → C4c → C5b. P2a depends only on P1's
+    types, so it can merge early.
+  - `backend/app/services/statement_import.py`: P4a (resolver) → P2b (matcher call) → C3e (inline
+    rules)
   - inline rules in `IngestService` (`services/ingest.py`): P2b, then C3e
 
 This plan fixes an order, not numbers:
@@ -352,10 +367,10 @@ This plan fixes an order, not numbers:
 
 | Order | Revision slug | Slice | Needs |
 |---|---|---|---|
-| M1 | `<n>_rules` | C3b | `0010_list_household_ids` (#31); P2a merged (shared `ledger_service.py`) |
-| M2 | `<n>_import_run_reason_final` | I1d (Tide) | P4a's migration |
+| M1 | `<n>_rules` | C3b | P4a's migration (token order); P2a merged (shared `ledger_service.py`) |
+| M2 | `<n>_import_run_reason_final` | I1d (Tide) | M1 (token order) |
 | M3 | `<n>_transfer_corrections` | C4c | M1 (helpers), M2 (token order) |
-| M4 | `<n>_recurring_series` | C5b | M1 (helpers), M3 (token order) |
+| M4 | `<n>_recurring_series` | C5b | M1 (helpers), M3 (it replaces M3's re-point function) |
 
 ### 3.0 Conventions (every Phase 4 migration)
 - The Phase 1 contract's conventions hold:
@@ -377,7 +392,7 @@ This plan fixes an order, not numbers:
   - Every relation qualified (`public."transaction"`, `public.account`, `public.rule`).
   - A trigger that doesn't find the account, rule or transaction row it needs **raises**, never
     passes.
-  - Where a trigger must see rows the caller can't (the counts in 3.1 and 3.3), it follows the
+  - Where a trigger must see rows the caller can't (the counts in 3.1 and 3.3, and the supersede re-point), it follows the
     0002/0005 pattern. It saves `app.household_wide`, sets it `on` for its own statements only, and
     restores it before returning. Those statements are fixed and touch only rows the trigger's
     `NEW`/`OLD` names. Messages carry ids only.
@@ -484,7 +499,7 @@ after (rejected), on accepted (rejected). It's listed here only for the token or
 - INSERT WITH CHECK and DELETE USING: the read predicate AND
   `(app_account_writable(transaction_account_id) OR (other_account_id IS NOT NULL AND
   app_account_writable(other_account_id)))`.
-- No UPDATE grant. Supersede step 7 (C4c) deletes and re-inserts.
+- No UPDATE grant. `transaction_supersede_repoint` deletes and re-inserts.
 
 **`transfer_suggestion`**
 | Column | Type | Notes |
@@ -519,11 +534,18 @@ after (rejected), on accepted (rejected). It's listed here only for the token or
   link.
 - SELECT USING: both accounts detail-visible (ADR 0026 point 2).
 - INSERT WITH CHECK: the read predicate AND either account writable (household-wide passes both).
-- **DELETE USING: `app_household_wide()` only** (Bulwark). Only step 0 and supersede step 7 remove
-  links.
+- **DELETE USING: `app_household_wide()` only** (Bulwark). Only step 0 and
+  `transaction_supersede_repoint` remove links.
 - UPDATE USING and WITH CHECK: the read predicate AND either account writable. The guard trigger
-  `transfer_link_guard` (BEFORE UPDATE) allows a non-household-wide session exactly one change,
-  `origin` from `job` to `person`, and raises `42501` on anything else.
+  `transfer_link_guard` (BEFORE UPDATE, `search_path` pinned per 3.0) is accepted by Bulwark on
+  these terms:
+  - In a non-household-wide session it compares every column. Every column except `origin` must
+    be unchanged (`ROW(NEW.*) minus origin = ROW(OLD.*) minus origin`, written out column by
+    column), and `origin` may change only from `job` to `person`, never back. Anything else raises
+    `42501`.
+  - **Residual, recorded** (Bulwark ruling): a person who can't see the link can't convert it.
+    Their UPDATE matches zero rows, silently. So if the other side unmarks later, step 0(b) can
+    still undo that person's re-mark. It's rare and reversible: they mark the leg again.
   - A person who marks a leg of a `job` link converts the link to `person` in the same unit of
     work, so step 0(b) never unmarks a person's mark.
   - Bulwark's note said "delete and insert". That's impossible for a person once DELETE is
@@ -560,13 +582,26 @@ after (rejected), on accepted (rejected). It's listed here only for the token or
     OLD.transfer_group_id`**, it raises `42501`: the delete is refused rather than leaving a
     partner the caller couldn't clear.
   - It covers deletes outside the writer: account cascades, a future "re-import this document", an
-    import undo. The writer's own path (`remove_external`, PHASE-2 §3.3) unpairs the partner first,
-    and then the trigger finds nothing to do.
+    import undo.
+  - A winner's transfer state is cleared by `unsupersede_transaction` before `remove_external`
+    deletes it (PHASE-2 §3.3). So the trigger fires only for a leg that never had a loser. If that
+    leg's partner is on an account the session can't write, the `42501` stands, and un-adopt
+    reports `409 unadopt_blocked`.
   - **One rule for every lost leg** (Gadfly R2-S1). The survivor of a deleted pair leg is unpaired,
     whoever made the pair. That's the Phase 2 rule: no rejection, and the next refresh may pair it
     again. Step 0(a) applies the same rule to links of either origin.
-- There's no supersession trigger. Supersession is the Phase 2 clause, and its steps 7 and 9 move
-  or delete these rows inside the writer's unit of work (4.4).
+- `transaction_supersede_repoint`, AFTER UPDATE OF `superseded_by_id` ON `transaction`, whenever
+  the value changes. It runs in the same statement as the writer's update, following the 3.0
+  household-wide pattern, so it moves rows the superseding session can't see (Bulwark 10):
+  - **NULL → value:** move `transfer_rejection` and `transfer_link` references from the row (`old`)
+    to `NEW.superseded_by_id` (`INSERT … ON CONFLICT DO NOTHING`, then `DELETE`). Delete
+    `transfer_suggestion` and `transfer_leg_offer` rows that reference `old`.
+  - **value → NULL** (`unsupersede_transaction`): move the same references from
+    `OLD.superseded_by_id` back onto the row's own id, the same way. Delete suggestions and leg
+    offers that reference either id.
+  - The account id never changes (the 0005 FK keeps supersession inside one account), so visibility
+    of the moved rows doesn't change.
+  - The M3 downgrade drops the function, both branches.
 
 **Visibility rule.**
 - A suggestion is visible only to the person it was computed for, and only while both legs are
@@ -613,10 +648,10 @@ after (rejected), on accepted (rejected). It's listed here only for the token or
   So a member is always on its series' account.
 - Read: `app_account_details_visible(account_id)`. Write: `app_household_wide()` only.
 
-**Supersession.** Supersede step 8 (C5b, PHASE-2 §3.3) moves the loser's `recurring_member` rows
-to the winner, or deletes them when the winner is already in that series. Members move instead of
-vanishing, so a series whose rows are all superseded keeps its id and state (Gadfly B3). There's
-no trigger.
+**Re-point update.** M4 replaces `transaction_supersede_repoint` so that `recurring_member` rows
+also move, in **both** branches. A member row is deleted instead when its destination is already in
+that series. Members move instead of vanishing, so a series whose rows are all superseded keeps its
+id and state (Gadfly B3). The M4 downgrade restores M3's body, both branches.
 
 **Visibility rule.** A series and its members are visible exactly when the series account's
 transactions are. Summary-only viewers see none.
@@ -638,13 +673,13 @@ transactions are. Summary-only viewers see none.
 
 | Work | Where | Session | Writes through | Idempotence |
 |---|---|---|---|---|
-| Account owner and visibility (A1) | request | person | `AccountService.change_ownership`: account `FOR UPDATE`, then a 409 on pairs (before C4c) or `LedgerWriter.dissolve_account_pairs` (from C4c), then the account UPDATE, in one unit of work | a repeat with the same values is a no-op |
+| Account owner and visibility (A1) | request | person | `AccountService.change_ownership`: account `FOR NO KEY UPDATE` (4.2), then a 409 on pairs (before C4c) or `LedgerWriter.dissolve_account_pairs` (from C4c), then the account UPDATE, in one unit of work | a repeat with the same values is a no-op |
 | Rule CRUD | request | author, person-scoped | `RuleService` (rules aren't ledger fields) | n/a |
 | Rules at ingest | statement import request today; sync job later | the importer's session | the matcher runs in `anyio.to_thread.run_sync`, then `NewTransaction(category_id, category_source='rule', category_rule_id)` → `LedgerWriter.insert_transaction` | a re-import inserts nothing (fingerprints) |
 | Rule preview | request, `anyio.to_thread` | author | none | pure |
 | Rule apply (retroactive) | request | author | `LedgerWriter.apply_rule_bulk` (one UPDATE, precedence in WHERE, exact-count check) | preview token; a second apply changes 0 rows |
 | Set / release category, mark / unmark, manual pair, accept / reject suggestion | request | person | `LedgerWriter`, plus `transfer_rejection` / `transfer_link` in the same unit of work | each call is a state transition; a repeat is a 409 or a no-op |
-| Supersede a row (P2a and P4a callers) | sync job; statement import's reverse matcher call | household-wide; the uploader's for a fresh loser | `LedgerWriter.supersede` (PHASE-2 §3.3) with Phase 4's steps 1, 7, 8 and 9 | supersession is one-to-one (0005) |
+| Supersede a row | `IngestService`, statement import, `remove_external`, un-adopt (PHASE-2 §3.3) | the caller's | `LedgerWriter.supersede_transaction` / `unsupersede_transaction` (P2a), called by the ADR 0035 matcher (P2m) through P2b; Phase 4's `transaction_supersede_repoint` moves the derived rows | supersession is one-to-one (0005) |
 | Link cleanup, auto-pair, auto-link | `ledger.refresh` steps 0–1 | household-wide | `pair_transfers` → `apply_transfer_pair` / `apply_transfer_link` with `job_run_id` | paired or linked rows leave the pool |
 | Transfer suggestions | `ledger.refresh` step 2 | one `scoped_session` per person with a login | `refresh_person_suggestions`: delete and insert that person's rows | replace per person |
 | Recurring detection | `ledger.refresh` step 3 | household-wide | `detect_rows` in the `forkserver` pool, then `reconcile_series` under `FOR UPDATE` | reconcile is a pure function of rows + stored series |
@@ -665,9 +700,11 @@ transactions are. Summary-only viewers see none.
       (`rejected_by_person_id` NULL), unmark the other leg, and delete the link.
     - (c) Any link whose edge has a `pair` rejection: delete it. For a `job` link, also unmark any
       leg still marked.
-    - (d) A `declined` leg offer: write the `pair` rejection for its link's edge (with
-      `rejected_by_person_id` set to the person who declined), delete the link, and delete that
-      leg's offers. The other leg stays as its writer left it.
+    - (d) A `declined` leg offer whose link has `origin = 'person'`: write the `pair` rejection for
+      its link's edge (with `rejected_by_person_id` set to the person who declined), delete the
+      link, and delete that leg's offers. The other leg stays as its writer left it.
+      - A `declined` row on a `job` link (Bulwark) gets its `pair` rejection written the same way,
+        and then falls under (c), so the job's own mark on the other leg is undone.
     - (e) A `person` link with one leg unmarked and no rejection stays: it's a half-accepted move.
       For each person with a login who can write the unmarked leg, keep or insert an `open` leg
       offer, unless they declined it (Gadfly R2-B4).
@@ -714,8 +751,7 @@ transactions are. Summary-only viewers see none.
   - Before `_lock_group`, every pair and link writer, manual and automatic, takes `SELECT … FOR
     SHARE` on both legs' account rows, in id order.
   - `_check_pair` reads the owners from those locked rows.
-  - A1 takes `FOR UPDATE` on the account first, so a pair can't commit against an owner change in
-    flight.
+  - A1 takes `FOR NO KEY UPDATE` on the account first. That still conflicts with the pair writers' `FOR SHARE`, but not with FK checks' `FOR KEY SHARE`. So a pair can't commit against an owner change in flight.
   - A person's session can lock only accounts it may write: account RLS applies its UPDATE policy
     to row locks. A pair needs both rows locked, or it raises not-found. A person's link may lock
     just their own account, because a link is valid between any owners.
@@ -780,40 +816,27 @@ transactions are. Summary-only viewers see none.
   - Accepting a leg offer marks the person's leg single, which completes the link, and deletes the
     offer. Declining it leaves the leg as it is and records `declined`. Step 0(d) turns that into
     a `pair` rejection.
-- **Supersession is the Phase 2 clause**, `LedgerWriter.supersede(loser_id, winner_id)` and its
-  reverse (`PHASE-2-contract.md` §3.3; P2a builds steps 1–6 and 10).
-  - Preconditions, as defined there:
-    - same account
-    - the loser has `source = 'import'`
-    - the winner is from a production connection
-    - both rows are live and not pending
-    - equal amounts
-    - when both are transfer legs, the same group. Otherwise `SupersedeConflict`.
-  - Phase 4 adds these steps, each in the named slice and inside the same unit of work:
-    - **C3b, step 1:** `category_rule_id` travels with the category.
-    - **C4c, step 7:** rows of `transfer_rejection` *and `transfer_link`* that name the loser are
-      rewritten to the winner (delete and re-insert, since neither table has an UPDATE grant). A
-      duplicate is deleted. The reverse moves them back. Test: a rejected pair isn't re-paired on
-      the winner, and a link survives supersession of either leg.
-    - **C4d, step 9:** `transfer_suggestion` and `transfer_leg_offer` rows that name the loser are
-      deleted. The next refresh recomputes them.
-    - **C5b, step 8:** `recurring_member` rows move to the winner (3.4). Test: a dismissed series
-      stays dismissed after its members are superseded.
-  - **Session rule** (Bulwark 10, re-argued). Steps 7–9 run in the writer's session, so that session
-    must see every row they move.
-    - The sync job (`IngestService`, PHASE-2 §3.4) and `remove_external` are household-wide, so
-      they do.
-    - Statement import's reverse matcher call runs as the uploader. There, the loser is the row
-      inserted in the same unit of work, so no rejection, link, offer, suggestion or member can
-      name it yet.
-    - From C4c on, `supersede` and its reverse raise `LedgerRuleError` in a session that isn't
-      household-wide, unless the row they move rows *from* was inserted by this writer instance.
-      So **P4's un-adopt must run its reverse in a household-wide job**, not in the request.
-  - Revision 2's design, a re-point trigger with an elevated `app.household_wide`, isn't built.
+- **Supersession is PHASE-2 §3.3**, the single definition: `supersede_transaction(old_id, new_id)`
+  and its reverse `unsupersede_transaction(old_id)`.
+  - P2a builds both verbs. They're the only writers of `superseded_by_id`, and P2a owns the
+    single-writer lint entry. They move category by rank, splits, transfer state, tax, receipt and
+    notes, in one unit of work, with no per-row audit.
+  - Phase 4 adds:
+    - **C3b:** `category_rule_id` travels with the category in both verbs.
+    - **C4c (M3):** `transaction_supersede_repoint` moves `transfer_rejection` and `transfer_link`
+      rows in both directions and deletes stale suggestions and leg offers (3.3).
+    - **C5b (M4):** the same trigger also moves `recurring_member` rows (3.4).
+  - Because the trigger is household-wide, the derived rows move whoever calls the verb. The
+    statement import matcher and un-adopt stay in the person session, as PHASE-2 §3.3 has them.
+  - Un-adopt's `unsupersede_transaction` clears the winner's transfer state before
+    `remove_external` deletes it. If that can't be done (a partner on an account the session can't
+    write), the `transaction_dissolve_orphan` refusal makes un-adopt return `409
+    unadopt_blocked`.
 - **Deletion:**
-  - `transaction_dissolve_orphan` unpairs a deleted leg's partner (3.3).
-  - `remove_external` does the same through the writer first (PHASE-2 §3.3: no rejection; the next
-    refresh may pair it again).
+  - `transaction_dissolve_orphan` unpairs a deleted leg's partner (3.3). There's no rejection, and
+    the next refresh may pair it again.
+  - `remove_external` calls `unsupersede_transaction` first, so a winner that had a loser is
+    deleted with no transfer state (PHASE-2 §3.3).
   - `unmark_transfer` also accepts a group with one surviving leg (Gadfly B3).
   - Step 0(a) gives links the same rule.
 - Recurring: detection ignores `is_transfer` rows, and user categories don't matter. `confirmed`
@@ -825,10 +848,21 @@ transactions are. Summary-only viewers see none.
   - Editing a rule leaves `category_rule_id` in place: "Set by rule: <name>" names the rule that
     set it, even if it has changed since.
   - A disabled rule can be previewed but not applied (409 `conflict`).
+  - **Regex run-time budget** (ADR 0024 point 9):
+    - Preview, apply and clear stop at 10 s of regex time with 503 `rules_too_slow`, and nothing is
+      written.
+    - Ingest skips `regex` rules for the rest of an import once regex time passes 0.5 ms per row
+      (checked every 1,000 rows). The import result then carries `rule_notice =
+      "patterns_skipped_slow"`, shown as "Some pattern rules were skipped because they were too
+      slow".
+    - One audit row, `rule.too_slow {rule_id}`, names the costliest rule, and one log line carries
+      counts only.
+    - A later retroactive apply catches the skipped rows up.
   - **"Clear this rule's categories"** (Gadfly R2-S3) undoes a bad retroactive apply with no new
     table, because `category_rule_id` already records which rule set each row.
     - A preview returns the count and a token over the sorted ids of live rows `WHERE
-      category_rule_id = :rule AND category_source = 'rule'` that the author may write.
+      category_rule_id = :rule AND category_source = 'rule' AND superseded_by_id IS NULL` that
+      the author may write.
     - The clear then sets `category_id`, `category_source` and `category_rule_id` to NULL on exactly
       those rows, with an exact-count check.
     - Rows a person set since (`user`) and rows another rule took over are untouched.
@@ -848,7 +882,8 @@ transactions are. Summary-only viewers see none.
 - `LedgerWriter._check_pair` rejects a different `owner_person_id`, where NULL is a value (ADR
   0027).
 - `LedgerWriter.clear_rule_categories(rule_id, transaction_ids) -> int` (C3b): the 4.4 clear, as
-  one `UPDATE … WHERE id = ANY(:ids) AND category_rule_id = :rule AND category_source = 'rule'`,
+  one `UPDATE … WHERE id = ANY(:ids) AND category_rule_id = :rule AND category_source = 'rule' AND
+  superseded_by_id IS NULL`,
   with an exact-count check (`preview_stale`) and one audit row, `rule.cleared {rule_id}`.
 - `unmark_transfer(transaction_id, *, never: bool = False)` follows 4.4.
   `mark_transfer_pair` / `mark_transfer_single` delete a matching rejection. `mark_transfer_single`
@@ -858,7 +893,8 @@ transactions are. Summary-only viewers see none.
     inserts the link
   - `apply_transfer_link(out_id, in_id, *, job_run_id)`
   - `dissolve_account_pairs(account_id)`: called by A1's service from C4c on
-  - supersede steps 7 and its reverse (4.4)
+  - not `supersede_transaction` or `unsupersede_transaction`: P2a owns both verbs and the
+    single-writer lint entry for `superseded_by_id`
 - **Provenance** (Bulwark 7): `pair_transfers`, `apply_transfer_pair` and `apply_transfer_link`
   raise unless `user_id` is set, or the session is household-wide **and** `job_run_id` is set.
 - `pair_transfers` loads rejections (mapped to the matcher's frozensets) and computes `protected` per
@@ -878,7 +914,8 @@ All under `/api`:
 - thin routers (ADR 0011)
 
 Schema names are the Pydantic class names, so `make api-types` output is predictable. `ApiError`
-gains one code: **`preview_stale` (409)**, added to `web/src/api/contracts.ts` in the same PR.
+gains two codes, **`preview_stale` (409)** and **`rules_too_slow` (503)**, added to
+`web/src/api/contracts.ts` in the same PR (C3e).
 
 ### 5.0 Accounts (A1)
 `AccountOut` gains:
@@ -911,7 +948,7 @@ import result can offer the change.
     every member, so `visibility` on a joint account is refused with 422. Nobody "changes a joint
     account's visibility".
 - One unit of work:
-  1. Lock the account row `FOR UPDATE` (4.2: before any pair writer's `FOR SHARE`).
+  1. Lock the account row. A1 takes `FOR NO KEY UPDATE` on the account first. That still conflicts with the pair writers' `FOR SHARE`, but not with FK checks' `FOR KEY SHARE`. (4.2)
   2. If the owner changes:
      - Before C4c, A1 refuses with 409 when any row on the account has a `transfer_group_id`. No
        code path can create a pair before C4c (the matcher is guarded and no endpoint pairs), so
@@ -996,15 +1033,15 @@ RuleClearOut       {cleared_count: int}
 | Method + path | Body → response | Errors |
 |---|---|---|
 | GET `/rules` | → `RuleList` (every rule the reader can see) | |
-| POST `/rules/preview` | `RuleIn` → `RulePreviewOut` (a draft; nothing saved) | 422 |
+| POST `/rules/preview` | `RuleIn` → `RulePreviewOut` (a draft; nothing saved) | 422, 503 `rules_too_slow` |
 | POST `/rules` | `RuleCreateIn` → 201 `RuleCreateOut`; with `apply`, create and apply in one transaction | 422, 409 `preview_stale` (nothing saved), 409 `conflict` (200 rules per author, or 25 enabled pattern rules per household) |
 | GET `/rules/{id}` | → `RuleOut` | 404 |
 | PATCH `/rules/{id}` | partial `RuleIn` → `RuleOut` (never applies) | 404, 403 `forbidden` (visible, not yours), 422, 409 `conflict` (caps) |
 | DELETE `/rules/{id}` | → 204 (categories stay) | 404, 403 |
 | POST `/rules/{id}/preview` | → `RulePreviewOut` | 404 |
-| POST `/rules/{id}/apply` | `RuleApplyIn` → `RuleApplyOut` | 404, 403, 409 `preview_stale`, 409 `conflict` (disabled) |
-| POST `/rules/{id}/clear/preview` | → `RuleClearPreviewOut` (4.4 "Clear this rule's categories") | 404, 403 |
-| POST `/rules/{id}/clear` | `RuleClearIn` → `RuleClearOut` | 404, 403, 409 `preview_stale` |
+| POST `/rules/{id}/apply` | `RuleApplyIn` → `RuleApplyOut` | 404, 403, 409 `preview_stale`, 409 `conflict` (disabled), 503 `rules_too_slow` |
+| POST `/rules/{id}/clear/preview` | → `RuleClearPreviewOut` (4.4 "Clear this rule's categories") | 404, 403, 503 `rules_too_slow` |
+| POST `/rules/{id}/clear` | `RuleClearIn` → `RuleClearOut` | 404, 403, 409 `preview_stale`, 503 `rules_too_slow` |
 
 - Validation (422, fixed messages, never echoing input):
   - an unknown category
@@ -1013,8 +1050,11 @@ RuleClearOut       {cleared_count: int}
   - before C3d, any `mode: "regex"` ("Patterns aren't available yet.")
 - **The 422 for patterns covers preview, create and PATCH alike**, because all three build
   conditions through `compile_pattern` (first-pass B3).
-- Rate limit: preview, apply and clear share 30 per minute per user (the existing Redis limiter,
-  429 `rate_limited`).
+- Rate limit: preview, apply, clear preview and clear share one limiter, 30 per minute per user
+  (the existing Redis limiter, 429 `rate_limited`).
+- **The upload response** (statement import) gains `rule_notice: "patterns_skipped_slow" | null`
+  (ADR 0024 point 9). The import result view shows it as "Some pattern rules were skipped because
+  they were too slow".
 
 ### 5.3 Transfers review (C4e)
 ```
@@ -1034,7 +1074,7 @@ TransferRejectIn   {scope: "pair" | "legs" = "pair"}
 | POST `/transfers/suggestions/{id}/accept` | → `TransferAcceptOut` | 404, 409 (a leg changed) |
 | POST `/transfers/suggestions/{id}/reject` | `TransferRejectIn` → 204 | 404 |
 | POST `/transfers/offers/{id}/accept` | → `TransactionOut` (the leg, now a single-leg transfer) | 404, 409 (the leg changed) |
-| POST `/transfers/offers/{id}/decline` | → 204 (records `declined`; step 0(d) writes the rejection) | 404 |
+| POST `/transfers/offers/{id}/decline` | → 204 (records `declined`; step 0(d) writes the rejection). Requires an existing `open` offer before writing `declined` | 404 (no `open` offer) |
 
 - **Review list:**
   - Groups come from `group_edges` over the reader's suggestions that are still live: legs live,
@@ -1238,13 +1278,13 @@ Each slice is one PR. Gates:
     functions) and reruns `make api-types`.
 - **A1 and C3b share nothing.** A1 no longer edits `ledger_service.py` or its tests (5.0), which
   answers Gadfly R2-S4.
-- **`ledger_service.py`:** P2a → C3b → C4c → C4d (supersede step 9 only) → C5b. That's the Phase 2
-  order, with the C4d step the clause itself names.
+- **`ledger_service.py`:** P2a → C3b → C4c → C5b, the Phase 2 order. C4d doesn't edit it, because
+  the M3 trigger handles suggestions and offers.
 
 ### 7.2 Slices
 | ID | Slice | Kind / owner | Depends | Gates | Acceptance evidence |
 |---|---|---|---|---|---|
-| **C3b** | M1 (rules), helper functions, `Rule` model, `category_rule_id`, `NewTransaction.category_rule_id`, `apply_category(rule_id)`, `apply_rule_bulk`, `clear_rule_categories`, supersede step 1's `category_rule_id` | db · Ledger (token) | #31 (0010), P2a | Bulwark, Ledger | RLS matrix for `rule`; `rule_scope_guard` and `rule_caps` (two sessions racing past a cap); guessed-id FKs; helper equivalence and `prosecdef = false`; bulk apply exact-count and precedence; up/down/up, **including a downgrade that raises on a non-empty table** |
+| **C3b** | M1 (rules), helper functions, `Rule` model, `category_rule_id`, `NewTransaction.category_rule_id`, `apply_category(rule_id)`, `apply_rule_bulk`, `clear_rule_categories`, `category_rule_id` in both supersede verbs | db · Ledger (token) | P4a (token), P2a | Bulwark, Ledger | RLS matrix for `rule`; `rule_scope_guard` and `rule_caps` (two sessions racing past a cap); guessed-id FKs; helper equivalence and `prosecdef = false`; bulk apply exact-count and precedence; up/down/up, **including a downgrade that raises on a non-empty table** |
 | **A1** | `PATCH /accounts/{id}` (`me` / `joint`, visibility), `AccountService`, `AccountOut` / `ImportBlockOut` owner fields; 409 while the account has pairs | db · Ledger | — | Bulwark, Ledger | See 7.3 A1 |
 | **A1w** | Account owner sheet; the accounts panel and import result show the owner | web · Prism | A1 | Prism, Sounding | vitest; 375 px; **e2e `accounts.e2e.ts`**: upload a synthetic statement, change the owner to joint from the result view, and see it in the accounts panel |
 | **C3c** | `merchant.py`, `rule_regex.py` (refuses everything), rules v2 (scope, splits, ordering, `preview_for`, `preview_token`, codec with `merchant_key_version`) | pure · Codex | — | Ledger, Bulwark | Table and property tests; draft token = saved token; order independence; the `ast` import test; `repr(DescriptionCondition)` has no value |
@@ -1255,11 +1295,11 @@ Each slice is one PR. Gates:
 | **C3d** | RE2 in `rule_regex.py`, cost probe, dependency pin, corpus gate, `docs/user/rules.md` | pure + lockfile · Ledger | C3c | Bulwark, Ledger | ADR 0024 point 7 gate (required, on CI); probe rejects the corpus' blow-ups; `import re2` only in one module; a failed `import re2` gives `unavailable`; pip-audit clean |
 | **C3e** | `RuleService`, `/api/rules` (including clear), ingest-time rules in statement import and in `IngestService` (matcher in a thread), `preview_stale` code, `category_rule_id` in `TransactionOut` | db · Ledger | C3b, C3c, C6a, P4a (`statement_import.py`), P2b (`IngestService`); C3d for regex | Bulwark, Ledger | Preview count = applied count; a second apply = 0; clear preview count = cleared count; a Plaid row matching a rule gets `category_source = 'rule'`; scope across two people (`own` invisible to the other; `any` never touches the other's private rows); caps → 409; audit details ids only; a re-import inserts nothing and keeps categories; bounded work (fixed query count per preview/apply, one UPDATE per apply) |
 | **W2** | Rule sheet, preview, Settings → Rules, "make a rule" entry points | web · Prism | C3e (mocks earlier) | Prism, Sounding | vitest for the preview → save-and-apply flow and the stale path; scope default by source account; visibility line; 375 px; **e2e `rules.e2e.ts`**: make a rule from a row, preview, save and apply, see the list in Settings |
-| **C4c** | M3, transfer models, writer changes (links, rejections, leg offers, owner locks, unmark rules, supersede step 7), `pair_transfers` v2 + `load_candidates`, A1's switch to `dissolve_account_pairs` | db · Ledger (token) | C3b, C4b, A1, M2 (token) | Bulwark, Ledger | See 7.3 C4c |
-| **C4d** | `ledger.refresh` job steps 0–2 (including leg offers), `refresh_person_suggestions`, `request_refresh` helper, arq pool in the API, `defer_until` in `enqueue` (and its re-push), enqueue after import and ownership change, supersede step 9, 5.5 endpoints | db · Ledger | C4c | Bulwark, Ledger | See 7.3 C4d |
+| **C4c** | M3, transfer models, writer changes (links, rejections, leg offers, owner locks, unmark rules, `transaction_supersede_repoint`), `pair_transfers` v2 + `load_candidates`, A1's switch to `dissolve_account_pairs` | db · Ledger (token) | C3b, C4b, A1, M2 (token) | Bulwark, Ledger | See 7.3 C4c |
+| **C4d** | `ledger.refresh` job steps 0–2 (including leg offers), `refresh_person_suggestions`, `request_refresh` helper, arq pool in the API, `defer_until` in `enqueue` (and its re-push), enqueue after import and ownership change, 5.5 endpoints | db · Ledger | C4c | Bulwark, Ledger | See 7.3 C4d |
 | **C4e** | Transfer endpoints (5.1 transfer rows, 5.3, including leg offers), `TransactionOut` transfer fields, enqueue after edits | db · Ledger | C4d, C6a | Bulwark, Ledger | Accept `paired` vs `linked`; the second person still sees their half; an offer's response holds only the reader's leg; reject `pair` vs `legs`; 409 on a changed leg; the guard test still forbids `pair_transfers` / `apply_transfer_*` in `app/api/` |
 | **W3** | Transfers to review tab, badge, sheet transfer actions | web · Prism | C4e | Prism, Sounding | vitest for accept / reject / multi-edge cards; 375 px; **e2e `transfers.e2e.ts`**: upload synthetic checking and card statements, see a card payment excluded, accept one suggestion, unmark it |
-| **C5b** | M4, recurring store service, job step 3 with the `forkserver` pool, supersede step 8 | db · Ledger (token) | C5c, C4d | Bulwark, Ledger | See 7.3 C5b |
+| **C5b** | M4, recurring store service, job step 3 with the `forkserver` pool, the M4 re-point update | db · Ledger (token) | C5c, C4d | Bulwark, Ledger | See 7.3 C5b |
 | **C5d** | Recurring endpoints (5.4), `recurring_count` | db · Ledger | C5b | Bulwark, Ledger | A label confirms; dismissed hidden by default; members are live rows only; 403 for a visible, non-writable series |
 | **W4** | Recurring tab | web · Prism | C5d | Prism, Sounding | Sections and statuses render at 375 px; **e2e `recurring.e2e.ts`**: upload a synthetic statement with a monthly bill, refresh, confirm it, rename it |
 | **C7** | Eval harness, real-data run, Phase 4 acceptance (`docs/phases/PHASE-4.md`) | Sounding (Ledger for the real-data loader) | all | Sounding | Section 0, sections 7.4 and 7.5 |
@@ -1283,14 +1323,17 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
   - `rule_caps` with the advisory lock (ADR 0024 cap). The household-wide count lets one person
     learn how many `own` pattern rules another has, through the 409. That's recorded as an
     accepted leftover in ADR 0026 point 4 (Bulwark).
-  - `clear_rule_categories` (4.5), and `category_rule_id` in supersede step 1 (PHASE-2 §3.3).
+  - `clear_rule_categories` (4.5), with `AND superseded_by_id IS NULL` as in `apply_rule_bulk`.
+  - `category_rule_id` travels with the category in both `supersede_transaction` and
+    `unsupersede_transaction` (PHASE-2 §3.3). Test: supersede then unsupersede a rule-categorised
+    row, and `category_rule_id` is on the live row each time.
 - **A1:**
   - `owner` is `"me" | "joint"` only. Any other value is a 422 from the schema (Bulwark).
   - `app/services/accounts.py` never sets or mentions `household_wide`.
   - The joint-claim check (`principal.is_owner`) is service-only. Say so in the code comment and
     the PR; the database allows any member (ADR 0008).
   - `visibility` on a joint account is a 422.
-  - Lock the account `FOR UPDATE` first. Return 409 while any row on it has a `transfer_group_id`
+  - A1 takes `FOR NO KEY UPDATE` on the account first. That still conflicts with the pair writers' `FOR SHARE`, but not with FK checks' `FOR KEY SHARE`. Return 409 while any row on it has a `transfer_group_id`
     (C4c replaces that with the dissolve).
   - Tests:
     - the owner makes an account joint
@@ -1315,13 +1358,27 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
       and `.`; per-literal mixed families; more than 16 atoms rejected; the 10 µs limit per family
     - the gate: each corpus pattern either rejected by `compile_pattern` or 50,000 searches of
       1,024-character subjects in under 1 s on CI, over subjects independent of the probe
-  - The corpus includes the three DFA blow-up shapes, Bulwark's three evaders
-    (`(?:[J][K][V][Q])?[XY]*X[XYZ]{20}W`, `\d*[0-4]\d{20}#`, `[^5-9]\d{20}#`), and Lattice's two
-    (`\w*Q\w{20}#`, `[[:digit:]]*1[[:digit:]]{20}#`). Each must be rejected.
+  - The corpus includes:
+    - the three DFA blow-up shapes
+    - Bulwark's three round-2 evaders (`(?:[J][K][V][Q])?[XY]*X[XYZ]{20}W`, `\d*[0-4]\d{20}#`,
+      `[^5-9]\d{20}#`)
+    - Lattice's two (`\w*Q\w{20}#`, `[[:digit:]]*1[[:digit:]]{20}#`)
+    - Bulwark's four round-3 evaders (`(?:0123456789ABCDEFGHIJKLMNOPRSTUVW)?\w*Q\w{20}#`,
+      `\w*QJ\w{20}#`, `[A-Z]*XZ[A-Z]{20}#`, `.*QJ.{20}#`)
+
+    Each must be rejected.
+  - Probe families for adjacent literal runs of 2 to 3 characters, mixed with each atom's alphabet.
+  - No 32-literal cap. Above 32 distinct literals, use 8 subjects per literal.
   - Record the CI numbers in the PR.
 - **C3e:**
   - The ingest matcher runs in `anyio.to_thread.run_sync` (Bulwark 1).
   - The 25 enabled `regex` rules per household → 409 (Bulwark 1).
+  - **Budget per ADR 0024 point 9** (Bulwark round 3). Tests:
+    - a probe-passing evader (`\w*QJ\w{20}#`, loaded through the codec with the probe bypassed
+      in the test) over crafted rows trips the budget, and nothing is written
+    - the import completes with the notice
+    - apply after a stopped preview writes nothing different
+  - Clear preview and clear share the 30-per-minute limiter.
   - A rule from a row on a non-joint account defaults to `own`, and `RuleOut.visible_to` drives the
     sheet's line (Bulwark 3).
   - `rule.*` audit details are ids and changed field names only, and `rule.applied` carries no
@@ -1336,9 +1393,9 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     set, in `pair_transfers`, `apply_transfer_pair` and `apply_transfer_link` (Bulwark 7).
   - Every derived-row leg column has the `(…_account_id, household_id) → account(id,
     household_id)` FK (Bulwark 9).
-  - Supersede step 7 (PHASE-2 §3.3) rewrites `transfer_rejection` and `transfer_link` rows from the
-    loser to the winner, and back in the reverse. Add the session rule (4.4): outside a
-    household-wide session, raise unless the source row was inserted by this writer (Bulwark 10).
+  - `transaction_supersede_repoint`, both branches (3.3): rejections and links move, and
+    suggestions and offers are deleted, household-wide in the same statement (Bulwark 10;
+    PHASE-2 §3.3 owns the verbs).
   - Links need a hint on each leg (2.4, Bulwark).
   - Owner locks (4.2, Bulwark): `FOR SHARE` on both legs' accounts, in id order, before
     `_lock_group`. `_check_pair` reads owners from the locked rows.
@@ -1366,7 +1423,10 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
       first person's mark stays
     - supersede: a rejected pair isn't re-paired on the winner, and a link follows its leg to the
       winner
-    - a person session's `supersede` of a non-fresh loser raises
+    - **supersede then unsupersede: rejections and links are back on the old row**
+    - supersede deletes the old row's suggestions and offers
+    - `transfer_link_guard` refuses `person` → `job`, and any change to a leg or account column,
+      from a person session (Bulwark)
 - **C4d:**
   - Step 2 never writes pairs or links. Record the leftover inference in ADR 0026 (done here)
     (Bulwark 8).
@@ -1386,7 +1446,8 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
       R2-B4)
     - a deleted leg's surviving link partner is unmarked, for both origins (Gadfly R2-S1)
     - the healing re-push carries `_defer_until`
-    - supersede step 9 deletes the loser's suggestions and offers
+    - a declined offer on a `person` link becomes a rejection; one on a `job` link also undoes the
+      job's mark on the other leg; decline without an `open` offer is a 404
 - **C5b:**
   - `ProcessPoolExecutor(max_workers=1, mp_context=get_context("forkserver"))`, preloading only
     `app.domain.recurring_series` (Bulwark 5).
@@ -1403,8 +1464,8 @@ Keel copies these into the slice's brief. Each is required for that slice's appr
     - a confirm made while detection runs survives, using a child blocked on an event, with no
       timing involved
     - supersede every member of a confirmed series, then refresh: same id, still confirmed
-    - supersede step 8: a dismissed series stays dismissed after its members are superseded
-      (PHASE-2 §3.3)
+    - the M4 trigger: a dismissed series stays dismissed after its members are superseded
+    - **unsupersede: members back on the old row; series id and state unchanged**
     - a series whose members all became transfers is deleted
     - a timeout terminates the child and the next run works
     - the event loop serves another coroutine while the child is blocked
@@ -1517,13 +1578,13 @@ record. If the owner withdraws it, each migration becomes an owner-queue item.
 | C6a | `backend/app/api/routes_ledger.py`, `backend/app/schemas/ledger.py`, `backend/app/services/ledger.py`, `backend/tests/api/test_ledger*.py`, `web/src/api/schema.d.ts` |
 | W1 | `web/src/pages/transactions/**` (except A1w's files), `web/src/mocks/ledger.ts`, `web/src/api/ledger.ts`, `web/e2e/activity.e2e.ts` |
 | C3d | `backend/app/domain/rule_regex.py`, `backend/pyproject.toml`, `backend/uv.lock`, `backend/tests/domain/test_rule_regex.py`, `backend/tests/domain/regex_corpus.py` (new), `docs/user/rules.md` |
-| C3e | `backend/app/services/rules.py`, `backend/app/api/routes_rules.py`, `backend/app/schemas/rules.py`, `backend/app/services/statement_import.py` (after P4a), `backend/app/services/ingest.py` (inline rules, after P2b), `backend/app/services/errors.py`, `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (`category_rule_id`), `web/src/api/contracts.ts` (error code only), `web/src/api/schema.d.ts`, `backend/tests/api/test_rules*.py`, `backend/tests/services/test_rules*.py`, `backend/tests/bench/test_rules_bench.py` |
+| C3e | `backend/app/services/rules.py`, `backend/app/api/routes_rules.py`, `backend/app/schemas/rules.py`, `backend/app/services/statement_import.py` (after P4a), `backend/app/services/ingest.py` (inline rules, after P2b), `backend/app/schemas/imports.py` + `backend/app/services/imports.py` (`rule_notice`), `backend/app/services/errors.py`, `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (`category_rule_id`), `web/src/api/contracts.ts` (error code only), `web/src/api/schema.d.ts`, `backend/tests/api/test_rules*.py`, `backend/tests/services/test_rules*.py`, `backend/tests/bench/test_rules_bench.py` |
 | W2 | `web/src/pages/settings/Rules*.tsx`, `web/src/features/rules/**` (new), `web/src/mocks/rules.ts`, `web/src/mocks/handlers.ts`, `web/src/api/rules.ts`, `web/src/app/routes.tsx`, `web/e2e/rules.e2e.ts` |
 | C4c | `backend/migrations/versions/<n>_transfer_corrections.py`, `backend/app/models/transfers.py` (new), `backend/app/models/__init__.py`, `backend/app/services/{ledger_service,transfer_pairing}.py`, `backend/app/services/accounts.py` (the dissolve switch), `backend/tests/api/test_account_ownership.py`, `backend/tests/models/test_rls_transfers.py`, `backend/tests/models/test_transfer_triggers.py`, `backend/tests/ledger/test_ledger_service.py`, `backend/tests/ledger/test_transfer_pairing.py`, `backend/tests/test_ledger_single_writer.py` |
-| C4d | `backend/app/jobs/handlers/ledger_refresh.py`, `backend/app/services/transfer_suggestions.py` (new), `backend/app/services/ledger_service.py` (supersede step 9 only), `backend/app/services/refresh.py` (new: `request_refresh`), `backend/app/services/jobs.py` + `backend/app/jobs/queue.py` (`defer_until`), `backend/app/api/deps.py`, `backend/app/services/imports.py` + `backend/app/services/accounts.py` (enqueue), `backend/app/api/routes_ledger_status.py`, `backend/app/schemas/ledger_status.py`, `backend/app/worker/main.py` (comment), `backend/tests/ledger/test_transfer_pairing_guard.py`, `backend/tests/models/test_household_wide_guard.py` (allowlist only), `backend/tests/jobs/test_ledger_refresh*.py` |
+| C4d | `backend/app/jobs/handlers/ledger_refresh.py`, `backend/app/services/transfer_suggestions.py` (new), `backend/app/services/refresh.py` (new: `request_refresh`), `backend/app/services/jobs.py` + `backend/app/jobs/queue.py` (`defer_until`), `backend/app/api/deps.py`, `backend/app/services/imports.py` + `backend/app/services/accounts.py` (enqueue), `backend/app/api/routes_ledger_status.py`, `backend/app/schemas/ledger_status.py`, `backend/app/worker/main.py` (comment), `backend/tests/ledger/test_transfer_pairing_guard.py`, `backend/tests/models/test_household_wide_guard.py` (allowlist only), `backend/tests/jobs/test_ledger_refresh*.py` |
 | C4e | `backend/app/services/transfers.py` (new, request side), `backend/app/api/routes_transfers.py`, `backend/app/schemas/transfers.py`, `backend/app/api/routes_ledger.py` (transfer endpoints), `backend/app/schemas/ledger.py` + `backend/app/services/ledger.py` (transfer fields), `web/src/api/schema.d.ts`, `backend/tests/api/test_transfers*.py` |
 | W3 | `web/src/pages/transactions/Transfers*.tsx`, `web/src/mocks/ledger.ts`, `web/src/api/transfers.ts`, `web/e2e/transfers.e2e.ts` |
-| C5b | `backend/migrations/versions/<n>_recurring_series.py`, `backend/app/models/recurring.py` (new), `backend/app/models/__init__.py`, `backend/app/services/ledger_service.py` (supersede step 8), `backend/app/services/recurring.py` (store side), `backend/app/services/recurring_pool.py` (new), `backend/app/jobs/handlers/ledger_refresh.py` (step 3), `backend/app/jobs/runner.py` + `backend/app/jobs/registry.py` (`cpu_pool`), `backend/app/worker/main.py` (pool lifecycle), `backend/tests/models/test_rls_recurring.py`, `backend/tests/jobs/test_ledger_refresh_recurring.py`, `backend/tests/bench/test_recurring_bench.py` |
+| C5b | `backend/migrations/versions/<n>_recurring_series.py`, `backend/app/models/recurring.py` (new), `backend/app/models/__init__.py`, `backend/app/services/recurring.py` (store side), `backend/app/services/recurring_pool.py` (new), `backend/app/jobs/handlers/ledger_refresh.py` (step 3), `backend/app/jobs/runner.py` + `backend/app/jobs/registry.py` (`cpu_pool`), `backend/app/worker/main.py` (pool lifecycle), `backend/tests/models/test_rls_recurring.py`, `backend/tests/jobs/test_ledger_refresh_recurring.py`, `backend/tests/bench/test_recurring_bench.py` |
 | C5d | `backend/app/api/routes_recurring.py`, `backend/app/schemas/recurring.py`, `backend/app/services/recurring.py` (read side), `backend/app/api/routes_ledger_status.py` (`recurring_count`), `web/src/api/schema.d.ts`, `backend/tests/api/test_recurring*.py` |
 | W4 | `web/src/pages/transactions/Recurring*.tsx`, `web/src/mocks/recurring.ts`, `web/src/mocks/handlers.ts`, `web/src/api/recurring.ts`, `web/e2e/recurring.e2e.ts` |
 | C7 | `backend/tests/eval/**` (new), `docs/phases/PHASE-4.md` |
@@ -1560,7 +1621,7 @@ generated `schema.d.ts` conflicts by rerunning `make api-types`, never by hand.
 | PR #55 Keel | Freeze `review_reason` in `import_run_guard` (own migration) | M2 (3.2), I1d, Tide; in the shared token order |
 | ADR 0016 | Wire `arq_pool` into the API when the first API-triggered job lands | C4d |
 | Bulwark on PR #59 | Items 1–14, then round 2 | Section 7.3 per slice; section 11 |
-| Phase 2 contract §3.3 | The supersede clause, its reverse, and the shared migration-token and file order | D15, 3, 4.4, 7.1, 7.6; steps 1, 7, 8 and 9 named per slice |
+| Phase 2 contract §3.3 (round 3) | One verb pair (`supersede_transaction`, `unsupersede_transaction`, P2a), and the shared migration-token and file order | D15, 3, 3.3, 3.4, 4.4, 7.1, 7.6. Phase 4 owns the re-point trigger (M3, M4) and `category_rule_id` in both verbs (C3b) |
 
 ---
 
@@ -1600,8 +1661,9 @@ The real-data checks are no longer an owner item. Holdfast agents run them local
 
 Phase 4 doesn't touch secrets handling, `household_setting`, ADR 0015, or anything in the Plaid
 lane (its key entry and slot-tombstone migration are separate stories). It adds steps to the Phase
-2 supersede clause and follows the shared token and file order (section 3, 4.4). P4's un-adopt must
-run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026–0029. 0023 and
+2 supersede verbs (`category_rule_id`, C3b) and owns their re-point trigger (M3, M4). It follows the
+shared token and file order (section 3, 4.4). Un-adopt stays in the person session, as PHASE-2 §3.3
+has it. Phase 4's ADRs are 0024 and 0026–0029. 0023 and
 0025 belong to the Plaid lane.
 
 ---
@@ -1612,7 +1674,7 @@ run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026�
 | Item | Response | Where |
 |---|---|---|
 | B1 cross-owner moves fail criterion 2 and double-count | **Accepted.** Cross-owner edges that meet the auto bar are linked automatically: both legs marked, plus a `transfer_link`. Joint versus owned counts as different owners. A hidden link's unmark becomes a `pair` rejection at step 0, so no `leg` rejection is written by accident. A card is hidden only when every leg the reader can write is a transfer. The leak is stated and accepted. The C7 holdout includes joint checking paying a personal card, and a private-to-private move | 2.4, 3.3, 4.1, 4.4, 5.3, ADR 0026, ADR 0027, 7.4 |
-| B2 supersession drops people's corrections | **Accepted.** Revision 3 replaces Revision 2's own writer and re-point trigger with the Phase 2 clause (`LedgerWriter.supersede`, PHASE-2 §3.3). Phase 4 adds steps 7 (rejections, links), 8 (members) and 9 (suggestions, offers) in the same unit of work. Test: a rejected pair isn't re-paired on the winner | 4.4, 7.3 C4c, C4d, C5b |
+| B2 supersession drops people's corrections | **Accepted.** The writer half is PHASE-2 §3.3 (`supersede_transaction` / `unsupersede_transaction`, P2a): category by rank, splits, transfer state, tax, receipt and notes. The trigger half is Phase 4's (`transaction_supersede_repoint`, both directions). Tests: a rejected pair isn't re-paired on the winner, and supersede then unsupersede restores the old row's rows | 3.3, 3.4, 4.4, 7.3 C4c, C5b |
 | B3 the regex gate is in the API only | **Accepted.** `compile_pattern` refuses every input until C3d, so the codec, loader and API all refuse. The `ast` import test. The 422 covers preview, create and PATCH. "Skipped and flagged" is `RuleOut.status` | 2.2, 5.2, ADR 0024 point 2 |
 | B4 C7 has no evidence plan | **Accepted.** Generator module, seed custody, labelling policy, denominators, precision as slug equality, Plaid share 0, owners in the holdout, bill-tier recovery, false-series caps | 0, 7.4 |
 | S1 rule visibility leaks and naming | **Accepted in part.** A rule from a private row defaults to `own`. `any` reads "Joint and my accounts". Account lists are removed, so "future accounts" is no longer an issue. **Rejected:** a per-account opt-out from another person's rule. That person can set the row (a user choice wins) or make a higher-priority rule. Recorded in section 10 | 2.3, 3.1, 6 (item 2), 10 |
@@ -1629,7 +1691,7 @@ run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026�
 |---|---|---|
 | B1 no ownership producer; owner changes break the invariant | **Accepted (Keel decision).** A1 is added before every transfer slice. `PATCH /accounts/{id}` (`me` / `joint` since Revision 3) refuses, and from C4c dissolves, pairs in the same unit of work, and the import result offers the change. `account_guard_transfer_owner` is the DB backstop. Phase 4 isn't declared single-owner | 5.0, 6 (item 0), 3.3, 7.1 |
 | B2 the per-person pass drops confident pairs | **Accepted.** `pairs` and `links` in a person's view become `likely` suggestions. Step 2 never writes pairs | 2.4, 3.3, 4.1, 7.3 C4b |
-| B3 deleting or superseding a paired leg corrupts the partner and series | **Accepted.** `transaction_dissolve_orphan`, `unmark_transfer` with one survivor, member moves in supersede step 8 (Revision 3), live-only member listings. Both tests named | 3.3, 3.4, 4.4, 7.3 |
+| B3 deleting or superseding a paired leg corrupts the partner and series | **Accepted.** `transaction_dissolve_orphan`, `unmark_transfer` with one survivor, member moves in the M4 trigger (writer half: PHASE-2 §3.3), live-only member listings. Both tests named | 3.3, 3.4, 4.4, 7.3 |
 | B4 acceptance can pass without real data | **Accepted (Keel decision).** Agents run the real-data check locally on a restore of the owner's instance, with counts only. The upgrade dependency is dropped (the instance is at `0009` with a dump). Criterion 4 is rewritten so it can fail. One e2e per screen against the real API | 0, 7.2, 7.5 |
 | B5 the job overwrites choices made while it runs | **Accepted.** `FOR UPDATE` and a re-plan after detection, guarded deletes, upserts that never write user fields, and the rejection re-check under the leg lock | 4.2, ADR 0028, ADR 0029 |
 | S1 series identity holes | **Accepted.** A label implies `confirmed`. The tie rule prefers user-stated series, and the takeover rule moves state to the detection | 2.5, ADR 0028 points 1–2 |
@@ -1652,7 +1714,7 @@ run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026�
 | 7 provenance wording | **Accepted**, for `apply_transfer_link` too | 4.5 |
 | 8 step 2 never writes pairs; leftover inference | **Accepted** | 2.4, ADR 0026 point 4 |
 | 9 derived-row FKs include `household_id` | **Accepted**, for every leg column of every derived table | 3.0, 3.3, 3.4 |
-| 10 supersede re-points rejections | **Accepted.** Revision 2 used a trigger. Revision 3 uses the Phase 2 clause's step 7, in the writer's unit of work, plus a session rule: household-wide, or a loser inserted in the same unit of work | 4.4 |
+| 10 supersede re-points rejections | **Accepted.** The writer half is PHASE-2 §3.3. The trigger half is Phase 4's `transaction_supersede_repoint`: household-wide, in the same statement, both directions, so it moves rows the session can't see. Revision 3's session rule is withdrawn | 3.3, 4.4 |
 | 11 M1 downgrade; `rule_scope_guard` on author | **Accepted** | 3.1 |
 | 12 `repr=False`; audit details; `rule.applied {count}` | **Accepted.** Decision: no count for any scope, because `any` rules also touch the author's private rows | 2.3, 4.5 |
 | 13 `recurring_series` UPDATE policy | **Accepted** | 3.4 |
@@ -1684,3 +1746,12 @@ run its reverse in a household-wide job (4.4). Phase 4's ADRs are 0024 and 0026�
 | Earlier-blocker note: the re-check must be a separate statement | **Accepted** | 4.2 |
 | Recurring before transfers | **Accepted as a line in ADR 0028** (the all-transfers rule). The order is kept; Keel may swap it (7.1) | 2.5, 7.1, ADR 0028 |
 | Shortest path to one working screen | **Accepted.** C3c → C6a → W1 → live redeploy comes first. C6a doesn't depend on A1, and the shared files and their split are named | 7.1 |
+
+### 11.6 Bulwark, round 3 (review of `cc7949d`)
+| Item | Response | Where |
+|---|---|---|
+| Must-fix 1, the run-time budget | **Accepted as written.** Point 8's bound sentences are replaced, and point 9 ("Run-time budget, fail closed") is added. The 503 `rules_too_slow` code, the `rule_notice` field and the C3e tests are in. Re-measured, with the C3d probe additions (adjacent literal runs, no literal cap), Bulwark's four new evaders are also rejected at save: 111, 78, 65 and 79 µs worst family. The budget stays the hard stop regardless, because a trigger can be any sub-pattern | ADR 0024 points 8–9; 2.2; 4.4; 5.2; 7.3 C3d, C3e |
+| Must-fix 2, the lock mode | **Accepted as written:** `FOR NO KEY UPDATE`, everywhere A1 locked `FOR UPDATE` | 4 (A1 row), 4.2, 5.0, 7.3 A1, ADR 0027 point 7 |
+| Ruling, `transfer_link_guard` | **Recorded:** a full column comparison, `job` → `person` only, `search_path` pinned. The residual is recorded: the zero-row silent UPDATE, rare and reversible | 3.3, ADR 0027 point 2 |
+| Slice notes | **All accepted:** C3d corpus and families; C4d step 0(d) only on `person` links, `job`-link declines under (c), decline needs an `open` offer; `clear_rule_categories` filters `superseded_by_id`; the shared limiter; the C4c guard test | 4.1, 4.4, 4.5, 5.2, 5.3, 7.3 |
+| Cross-contract, PHASE-2 §3.3 round 3 | **Applied, items 1–11 of the supersede-clause note.** The trigger returns in M3 with both branches, and M4 moves members in both. Revision 3's statement that un-adopt's reverse must run household-wide from C4c on is **withdrawn**. The household-wide trigger moves the derived rows whoever calls, and `unsupersede_transaction` clears the winner's transfer state before `remove_external`, with `409 unadopt_blocked` otherwise. Phase 4 adds one thing to the Phase 2 text: the trigger also deletes `transfer_leg_offer` rows, a Phase 4 table | D15, 3, 3.3, 3.4, 4, 4.4, 4.5, 7.1, 7.3, 7.6, 11 |
