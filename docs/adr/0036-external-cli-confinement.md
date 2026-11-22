@@ -153,9 +153,9 @@ These stay open until the target in point 7 exists:
 - **The whole internet.** The shared network namespace lets a worker send anything in its view
   to any host. The view holds no real data, but it does hold the repo, the worker's own vendor
   session and anything a worker command prints.
-- **Loopback TCP ports.** The worker shares the host's loopback. As of 2026-11-22 the dev Redis
-  listens on loopback with no auth. PR #66, still open, adds a password. Until then a worker could
-  read or write the job queue. That damage is bounded:
+- **Loopback TCP ports.** The worker shares the host's loopback. Since PR #66 the dev Redis
+  requires a password (it lives in the hidden `.env`). A worker without it can't reach the job
+  queue. Even with it, the damage is bounded:
   the runner treats the Redis payload as untrusted, claims only `job_run` rows that already
   exist, and runs the payload stored in `job_run` (`backend/app/jobs/runner.py`, ADR 0016). So a
   worker could drop, replay or delay jobs, but it couldn't inject one. The dev Postgres is behind
@@ -176,8 +176,9 @@ These stay open until the target in point 7 exists:
   trigger in point 7.
 - **Grok read workers have a shell with permissions bypassed.** Removing its two edit tools
   doesn't stop it writing through the shell. "Read" for Grok is a role, not a capability.
-- **Codex's own sandbox is unverified on loopback and Unix sockets.** We haven't tested what it
-  allows there, so we don't count it as a layer.
+- **Codex's own sandbox is only partly verified.** Its filesystem side was checked: under
+  `workspace-write`, writes to `$HOME` and `fnm_multishells` were refused. Loopback and Unix
+  sockets remain untested, so we don't count it as a layer there.
 - **Some rules are only in the prompt.** "Do not commit, push or merge" and the lane limits are
   instructions. Hidden credential stores and Git prompt sockets make a push unlikely to
   authenticate. But no Git host identity limits a credential a worker might find. ADR 0013's
