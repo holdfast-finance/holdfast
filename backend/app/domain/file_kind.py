@@ -63,3 +63,28 @@ def detect_file_kind(head: bytes) -> FileKind | None:
     if text and any(d in text for d in _DELIMITERS):
         return "csv"
     return None
+
+
+class WideTextGuard:
+    """Checks a UTF-16/32 upload chunk by chunk: it must decode and hold no control characters.
+
+    An incremental decoder keeps a character split across two chunks whole. ``feed`` returns
+    False for a chunk that does not decode or holds a control character; ``finish`` for a
+    truncated final character.
+    """
+
+    def __init__(self, head: bytes) -> None:
+        codec = "utf-32" if head.startswith(_WIDE_BOMS[:2]) else "utf-16"
+        self._decoder = codecs.getincrementaldecoder(codec)(errors="strict")
+
+    def feed(self, chunk: bytes) -> bool:
+        try:
+            return _CONTROL_TEXT.search(self._decoder.decode(chunk)) is None
+        except UnicodeError:
+            return False
+
+    def finish(self) -> bool:
+        try:
+            return _CONTROL_TEXT.search(self._decoder.decode(b"", final=True)) is None
+        except UnicodeError:
+            return False

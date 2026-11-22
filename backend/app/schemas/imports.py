@@ -50,6 +50,17 @@ class ImportRunPage(Model):
     next_cursor: str | None
 
 
+class ImportAccountOut(Model):
+    """An import account a CSV or OFX can be added to."""
+
+    id: uuid.UUID
+    name: str
+    type: Literal["bank", "card"]
+    mask: str | None
+    currency: str
+    joint: bool
+
+
 class ImportBlockOut(ReconcileNumbers):
     """One account's block of the uploaded statement."""
 

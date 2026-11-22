@@ -19,7 +19,13 @@ from app.domain.csv_parse import csv_profile_from_mapping
 from app.models import Account, AuditLog, Document, ImportRun, Transaction
 from app.services import imports
 from tests.api.conftest import Owner
-from tests.api.test_imports import count, other_household, pdf_bytes, stored_files
+from tests.api.test_imports import (
+    count,
+    member_client,
+    other_household,
+    pdf_bytes,
+    stored_files,
+)
 from tests.importers.test_statement_profiles import DEBIT
 
 HEADER = "Example Posting Date,Example Payee,Example Net Amount,Example Running Balance\n"
@@ -66,8 +72,13 @@ async def up(
     data: bytes,
     name: str = "export.csv",
     content_type: str = "text/csv",
+    **fields: str,
 ) -> httpx.Response:
-    return await client.post("/api/imports/statements", files={"file": (name, data, content_type)})
+    """Upload as a new bank account unless the caller names another target."""
+    form = {"account": "new", "account_kind": "bank", **fields}
+    return await client.post(
+        "/api/imports/statements", files={"file": (name, data, content_type)}, data=form
+    )
 
 
 async def amounts(app: FastAPI, hid: uuid.UUID) -> list[Decimal]:
@@ -152,10 +163,13 @@ async def test_an_overlapping_csv_adds_only_new_rows_and_still_reconciles(
     app: FastAPI, owner: Owner
 ) -> None:
     hid = uuid.UUID(owner.household["id"])
-    await up(owner.client, CSV_A.encode(), "a.csv")
-    r = await up(owner.client, CSV_B.encode(), "b.csv")
+    first = await up(owner.client, CSV_A.encode(), "a.csv")
+    # The re-export goes into the account the first file made: that is what dedupes it.
+    account = first.json()["blocks"][0]["account_id"]
+    r = await up(owner.client, CSV_B.encode(), "b.csv", account=account)
     assert r.status_code == 200, r.text
     (block,) = r.json()["blocks"]
+    assert r.json()["notice"] is None
     # The same-day twin coffees keep distinct ordinals, so neither is lost or doubled.
     assert (block["rows_parsed"], block["rows_inserted"], block["rows_duplicate"]) == (4, 1, 3)
     assert block["reconcile_status"] == "reconciled"
@@ -320,41 +334,300 @@ async def test_refusals_are_audited_by_reason_code_only(app: FastAPI, owner: Own
 # --------------------------------------------------------------------------- overlap and tenancy
 
 
-async def test_a_csv_overlapping_a_pdf_import_lands_in_its_own_account(
+OVERLAP = (
+    HEADER
+    + "2019-03-04,Example Deposit One,800.00,800.00\n"
+    + "2019-03-07,Example Withdrawal One,-20.00,780.00\n"
+)
+
+
+async def test_a_csv_into_a_new_account_warns_that_it_may_repeat_pdf_rows(
     app: FastAPI, owner: Owner
 ) -> None:
-    """Pins today's rule: accounts are keyed by profile, so a CSV never merges with a PDF's.
-
-    Fingerprints dedupe only inside one account. The same real purchase present in a PDF and in
-    a CSV is therefore stored twice, in two accounts, and is not double-counted *within* either.
-    Following the CSV with the PDF's rows again changes nothing.
-    """
+    """Choosing "new" next to a PDF's account keeps the two apart and says so."""
     hid = uuid.UUID(owner.household["id"])
     pdf = await up(owner.client, pdf_bytes(DEBIT), "debit.pdf", "application/pdf")
     assert pdf.status_code == 200, pdf.text
     pdf_rows = await count(app, hid, Transaction)
-    csv_overlap = (
-        HEADER
-        + "2019-03-04,Example Deposit One,800.00,800.00\n"
-        + "2019-03-07,Example Withdrawal One,-20.00,780.00\n"
-    )
-    r = await up(owner.client, csv_overlap.encode())
+    r = await up(owner.client, OVERLAP.encode())
     assert r.status_code == 200, r.text
     (block,) = r.json()["blocks"]
-    # The user is told, in the result, that this went into its own account.
-    assert pdf.json()["notice"] is None
+    assert (block["rows_inserted"], block["rows_duplicate"]) == (2, 0)
     assert "own new account" in r.json()["notice"]
     assert "repeat transactions" in r.json()["notice"]
-    assert (block["rows_inserted"], block["rows_duplicate"]) == (2, 0)
     assert await count(app, hid, Transaction) == pdf_rows + 2
-    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
-        accounts = (await s.execute(select(Account.external_account_id))).scalars().all()
-    assert any(a.startswith("csv-generic:") for a in accounts)
-    assert len(accounts) == len(set(accounts))
     # Replaying either file still adds nothing.
-    assert (await up(owner.client, csv_overlap.encode())).json()["notice"] is None
+    again = await up(owner.client, OVERLAP.encode())
+    assert again.json()["notice"] is None
     await up(owner.client, pdf_bytes(DEBIT), "debit.pdf", "application/pdf")
     assert await count(app, hid, Transaction) == pdf_rows + 2
+
+
+async def test_a_csv_can_be_added_to_the_matching_pdf_account_without_double_counting(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    await up(owner.client, pdf_bytes(DEBIT), "debit.pdf", "application/pdf")
+    pdf_rows = await count(app, hid, Transaction)
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        target = (
+            await s.execute(
+                select(Transaction.account_id).where(
+                    Transaction.description_raw.like("Example Deposit One%")
+                )
+            )
+        ).scalar_one()
+    listed = (await owner.client.get("/api/imports/accounts")).json()
+    assert str(target) in {a["id"] for a in listed}
+    r = await up(owner.client, OVERLAP.encode(), account=str(target))
+    assert r.status_code == 200, r.text
+    (block,) = r.json()["blocks"]
+    assert block["account_id"] == str(target)
+    assert (block["rows_inserted"], block["rows_duplicate"]) == (0, 2)
+    assert block["reconcile_status"] == "reconciled"
+    assert r.json()["notice"] is None
+    assert await count(app, hid, Transaction) == pdf_rows
+    # The same bytes sent to a different account are not imported a second time.
+    other = await up(owner.client, OVERLAP.encode())
+    assert other.json()["created"] is False
+    assert await count(app, hid, Transaction) == pdf_rows
+
+
+# --------------------------------------------------------------------------- targets (Bulwark H1)
+
+
+async def test_two_people_uploading_the_same_profile_get_separate_accounts(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    mine = await up(owner.client, CSV_A.encode())
+    assert mine.status_code == 200, mine.text
+    async with await member_client(app, hid) as sam:
+        theirs = await up(sam, CSV_B.encode())
+        assert theirs.status_code == 200, theirs.text
+        assert theirs.json()["blocks"][0]["account_id"] != mine.json()["blocks"][0]["account_id"]
+        # Sam cannot see, or write into, the owner's account: one answer for both.
+        assert (await sam.get("/api/imports/accounts")).json()[0]["id"] == (
+            theirs.json()["blocks"][0]["account_id"]
+        )
+        into = await up(
+            sam,
+            CSV_B.replace("Rent", "Gas").encode(),
+            account=mine.json()["blocks"][0]["account_id"],
+        )
+        ghost = await up(sam, CSV_B.replace("Rent", "Oil").encode(), account=str(uuid.uuid4()))
+    assert into.status_code == ghost.status_code == 409
+    assert into.json() == ghost.json()
+    assert await count(app, hid, Account) == 2
+    assert await count(app, hid, Transaction) == 3 + 4
+
+
+async def test_one_person_importing_checking_then_card_keeps_equal_rows_apart(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    checking = await up(owner.client, CSV_A.encode(), account_kind="bank")
+    # The card export holds the same dated rows plus one: same fingerprints, other account.
+    card = await up(owner.client, CSV_B.encode(), account_kind="card")
+    assert card.status_code == 200, card.text
+    (block,) = card.json()["blocks"]
+    assert (block["rows_inserted"], block["rows_duplicate"]) == (4, 0)
+    assert block["reconcile_status"] == "reconciled"
+    assert block["account_id"] != checking.json()["blocks"][0]["account_id"]
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        types = sorted((await s.execute(select(Account.type))).scalars().all())
+    assert types == ["credit", "depository"]
+    assert await count(app, hid, Transaction) == 3 + 4
+
+
+async def test_a_csv_must_name_its_account_and_a_new_one_its_kind(owner: Owner) -> None:
+    bare = await owner.client.post(
+        "/api/imports/statements", files={"file": ("a.csv", CSV_A.encode(), "text/csv")}
+    )
+    assert bare.status_code == 422
+    nokind = await owner.client.post(
+        "/api/imports/statements",
+        files={"file": ("a.csv", CSV_A.encode(), "text/csv")},
+        data={"account": "new"},
+    )
+    assert nokind.status_code == 422
+    junk = await up(owner.client, CSV_A.encode(), account="not-a-uuid")
+    assert junk.status_code == 422
+
+
+async def test_a_principal_with_no_person_must_choose_a_joint_account(
+    app: FastAPI, owner: Owner
+) -> None:
+    from types import SimpleNamespace
+
+    from app.importers.export_statement import csv_statement
+    from app.importers.profile_loader import load_csv_profiles
+    from app.services.imports import ImportService, UploadFields, UploadRefused
+    from app.services.statement_import import (
+        AccountTarget,
+        AccountTargetError,
+        DocumentMeta,
+        import_statement,
+    )
+
+    service = ImportService(None, SimpleNamespace(person_id=None))  # type: ignore[arg-type]
+    with pytest.raises(UploadRefused) as refused:
+        service._target("csv", UploadFields(account="new", account_kind="bank"), "a" * 64)
+    assert refused.value.reason == "joint_not_chosen"
+    chosen = service._target("csv", UploadFields("new", "bank", "1"), "a" * 64)
+    assert chosen is not None and chosen.joint
+
+    hid = uuid.UUID(owner.household["id"])
+    statement = csv_statement(CSV_A.encode(), load_csv_profiles())
+    assert statement is not None
+    meta = DocumentMeta("b" * 64, "a.csv", f"statements/{hid}/{'b' * 64}.csv", 10, "text/csv")
+    factory = app.state.session_factory
+    with pytest.raises(AccountTargetError):  # nothing chosen: no joint account by default
+        await import_statement(
+            factory, hid, statement, meta, person_id=None, target=AccountTarget()
+        )
+    done = await import_statement(
+        factory,
+        hid,
+        statement,
+        meta,
+        person_id=None,
+        target=AccountTarget(joint=True, new_token="t"),
+    )
+    assert done.rows_inserted == 3
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        acct = (await s.execute(select(Account))).scalar_one()
+    assert (acct.owner_person_id, acct.visibility) == (None, "shared")
+
+
+async def test_ofx_bank_and_card_with_the_same_last_four_are_different_accounts(
+    app: FastAPI, owner: Owner
+) -> None:
+    hid = uuid.UUID(owner.household["id"])
+    card_txns = (
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<FITID>k1<NAME>Example Books"
+        "<BALAMT>-7.00</STMTTRN>\n"
+    )
+    bank = await up(owner.client, ofx(TXNS_WITH_BALANCES, acct="BANK-AAAA-0000"), "b.ofx", "")
+    card = await up(
+        owner.client, ofx(card_txns, closing="-7.00", acct="CARD-BBBB-0000", card=True), "c.ofx", ""
+    )
+    bank2 = await up(
+        owner.client, ofx(TXNS_WITH_BALANCES, acct="BANK-CCCC-0000", closing="9.50"), "d.ofx", ""
+    )
+    assert (bank.status_code, card.status_code, bank2.status_code) == (200, 200, 200)
+    ids = {r.json()["blocks"][0]["account_id"] for r in (bank, card, bank2)}
+    assert len(ids) == 3
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        accounts = (await s.execute(select(Account))).scalars().all()
+    assert sorted(a.type for a in accounts) == ["credit", "depository", "depository"]
+    assert all(
+        "BANK" not in a.external_account_id and "CARD" not in a.external_account_id
+        for a in accounts
+    )
+    # A re-export of the same real account (new bytes) lands in the same account.
+    again = await up(
+        owner.client, ofx(TXNS_WITH_BALANCES + "\n", acct="BANK-AAAA-0000"), "e.ofx", ""
+    )
+    assert again.json()["blocks"][0]["account_id"] == bank.json()["blocks"][0]["account_id"]
+    assert again.json()["blocks"][0]["rows_inserted"] == 0
+
+
+async def test_an_ofx_into_an_account_of_the_other_kind_is_refused(owner: Owner) -> None:
+    bank = await up(owner.client, OFX_GOOD, "b.ofx", "")
+    target = bank.json()["blocks"][0]["account_id"]
+    card_txns = (
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>-3.00<FITID>k1<NAME>Example Books"
+        "<BALAMT>-7.00</STMTTRN>\n"
+    )
+    r = await up(
+        owner.client, ofx(card_txns, closing="-7.00", card=True), "c.ofx", "", account=target
+    )
+    assert r.status_code == 409
+    assert "other kind" in r.json()["error"]["message"]
+
+
+# --------------------------------------------------------------------------- OFX signs and caps
+
+
+async def test_ofx_trntype_against_the_amount_sign_is_flagged(owner: Owner) -> None:
+    wrong = (
+        "<STMTTRN><DTPOSTED>20260102<TRNAMT>3.00<TRNTYPE>DEBIT<FITID>s1<NAME>Example Books"
+        "<BALAMT>13.00</STMTTRN>\n"
+        "<STMTTRN><DTPOSTED>20260103<TRNAMT>-2.50<TRNTYPE>CREDIT<FITID>s2<NAME>Example Refund"
+        "<BALAMT>10.50</STMTTRN>\n"
+    )
+    r = await up(owner.client, ofx(wrong, closing="10.50"), "s.ofx", "")
+    (block,) = r.json()["blocks"]
+    assert block["reconcile_status"] == "needs_review"
+    assert "sign_conflict" in block["reason"]
+    ok = TXNS_WITH_BALANCES.replace("<TRNAMT>-3.00", "<TRNAMT>-3.00<TRNTYPE>DEBIT")
+    r = await up(owner.client, ofx(ok, acct="EXAMPLE2222"), "ok.ofx", "")
+    assert r.json()["blocks"][0]["reconcile_status"] == "reconciled"
+    # On a card a PAYMENT is money in, not a debit.
+    pay = (
+        "<STMTTRN><DTPOSTED>20260105<TRNAMT>20.00<TRNTYPE>PAYMENT<FITID>p1<NAME>Example Thanks"
+        "<BALAMT>-80.00</STMTTRN>\n"
+        "<STMTTRN><DTPOSTED>20260106<TRNAMT>-5.00<TRNTYPE>POS<FITID>p2<NAME>Example Cafe"
+        "<BALAMT>-85.00</STMTTRN>\n"
+    )
+    r = await up(
+        owner.client, ofx(pay, closing="-85.00", acct="EXAMPLE3333", card=True), "p.ofx", ""
+    )
+    assert r.json()["blocks"][0]["reconcile_status"] == "reconciled"
+
+
+async def test_ofx_over_its_own_byte_cap_is_refused(owner: Owner, store: Path) -> None:
+    big = ofx(TXNS_WITH_BALANCES) + b" " * (imports.MAX_OFX_BYTES + 1)
+    r = await up(owner.client, big, "big.ofx", "")
+    assert r.status_code == 413
+    assert "5 MiB" in r.json()["error"]["message"]
+    assert stored_files(store) == []
+
+
+async def test_a_missing_import_id_key_refuses_an_ofx_and_audits_it(
+    app: FastAPI, owner: Owner
+) -> None:
+    app.state.settings.import_id_key = None
+    r = await up(owner.client, OFX_GOOD, "a.ofx", "")
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "server_error"
+    hid = uuid.UUID(owner.household["id"])
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        rows = (
+            (await s.execute(select(AuditLog).where(AuditLog.action == "import.upload_refused")))
+            .scalars()
+            .all()
+        )
+    assert [r.detail["reason"] for r in rows] == ["id_key_missing"]
+
+
+async def test_utf16_csv_is_accepted_but_not_with_control_characters(owner: Owner) -> None:
+    good = await up(owner.client, CSV_A.encode("utf-16"))
+    assert good.status_code == 200, good.text
+    assert good.json()["blocks"][0]["rows_inserted"] == 3
+    bad = await up(owner.client, CSV_B.replace("Rent", "Re\x01nt").encode("utf-16"), "b.csv")
+    assert bad.status_code == 422
+    # A NUL byte hidden after the first chunk of a UTF-16 file is still caught.
+    late = CSV_B.replace("Rent", "Gas").encode("utf-16") + ("x" * 70_000 + "\x00").encode(
+        "utf-16-le"
+    )
+    assert (await up(owner.client, late, "c.csv")).status_code == 422
+    truncated = CSV_B.replace("Rent", "Oil").encode("utf-16") + b"\x41"
+    assert (await up(owner.client, truncated, "d.csv")).status_code == 422
+
+
+async def test_the_duplicate_lookup_stays_under_the_database_parameter_limit(
+    app: FastAPI, owner: Owner
+) -> None:
+    from app.services.statement_import import _unexplained_duplicates
+
+    hid = uuid.UUID(owner.household["id"])
+    run = ImportRun(period_start=None, period_end=None)
+    async with scoped_session(app.state.session_factory, hid, None, household_wide=True) as s:
+        prints = [f"{i:064x}" for i in range(40_000)]  # more than asyncpg's 32767 limit
+        missing = await _unexplained_duplicates(s, uuid.uuid4(), uuid.uuid4(), run, prints)
+    assert missing == 40_000
 
 
 async def test_another_household_cannot_see_or_collide_with_a_csv_import(

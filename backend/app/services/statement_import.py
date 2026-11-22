@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,6 +32,7 @@ from app.models import Account, Document, ImportRun, Transaction
 from app.services.ledger_service import LedgerWriter, NewTransaction
 
 MASK_LEN = 4
+FINGERPRINT_CHUNK = 10_000
 
 
 @dataclass(frozen=True)
@@ -94,9 +96,48 @@ def stored_review_reason(run: ImportRun) -> str | None:
     return run.review_reason or infer_review_reason(run)
 
 
-def external_account_key(statement: ParsedStatement, block: ParsedBlock) -> str:
-    """Stable id of an imported account: profile, last four digits, block hash. No full number."""
-    return f"{statement.profile_id}:{block.account_last4 or 'none'}:{block.key}"
+@dataclass(frozen=True)
+class AccountTarget:
+    """Where a CSV or OFX goes (a PDF passes none: its account follows its profile).
+
+    ``account_id`` names an existing import account the uploader may write; otherwise a new
+    account is made and is the uploader's own (private), or joint only if ``joint`` is set.
+    ``new_token`` separates new accounts of a source that carries no account identity (a CSV).
+    ``kind_from_file`` means the file states bank vs card (OFX), so an existing account of the
+    other type is refused.
+    """
+
+    account_id: uuid.UUID | None = None
+    joint: bool = False
+    new_token: str | None = None
+    kind_from_file: bool = False
+
+
+class AccountTargetError(RuntimeError):
+    """The requested target can't be used. ``reason`` is a fixed code, never content."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def external_account_key(
+    statement: ParsedStatement,
+    block: ParsedBlock,
+    *,
+    person_id: uuid.UUID | None = None,
+    target: AccountTarget | None = None,
+) -> str:
+    """Stable id of an imported account: profile, last four digits, block key. No full number.
+
+    A CSV/OFX account (a ``target`` is given) also carries its owner, so two people never share
+    one, and a CSV its own token, since it has no account identity.
+    """
+    key = f"{statement.profile_id}:{block.account_last4 or 'none'}:{block.key}"
+    if target is None:
+        return key
+    owner = "joint" if target.joint or person_id is None else str(person_id)
+    return f"{key}:{owner}" + (f":{target.new_token}" if target.new_token else "")
 
 
 async def _document(
@@ -146,8 +187,35 @@ async def _account(
     statement: ParsedStatement,
     block: ParsedBlock,
     person_id: uuid.UUID | None,
+    target: AccountTarget | None = None,
+    household_wide: bool = False,
 ) -> Account:
-    key = external_account_key(statement, block)
+    if target is not None and target.account_id is not None:
+        chosen = (
+            await s.execute(
+                select(Account).where(
+                    Account.id == target.account_id,
+                    Account.household_id == household_id,
+                    Account.source == "import",
+                )
+            )
+        ).scalar_one_or_none()
+        owned_elsewhere = (
+            chosen is not None
+            and chosen.owner_person_id is not None
+            and chosen.owner_person_id != person_id
+            and not household_wide
+        )
+        if chosen is None or owned_elsewhere:
+            # One answer for "no such account" and "someone else's": no existence oracle.
+            raise AccountNotVisibleError("imported account is not visible to this session")
+        if target.kind_from_file and (chosen.type == "credit") != (statement.kind == "card"):
+            raise AccountTargetError("account_kind_mismatch")
+        return chosen
+    if target is not None and person_id is None and not target.joint and not household_wide:
+        raise AccountTargetError("joint_not_chosen")
+    joint = target is not None and (target.joint or person_id is None)
+    key = external_account_key(statement, block, person_id=person_id, target=target)
     where = (
         Account.household_id == household_id,
         Account.source == "import",
@@ -169,8 +237,8 @@ async def _account(
             type="credit" if statement.kind == "card" else "depository",
             # A person importing owns the account and it starts private (ADR 0008); the
             # household-wide job (no person) creates a joint, shared account.
-            owner_person_id=person_id,
-            visibility="private" if person_id else "shared",
+            owner_person_id=None if joint else person_id,
+            visibility="private" if person_id and not joint else "shared",
         )
         .on_conflict_do_nothing(
             index_elements=["household_id", "external_account_id"],
@@ -193,6 +261,7 @@ async def import_statement(
     *,
     person_id: uuid.UUID | None = None,
     household_wide: bool = False,
+    target: AccountTarget | None = None,
 ) -> ImportResult:
     """Persist ``statement``. One database transaction: a failure leaves nothing behind.
 
@@ -201,7 +270,11 @@ async def import_statement(
     """
     async with scoped_session(factory, household_id, person_id, household_wide=household_wide) as s:
         doc = await _document(s, household_id, meta, statement.profile_id, person_id)
-        elsewhere = await _runs_under_other_profile(s, doc.id, statement.profile_id)
+        # A CSV/OFX has a chosen account, so the same bytes sent to another account must not be
+        # imported twice: any earlier run of the document wins.
+        elsewhere = await _runs_under_other_profile(
+            s, doc.id, None if target is not None else statement.profile_id
+        )
         if elsewhere:
             # The same bytes were already imported under another profile. Their accounts are keyed
             # by profile, so importing again would copy every row into a second account and
@@ -215,9 +288,15 @@ async def import_statement(
             doc.import_review_latched = True
             await s.flush()
             return ImportResult(doc.id, (), balances_only=True)
+        if target is not None and target.account_id is not None and len(statement.blocks) != 1:
+            raise AccountTargetError("target_needs_single_account")
         results: list[BlockResult] = []
         for block in statement.blocks:
-            results.append(await _import_block(s, household_id, doc, statement, block, person_id))
+            results.append(
+                await _import_block(
+                    s, household_id, doc, statement, block, person_id, target, household_wide
+                )
+            )
         # A flagged run latches the document in the database (trigger), so decide once, after
         # every block, from fresh state: never write `parsed` over a latch.
         await s.refresh(doc)
@@ -229,7 +308,7 @@ async def import_statement(
 
 
 async def _runs_under_other_profile(
-    s: AsyncSession, document_id: uuid.UUID, profile_id: str
+    s: AsyncSession, document_id: uuid.UUID, profile_id: str | None
 ) -> list[BlockResult]:
     """The document's finished runs when none were made under ``profile_id``; else empty."""
     runs = (
@@ -247,7 +326,7 @@ async def _runs_under_other_profile(
         .scalars()
         .all()
     )
-    if not runs or any(r.profile == profile_id for r in runs):
+    if not runs or (profile_id is not None and any(r.profile == profile_id for r in runs)):
         return []
     return [
         BlockResult(
@@ -289,22 +368,27 @@ async def _unexplained_duplicates(
     """
     if not fingerprints:
         return 0
-    rows = (
-        await s.execute(
-            select(
-                Transaction.posted_date,
-                Transaction.import_run_id,
-                ImportRun.document_id,
-                ImportRun.period_start,
-                ImportRun.period_end,
-            )
-            .outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
-            .where(
-                Transaction.account_id == account_id,
-                Transaction.import_fingerprint.in_(fingerprints),
-            )
+    rows: list[Any] = []
+    # asyncpg allows 32767 bind parameters per statement: look up in chunks.
+    for i in range(0, len(fingerprints), FINGERPRINT_CHUNK):
+        rows.extend(
+            (
+                await s.execute(
+                    select(
+                        Transaction.posted_date,
+                        Transaction.import_run_id,
+                        ImportRun.document_id,
+                        ImportRun.period_start,
+                        ImportRun.period_end,
+                    )
+                    .outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
+                    .where(
+                        Transaction.account_id == account_id,
+                        Transaction.import_fingerprint.in_(fingerprints[i : i + FINGERPRINT_CHUNK]),
+                    )
+                )
+            ).all()
         )
-    ).all()
     mine = _window(run.period_start, run.period_end)
     bad = len(fingerprints) - len(rows)  # skipped but not found: cannot explain
     for posted, run_id, doc_id, p_start, p_end in rows:
@@ -328,8 +412,10 @@ async def _import_block(
     statement: ParsedStatement,
     block: ParsedBlock,
     person_id: uuid.UUID | None,
+    target: AccountTarget | None = None,
+    household_wide: bool = False,
 ) -> BlockResult:
-    acct = await _account(s, household_id, statement, block, person_id)
+    acct = await _account(s, household_id, statement, block, person_id, target, household_wide)
     prior = (
         (
             await s.execute(

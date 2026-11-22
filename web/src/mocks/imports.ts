@@ -1,6 +1,6 @@
 import Decimal from 'decimal.js'
 
-import type { ImportBlock, ImportResult, ImportRun } from '@/api/imports'
+import type { ImportAccount, ImportBlock, ImportResult, ImportRun } from '@/api/imports'
 import { LEDGER_IDS } from '@/mocks/ledger'
 import { db, now } from '@/mocks/db'
 
@@ -179,7 +179,41 @@ export function seedImportRuns({ empty = false }: { empty?: boolean } = {}): voi
 }
 
 /** Build the response for an upload, record the run, and remember the file. */
-export function importFile(filename: string, content: string): ImportResult {
+const SEPARATE_ACCOUNT_NOTICE =
+  'This file went into its own new account. It is not matched to accounts from your ' +
+  'statements, so it may repeat transactions you already imported from them.'
+
+function kindOf(filename: string): ImportResult['file_kind'] {
+  if (/\.csv$/i.test(filename)) return 'csv'
+  return /\.(ofx|qfx)$/i.test(filename) ? 'ofx' : 'pdf'
+}
+
+export const MOCK_IMPORT_ACCOUNTS: ImportAccount[] = [
+  {
+    id: LEDGER_IDS.checking,
+    name: 'Everyday checking',
+    type: 'bank',
+    mask: '1111',
+    currency: 'USD',
+    joint: false,
+  },
+  {
+    id: LEDGER_IDS.card,
+    name: 'Sample travel card',
+    type: 'card',
+    mask: '2222',
+    currency: 'USD',
+    joint: false,
+  },
+]
+
+export function importFile(
+  filename: string,
+  content: string,
+  account: string = 'new',
+): ImportResult {
+  const fileKind = kindOf(filename)
+  const hadAccounts = db.importRuns.length > 0
   const key = `${filename}\n${content}`
   const already = db.importedFiles.includes(key)
   const scenario = `${filename} ${content}`
@@ -238,7 +272,8 @@ export function importFile(filename: string, content: string): ImportResult {
   return {
     document_id: documentId,
     filename,
-    file_kind: 'pdf',
+    file_kind: fileKind,
+    notice: fileKind !== 'pdf' && account === 'new' && hadAccounts ? SEPARATE_ACCOUNT_NOTICE : null,
     created: !already,
     balances_only: false,
     balances: [],

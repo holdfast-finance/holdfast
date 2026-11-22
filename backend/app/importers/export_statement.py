@@ -14,18 +14,23 @@ from app.domain.ofx_parse import OfxStatement, parse_ofx
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, StatementParseError
 
 OFX_PROFILE_ID = "ofx"
+MAX_ROWS = 50_000  # per file; far above a real export, and bounds every later per-row query
 
 
 def _span(dates: list[date], start: date | None, end: date | None) -> tuple[date | None, date]:
     """The statement period: declared dates, else the first and last posting."""
     if not dates:
         raise StatementParseError("no transactions")
+    if len(dates) > MAX_ROWS:
+        raise StatementParseError("too many rows")
     lo = start or min(dates)
     hi = end or max(dates)
     return min(lo, hi), hi
 
 
-def csv_statement(source: bytes, profiles: list[tuple[str, CsvProfile]]) -> ParsedStatement | None:
+def csv_statement(
+    source: bytes, profiles: list[tuple[str, CsvProfile]], kind: str = "bank"
+) -> ParsedStatement | None:
     """Parse with the first profile whose header and rows fit, else ``None``."""
     for profile_id, profile in profiles:
         try:
@@ -46,7 +51,7 @@ def csv_statement(source: bytes, profiles: list[tuple[str, CsvProfile]]) -> Pars
         return ParsedStatement(
             profile_id=profile_id,
             institution=f"Imported CSV ({profile_id.removeprefix('csv-')})",
-            kind="bank",
+            kind=kind,
             period_start=start,
             period_end=end,
             blocks=(block,),
@@ -72,7 +77,7 @@ def ofx_statement(source: bytes, id_key: bytes) -> ParsedStatement:
         ends.append(hi)
         blocks.append(
             ParsedBlock(
-                key=s.currency.lower(),
+                key=s.account_token,
                 account_last4=s.account_last4,
                 opening_balance=s.opening_balance,
                 closing_balance=s.closing_balance,

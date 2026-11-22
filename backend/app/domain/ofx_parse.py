@@ -28,6 +28,9 @@ _CLOSER = re.compile(r"</([A-Z][A-Z0-9_.-]*)>")
 # Only this much of a file is searched for its encoding. Every pattern below is anchored or made of
 # non-overlapping, length-bounded classes, so the scan is linear in these bytes, whatever follows.
 _SNIFF_BYTES = 1024
+MAX_OFX_TAGS = 200_000  # a statement of 50k rows has a few dozen tags each at most
+_DEBIT_TYPES = frozenset({"DEBIT", "CHECK", "PAYMENT", "ATM", "POS", "FEE", "SRVCHG"})
+_CREDIT_TYPES = frozenset({"CREDIT", "DEP", "DIRECTDEP", "INT"})
 _XML_DECL = re.compile(rb"[ \t\r\n]*<\?xml\b")
 _XML_ENCODING = re.compile(
     rb"""encoding[ \t\r\n]{0,8}=[ \t\r\n]{0,8}['"]([A-Za-z0-9._-]{1,40})['"]"""
@@ -58,6 +61,9 @@ class OfxStatement(TransactionExport):
     ledger_as_of: date | None = None  # LEDGERBAL DTASOF: when the closing balance was struck
     corrections: tuple[OfxCorrection, ...] = ()
     kind: str = "bank"  # "card" for a CCSTMTRS statement
+    # Keyed token of the statement kind, BANKID and the full ACCTID: identifies the real account
+    # without storing any digits (the last four are only for display).
+    account_token: str = ""
 
 
 def _decode(source: str | bytes) -> str:
@@ -92,6 +98,8 @@ def _decode(source: str | bytes) -> str:
 
 
 def _tree(text: str) -> ET.Element:
+    if text.count("<") > MAX_OFX_TAGS:
+        raise StatementParseError("OFX has too many elements")
     if "\x00" in text or _DECLARATION.search(text):
         raise StatementParseError("OFX disallows DOCTYPE and ENTITY declarations and NUL bytes")
     text = text.lstrip()
@@ -171,6 +179,9 @@ def _statement(
 ) -> OfxStatement:
     account_tag = "BANKACCTFROM" if element.tag == "STMTRS" else "CCACCTFROM"
     account = _value(element, f"{account_tag}/ACCTID", required=True)
+    bank_id = _value(element, f"{account_tag}/BANKID")
+    kind = "bank" if element.tag == "STMTRS" else "card"
+    account_token = external_id_token(f"{kind}:{bank_id}:{account}", id_key)
     currency = _value(element, "CURDEF", required=True).upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise StatementParseError("invalid OFX currency")
@@ -214,6 +225,13 @@ def _statement(
                         )
                     )
                     continue
+                trn_type = _value(txn, "TRNTYPE").upper()
+                # A card PAYMENT is money in (it lowers what is owed), a bank PAYMENT is out.
+                debit_types = _DEBIT_TYPES - {"PAYMENT"} if kind == "card" else _DEBIT_TYPES
+                if (trn_type in debit_types and amount > 0) or (
+                    trn_type in _CREDIT_TYPES and amount < 0
+                ):
+                    rows.flag("sign_conflict")
                 description = _value(txn, "NAME") or _value(txn, "MEMO")
                 rows.add(
                     posted,
@@ -256,7 +274,8 @@ def _statement(
         period_end=period_end,
         ledger_as_of=ledger_as_of,
         corrections=tuple(corrections),
-        kind="bank" if element.tag == "STMTRS" else "card",
+        kind=kind,
+        account_token=account_token,
     )
 
 

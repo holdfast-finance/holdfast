@@ -32,6 +32,7 @@ from alembic.config import Config
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
+from pydantic import SecretStr
 from redis.asyncio import Redis
 from sqlalchemy import Engine, create_engine, text, update
 
@@ -120,6 +121,7 @@ def settings(api_db_url: str, api_redis_url: str) -> Settings:
         database_url=api_db_url,
         redis_url=api_redis_url,
         fernet_key=generate_key(),
+        import_id_key=SecretStr("synthetic-import-id-key-for-tests-0123456789"),
     )
 
 
