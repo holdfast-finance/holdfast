@@ -34,10 +34,12 @@ import {
   type ScenarioError,
 } from '@/mocks/imports'
 import {
+  categoryExists,
   decodeCursor,
   encodeCursor,
   filterFromParams,
   matching,
+  MOCK_CATEGORIES,
   newestFirst,
   totalsByCurrency,
 } from '@/mocks/ledger'
@@ -792,6 +794,31 @@ export const handlers = [
       if (scenario.includes('balances')) return HttpResponse.json(balancesOnlyResult(name))
       const account = /name="account"\r\n\r\n([^\r]*)/.exec(raw)?.[1] ?? 'new'
       return HttpResponse.json(importFile(name, content, account))
+    }),
+  ),
+  http.get(
+    path('/categories'),
+    authed(() => HttpResponse.json({ items: MOCK_CATEGORIES })),
+  ),
+  http.put(
+    path('/transactions/:id/category'),
+    authed(async ({ request, params }) => {
+      const row = db.transactions.find((t) => t.id === params.id)
+      if (!row || !row.can_edit) return apiError('not_found', "That transaction wasn't found.")
+      const categoryId = str(await readJson(request), 'category_id')
+      if (!categoryExists(categoryId)) return apiError('not_found', "That category wasn't found.")
+      row.category_id = categoryId
+      row.category_source = 'user'
+      return HttpResponse.json(row)
+    }),
+  ),
+  http.post(
+    path('/transactions/:id/category/release'),
+    authed(({ params }) => {
+      const row = db.transactions.find((t) => t.id === params.id)
+      if (!row || !row.can_edit) return apiError('not_found', "That transaction wasn't found.")
+      row.category_source = null
+      return HttpResponse.json(row)
     }),
   ),
   http.get(

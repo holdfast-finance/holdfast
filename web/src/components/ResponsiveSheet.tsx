@@ -7,6 +7,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { cn } from '@/lib/utils'
 import { useIsDesktop } from '@/hooks/useBreakpoint'
 
 /** Bottom sheet on phones, side sheet on desktop. Used instead of modals (frontend rules). */
@@ -30,7 +31,10 @@ export function ResponsiveSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side={isDesktop ? 'right' : 'bottom'}
-        className="max-h-[90dvh] gap-5 overflow-y-auto p-5 pb-[max(2rem,env(safe-area-inset-bottom))]"
+        className={cn(
+          'gap-5 overflow-y-auto p-5 pb-[max(2rem,env(safe-area-inset-bottom))]',
+          !isDesktop && 'max-h-[90dvh]',
+        )}
         onCloseAutoFocus={onCloseAutoFocus}
         onOpenAutoFocus={(event) => {
           // Don't focus the first field: on iOS that pops the keyboard over the sheet.

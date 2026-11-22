@@ -1,6 +1,12 @@
 import Decimal from 'decimal.js'
 
-import type { Account, CurrencyTotals, Transaction, TransactionFilters } from '@/api/ledger'
+import type {
+  Account,
+  CategoryNode,
+  CurrencyTotals,
+  Transaction,
+  TransactionFilters,
+} from '@/api/ledger'
 import { db } from '@/mocks/db'
 
 /*
@@ -16,6 +22,55 @@ export const LEDGER_IDS = {
   euro: '00000000-0000-4000-8000-00000000a004',
   hidden: '00000000-0000-4000-8000-00000000a005',
 } as const
+
+const cat = (n: number) => `00000000-0000-4000-8000-0000000c${String(n).padStart(4, '0')}`
+
+export const CATEGORY_IDS = {
+  food: cat(1),
+  groceries: cat(2),
+  dining: cat(3),
+  home: cat(4),
+  hardware: cat(5),
+  income: cat(6),
+  paycheque: cat(7),
+  fun: cat(8),
+  hidden: cat(9),
+} as const
+
+const node = (
+  id: string,
+  slug: string,
+  name: string,
+  kind: CategoryNode['kind'],
+  children: CategoryNode[] = [],
+  is_hidden = false,
+): CategoryNode => ({
+  id,
+  slug,
+  name,
+  kind,
+  children,
+  is_hidden,
+  is_essential: false,
+  counts_toward_spending: kind === 'expense',
+  origin: 'system',
+})
+
+/** The mock category tree: two levels, one hidden category, invented names. */
+export const MOCK_CATEGORIES: CategoryNode[] = [
+  node(CATEGORY_IDS.food, 'food', 'Food', 'expense', [
+    node(CATEGORY_IDS.groceries, 'groceries', 'Groceries', 'expense'),
+    node(CATEGORY_IDS.dining, 'dining', 'Dining out', 'expense'),
+  ]),
+  node(CATEGORY_IDS.home, 'home', 'Home', 'expense', [
+    node(CATEGORY_IDS.hardware, 'hardware', 'Hardware', 'expense'),
+  ]),
+  node(CATEGORY_IDS.income, 'income', 'Income', 'income', [
+    node(CATEGORY_IDS.paycheque, 'paycheck', 'Paycheck', 'income'),
+  ]),
+  node(CATEGORY_IDS.fun, 'fun', 'Fun', 'expense'),
+  node(CATEGORY_IDS.hidden, 'old', 'Retired category', 'expense', [], true),
+]
 
 const ACCOUNTS: Omit<
   Account,
@@ -135,6 +190,20 @@ function filler(count: number): Row[] {
   })
 }
 
+/** A few rows start categorised (by each source) so the chips and filters have something to show. */
+function seedCategory(description: string): Pick<Transaction, 'category_id' | 'category_source'> {
+  switch (description) {
+    case 'Payroll deposit Example Co':
+      return { category_id: CATEGORY_IDS.paycheque, category_source: 'rule' }
+    case 'Harbor Grocers':
+      return { category_id: CATEGORY_IDS.groceries, category_source: 'user' }
+    case 'Brightside Bakery':
+      return { category_id: CATEGORY_IDS.dining, category_source: 'plaid' }
+    default:
+      return { category_id: null, category_source: null }
+  }
+}
+
 export interface SeedLedgerOptions {
   /** Extra filler rows on the checking account (default 60, so the list needs a second page). */
   filler?: number
@@ -165,10 +234,10 @@ export function seedLedger({
       import_reconcile_status: null,
       needs_review: description === 'Fernwood Bookshop',
       merchant_key: null,
-      category_id: null,
-      category_source: null,
+      ...seedCategory(description),
       has_splits: false,
-      can_edit: true,
+      // The travel card belongs to someone else in the household: read-only for this person.
+      can_edit: account !== 'card',
     }
   })
   db.accounts = ACCOUNTS.map((a) => {
@@ -198,6 +267,10 @@ export function filterFromParams(params: URLSearchParams): TransactionFilters {
     min_amount: params.get('min_amount'),
     max_amount: params.get('max_amount'),
     exclude_transfers: params.get('exclude_transfers') === 'true',
+    category_id: params.getAll('category_id'),
+    uncategorized: params.get('uncategorized') === 'true',
+    category_source: params.get('category_source') as TransactionFilters['category_source'],
+    transfer: params.get('transfer') as TransactionFilters['transfer'],
   }
 }
 
@@ -214,6 +287,13 @@ export function matching(f: TransactionFilters): Transaction[] {
     if (f.min_amount && amount.lt(f.min_amount)) return false
     if (f.max_amount && amount.gt(f.max_amount)) return false
     if (f.exclude_transfers && t.is_transfer) return false
+    if (f.transfer === 'only' && !t.is_transfer) return false
+    if (f.transfer === 'exclude' && t.is_transfer) return false
+    if (f.category_id && f.category_id.length > 0) {
+      if (!t.category_id || !f.category_id.includes(t.category_id)) return false
+    }
+    if (f.uncategorized && t.category_id) return false
+    if (f.category_source && t.category_source !== f.category_source) return false
     return true
   })
 }
@@ -261,4 +341,10 @@ export function totalsByCurrency(rows: Transaction[]): CurrencyTotals[] {
       net: e.inflow.plus(e.outflow).toFixed(2),
       count: e.count,
     }))
+}
+
+export function categoryExists(id: string): boolean {
+  const walk = (nodes: CategoryNode[]): boolean =>
+    nodes.some((n) => n.id === id || walk(n.children))
+  return walk(MOCK_CATEGORIES)
 }
