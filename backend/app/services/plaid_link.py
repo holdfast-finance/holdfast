@@ -684,7 +684,14 @@ class PlaidLinkService:
             return _slot_out(slot)
 
     async def abandon(self, reservation_id: uuid.UUID, body: AbandonIn) -> SlotOut:
-        """The owner says no Item was made. Needs step-up and the exact phrase."""
+        """The owner says no Item was made. Needs step-up and the exact phrase.
+
+        While the reservation is under 4 hours old and holds a sealed token, Plaid is asked
+        first, and anything that stops the question refuses (Plaid unreachable or refusing, a
+        different ``PLAID_ENV``, an unreadable token): Link may have made an Item the ledger
+        hasn't seen. Once the reservation is older, the token has expired and the owner's
+        phrase is enough.
+        """
         require_owner(self.principal)
         require_fresh(self.principal)
         if body.confirm_phrase != ABANDON_PHRASE:
@@ -698,36 +705,40 @@ class PlaidLinkService:
                 raise ApiError("conflict", "That reservation is already settled.")
             sealed, env, created = slot.link_token_enc, slot.env, slot.created_at
         young = datetime.now(UTC) - created < timedelta(hours=RESERVATION_TTL_HOURS)
-        if sealed is not None and env == self.ctx.settings.plaid_env:
+        if sealed is not None and young:
             # While the token is live, Link may have created an Item that only Plaid can see.
-            # If Plaid can't answer, abandoning could leave the ledger under-counting: retry.
+            # Every way of not being able to ask refuses, so the ledger never under-counts.
+            if env != self.ctx.settings.plaid_env:
+                raise ApiError(
+                    "conflict", f"This link was started in {env}; switch back to {env} to resolve."
+                )
             creds, _fp = self._credentials()
             try:
-                token: SecretToken | None = crypto.open(
-                    sealed, self._slot_ctx(hid, reservation_id), key=self._key()
-                )
+                token = crypto.open(sealed, self._slot_ctx(hid, reservation_id), key=self._key())
             except crypto.CryptoError:
-                token = None  # an unreadable token can't be asked about
-            if token is not None:
-                try:
-                    async with plaid_setup.open_client(creds) as plaid:
-                        data = await plaid.link_token_get(token)
-                except (PlaidError, PlaidUnavailable) as exc:
-                    if young:
-                        await self._audit_failure(
-                            "plaid.reservation_abandon",
-                            reservation_id,
-                            {"error": type(exc).__name__, "reason": "plaid_unconfirmed"},
-                        )
-                        raise ApiError(
-                            "plaid_unavailable",
-                            "Plaid couldn't confirm that no Item was made. Try again shortly.",
-                        ) from None
-                else:
-                    if parse_link_sessions(data).public_tokens:
-                        raise ApiError(
-                            "conflict", "Link created an Item. Resolve the reservation instead."
-                        )
+                raise ApiError(
+                    "conflict",
+                    "That reservation's saved token can't be read. It can be abandoned once "
+                    "it is 4 hours old.",
+                ) from None
+            try:
+                async with plaid_setup.open_client(creds) as plaid:
+                    data = await plaid.link_token_get(token)
+            except (PlaidError, PlaidUnavailable) as exc:
+                await self._audit_failure(
+                    "plaid.reservation_abandon",
+                    reservation_id,
+                    {"error": type(exc).__name__, "reason": "plaid_unconfirmed"},
+                )
+                raise ApiError(
+                    "plaid_unavailable",
+                    "Plaid couldn't confirm that no Item was made. Try again shortly.",
+                ) from None
+            else:
+                if parse_link_sessions(data).public_tokens:
+                    raise ApiError(
+                        "conflict", "Link created an Item. Resolve the reservation instead."
+                    )
         result = await self._close(reservation_id, "abandoned", "plaid.reservation_abandon")
         await self._audit_result("plaid.reservation_abandon", reservation_id, result.state)
         return result

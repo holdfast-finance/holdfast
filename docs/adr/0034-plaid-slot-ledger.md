@@ -114,7 +114,11 @@ Browser `onExit` only triggers this check.
 - The owner may move `unknown` to `abandoned` with step-up and the phrase
   `I did not finish this link`.
 - The per-client `reserved` lock blocks new links for at most those 4 hours. The owner can end it
-  sooner with the same abandon step.
+  sooner with the same abandon step, but only after Plaid has been asked: while the reservation is
+  under 4 hours old and holds a sealed token, abandon refuses if Plaid can't answer, if
+  `PLAID_ENV` differs from the reservation's env ("switch back to <env> to resolve"), or if the
+  token can't be opened (a lost `FERNET_KEY`). Each could hide an Item the ledger hasn't seen.
+  After 4 hours the token has expired and the phrase alone suffices.
 
 **Exchange.**
 - It is idempotent on `reservation_id`. The `public_token` must be bound to its reservation: same

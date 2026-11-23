@@ -738,16 +738,59 @@ async def test_abandon_of_an_old_reservation_proceeds_when_plaid_cannot_answer(
     assert (await abandon(owner, rid)).json()["state"] == "abandoned"
 
 
-async def test_abandon_ignores_only_an_unreadable_token(
+async def test_abandon_of_a_young_reservation_is_refused_when_its_token_is_unreadable(
     owner: Owner, app: FastAPI, fake: FakePlaid
 ) -> None:
+    """An unreadable token can't be asked about, so Link may have made an Item unseen."""
     from app.security.crypto import generate_key
 
     rid = await reserve(owner)
     app.state.settings.fernet_key = SecretStr(generate_key())  # the sealed token no longer opens
     r = await abandon(owner, rid)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+    assert "link/token/get" not in "".join(fake.paths())
+    assert (await slot_row(app, hid_of(owner), rid)).state == "reserved"
+    assert await ledger(app, "sandbox") == 1
+
+
+async def test_abandon_of_an_aged_reservation_with_an_unreadable_token_proceeds(
+    owner: Owner, app: FastAPI, fake: FakePlaid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.security.crypto import generate_key
+    from app.services import plaid_link
+
+    rid = await reserve(owner)
+    app.state.settings.fernet_key = SecretStr(generate_key())
+    monkeypatch.setattr(plaid_link, "RESERVATION_TTL_HOURS", 0)  # out of the 4-hour window
+    r = await abandon(owner, rid)
     assert r.status_code == 200 and r.json()["state"] == "abandoned"
     assert "/link/token/get" not in fake.paths()
+
+
+async def test_abandon_of_a_young_reservation_is_refused_after_an_env_switch(
+    owner: Owner, app: FastAPI, fake: FakePlaid
+) -> None:
+    rid = await reserve(owner)  # sandbox
+    app.state.settings.plaid_env = "production"
+    before = len(fake.requests)
+    r = await abandon(owner, rid)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "conflict"
+    assert "switch back to sandbox" in r.json()["error"]["message"]
+    assert len(fake.requests) == before  # nothing was sent to the wrong environment
+    app.state.settings.plaid_env = "sandbox"
+    assert (await slot_row(app, hid_of(owner), rid)).state == "reserved"
+    assert (await abandon(owner, rid)).json()["state"] == "abandoned"
+
+
+async def test_abandon_of_an_aged_reservation_after_an_env_switch_proceeds(
+    owner: Owner, app: FastAPI, fake: FakePlaid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import plaid_link
+
+    rid = await reserve(owner)
+    app.state.settings.plaid_env = "production"
+    monkeypatch.setattr(plaid_link, "RESERVATION_TTL_HOURS", 0)
+    assert (await abandon(owner, rid)).json()["state"] == "abandoned"
 
 
 # --------------------------------------------------------------------------- coexistence
