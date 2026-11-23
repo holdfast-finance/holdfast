@@ -19,6 +19,12 @@
 # Environment:
 #   HOLDFAST_PRIVATE_DIR  the private data directory; must exist. "none" on a machine with no
 #                         real data. Default: $XDG_DATA_HOME/holdfast-private.
+#   HOLDFAST_INSTANCE_DIR the holdfast-instance data directory (H2); hidden when set. Unset on a
+#                         machine that does not host the instance.
+#   HOLDFAST_INSTANCE_DOCKER_SOCK
+#                         the container-engine socket that runs holdfast-instance, when it is not
+#                         one of the standard paths below (for example a dedicated rootless
+#                         engine); hidden when set.
 #   FIRSTCHAIR_SESSION    passed as --session.
 #   FC_REPO               passed as delegate --repo.
 #   FC_RUNTIME_DIR        override /run/user/<uid> (tests only).
@@ -53,6 +59,11 @@ if [ "$private" != "none" ]; then
   [ -d "$private" ] || die "private data directory '$private' does not exist; set HOLDFAST_PRIVATE_DIR to it, or to 'none' on a machine with no real data"
   hides+=("$(realpath "$private")")
 fi
+
+# The real-data instance (H2): its bind-mounted data directory and, when it runs on an engine of
+# its own, that engine's socket. The standard sockets and the runtime directory are hidden below.
+[ -n "${HOLDFAST_INSTANCE_DIR:-}" ] && [ -e "$HOLDFAST_INSTANCE_DIR" ] && hides+=("$(realpath "$HOLDFAST_INSTANCE_DIR")")
+[ -n "${HOLDFAST_INSTANCE_DOCKER_SOCK:-}" ] && [ -e "$HOLDFAST_INSTANCE_DOCKER_SOCK" ] && hides+=("$(realpath "$HOLDFAST_INSTANCE_DOCKER_SOCK")")
 
 candidates=(
   # System-wide sockets a worker could abuse: the container engine (root-equivalent for the

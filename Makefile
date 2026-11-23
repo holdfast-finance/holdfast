@@ -6,7 +6,16 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys keys-add-missing check health ports env-check sync test-locked release-check dist
+# H2: two more compose projects beside the dev stack. holdfast-instance is the real-data one (bind
+# mounts in $(HOLDFAST_INSTANCE_DIR), a 0700 directory outside the repo, its own instance.env);
+# holdfast-sandbox is throwaway (fresh synthetic keys in .env.sandbox, PLAID_ENV forced to
+# sandbox). Neither layers the dev override, so neither publishes db or redis. See docs/ops/instances.md.
+INSTANCE_PROJECT ?= holdfast-instance
+SANDBOX_PROJECT  ?= holdfast-sandbox
+COMPOSE_INSTANCE := docker compose -p $(INSTANCE_PROJECT) --env-file "$(HOLDFAST_INSTANCE_DIR)/instance.env" -f docker-compose.yml -f docker-compose.instance.yml
+COMPOSE_SANDBOX  := docker compose -p $(SANDBOX_PROJECT) --env-file .env.sandbox -f docker-compose.yml -f docker-compose.sandbox.yml
+
+.PHONY: help docs-dir up instance-init instance-up instance-down instance-migrate instance-ps instance-logs sandbox-up sandbox-down sandbox-migrate sandbox-destroy up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys keys-add-missing check health ports env-check sync test-locked release-check dist
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -42,6 +51,52 @@ up-prod: env-check ## Start the prod stack (DNS-01 cert, binds TAILSCALE_BIND_IP
 
 down: ## Stop the stack (keeps volumes)
 	$(COMPOSE) down --remove-orphans
+
+# ---- holdfast-instance (real data). HOLDFAST_INSTANCE_DIR has no default: you choose the path. ----
+instance-init: ## Create HOLDFAST_INSTANCE_DIR (0700), its subdirectories and instance.env with fresh keys
+	docker build -t $(BACKEND_IMAGE) backend
+	scripts/instance.sh init
+
+instance-up: ## Start holdfast-instance (refuses unless HOLDFAST_INSTANCE_DIR is mode 0700 outside the repo)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) build api
+	$(COMPOSE_INSTANCE) up -d --build db redis
+	$(COMPOSE_INSTANCE) run --rm migrate
+	$(COMPOSE_INSTANCE) up -d --build
+
+instance-down: ## Stop holdfast-instance (data stays on its bind mounts)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) down --remove-orphans
+
+instance-migrate: ## alembic upgrade head on holdfast-instance
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) run --rm migrate
+
+instance-ps: ## List holdfast-instance services
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) ps
+
+instance-logs: ## Follow holdfast-instance logs (make instance-logs s=api)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) logs -f --tail=200 $(s)
+
+# ---- holdfast-sandbox (throwaway, synthetic keys, loopback port HOLDFAST_SANDBOX_PORT, default 9444) ----
+sandbox-up: ## Start holdfast-sandbox with fresh synthetic keys (.env.sandbox); PLAID_ENV is forced to sandbox
+	scripts/instance.sh sandbox-env
+	$(COMPOSE_SANDBOX) up -d --build db redis
+	$(COMPOSE_SANDBOX) run --rm migrate
+	$(COMPOSE_SANDBOX) up -d --build
+
+sandbox-down: ## Stop holdfast-sandbox (keeps its volumes and .env.sandbox)
+	$(COMPOSE_SANDBOX) down --remove-orphans
+
+sandbox-migrate: ## alembic upgrade head on holdfast-sandbox
+	scripts/instance.sh sandbox-env
+	$(COMPOSE_SANDBOX) run --rm migrate
+
+sandbox-destroy: ## Delete holdfast-sandbox: containers, volumes and .env.sandbox
+	$(COMPOSE_SANDBOX) down -v --remove-orphans
+	@rm -f .env.sandbox
 
 logs: ## Follow logs (make logs s=api for one service)
 	$(COMPOSE) logs -f --tail=200 $(s)
@@ -159,6 +214,10 @@ ports: env-check ## Assert no compose service publishes beyond the rules
 	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
 	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+	@# The H2 projects: rendered with .env's values and a placeholder instance directory (never read).
+	export HOLDFAST_INSTANCE_DIR=$${HOLDFAST_INSTANCE_DIR:-/var/lib/holdfast-instance-check}; \
+	 docker compose --env-file .env -f docker-compose.yml -f docker-compose.instance.yml config --format json | python3 scripts/check-compose-ports.py --instance
+	docker compose --env-file .env -f docker-compose.yml -f docker-compose.sandbox.yml config --format json | python3 scripts/check-compose-ports.py --sandbox
 
 .PHONY: api-types api-types-check api-types-test
 # Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).

@@ -91,6 +91,30 @@ class FcDelegateTest(unittest.TestCase):
         self.assertNotIn(str((self.runtime / "fnm_multishells").resolve()), hidden)
         self.assertIsNone(calls[1]["display"])
 
+    def test_instance_directory_and_engine_socket_are_hidden_when_set(self) -> None:
+        # H2: the real-data instance's bind-mounted directory and a dedicated engine socket.
+        instance = self.tmp / "instance dir"
+        instance.mkdir()
+        sock = self.tmp / "engine.sock"
+        sock.write_text("")
+        result = self.run_script(
+            "codex",
+            "task",
+            HOLDFAST_INSTANCE_DIR=str(instance),
+            HOLDFAST_INSTANCE_DOCKER_SOCK=str(sock),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.calls()[1]["argv"]
+        hidden = [argv[i + 1] for i, a in enumerate(argv) if a == "--hide"]
+        self.assertIn(str(instance.resolve()), hidden)
+        self.assertIn(str(sock.resolve()), hidden)
+
+    def test_unset_instance_variables_add_no_hides(self) -> None:
+        result = self.run_script("codex", "task")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hidden = [a for a in self.calls()[1]["argv"] if "instance" in a]
+        self.assertEqual(hidden, [])
+
     def test_session_and_repo_go_before_the_subcommands(self) -> None:
         result = self.run_script("grok", "task", FIRSTCHAIR_SESSION="s1", FC_REPO="/r")
         self.assertEqual(result.returncode, 0, result.stderr)
