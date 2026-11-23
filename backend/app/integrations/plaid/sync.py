@@ -27,6 +27,7 @@ from app.integrations.base import ConnectorError
 from app.integrations.plaid.client import PlaidClient, PlaidError, PlaidUnavailable
 from app.integrations.plaid.mapping import (
     MappingError,
+    check_currency,
     map_account,
     map_balance,
     map_removed,
@@ -112,6 +113,7 @@ async def _paginate(
     added: list[ConnectorTxn] = []
     modified: list[ConnectorTxn] = []
     removed: list[tuple[str, str]] = []
+    raw_txns: list[dict[str, Any]] = []
     cursor = start
     has_more = True
     status: object = None
@@ -132,15 +134,25 @@ async def _paginate(
             balance = map_balance(row, as_of)
             if balance is not None:
                 balances[balance.external_account_id] = balance
+        for row in (*_rows(page, "added"), *_rows(page, "modified")):
+            raw_txns.append(row)
         added.extend(map_transaction(r) for r in _rows(page, "added"))
         modified.extend(map_transaction(r) for r in _rows(page, "modified"))
         removed.extend(map_removed(r) for r in _rows(page, "removed"))
+        more = page.get("has_more")
+        if not isinstance(more, bool):
+            raise MappingError("has_more is not a boolean")
         next_cursor = page.get("next_cursor")
         if isinstance(next_cursor, str) and next_cursor:
             cursor = next_cursor
-        has_more = page.get("has_more") is True
+        elif more:
+            raise MappingError("has_more without a next_cursor")
+        has_more = more
         status = page.get("transactions_update_status")
         del page
+    for row in raw_txns:
+        owner = accounts.get(str(row.get("account_id")))
+        check_currency(row, owner.currency if owner is not None else None)
     return SyncBatch(
         accounts=tuple(accounts.values()),
         balances=tuple(balances.values()),
@@ -159,4 +171,9 @@ def _rows(page: dict[str, Any], key: str) -> list[dict[str, Any]]:
         return []
     if not isinstance(value, list):
         raise MappingError(f"{key} is not a list")
-    return [row for row in value if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            raise MappingError(f"{key} holds a row that is not an object")
+        rows.append(row)  # never drop a row: the cursor would advance past it
+    return rows

@@ -7,7 +7,10 @@ from a file), and it never touches the slot ledger: sandbox Items use no Trial s
 Run from ``backend/``::
 
     PLAID_ENV=sandbox PLAID_CLIENT_ID=... PLAID_SECRET=... \\
-        uv run python ../scripts/record_plaid_sandbox.py --out /path/to/new/dir
+        uv run python ../scripts/record_plaid_sandbox.py --out tests/fixtures/plaid/recorded-1
+
+``--out`` must resolve inside ``backend/tests/fixtures/plaid/`` (no ``..``, no symlinks), and
+pages are opened exclusively, so an existing file is never overwritten.
 
 Nothing raw is written. Each page is rebuilt from an allowlist of keys: ids become stable
 pseudonyms, free text (names, merchants, descriptions) becomes ``MERCHANT n`` / ``Account n``,
@@ -29,6 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "backend" / "tests" / "fixtures" / "plaid"
 SANDBOX_INSTITUTION = "ins_109508"  # Plaid's "First Platypus Bank" test institution
 MAX_PAGES = 20
 
@@ -46,6 +50,22 @@ class RefusedError(Exception):
 def require_sandbox(env: Mapping[str, str]) -> None:
     if env.get("PLAID_ENV") != "sandbox":
         raise RefusedError("PLAID_ENV must be exactly 'sandbox'")
+
+
+def resolve_out(out: Path, root: Path = FIXTURE_ROOT) -> Path:
+    """``out`` as an absolute path strictly inside ``root``, with no symlink on the way."""
+    base = root.resolve()
+    target = out.resolve()  # a relative path resolves against the current directory
+    lexical = Path(os.path.abspath(out))  # collapses ".." without following links
+    if target == base or not target.is_relative_to(base) or not lexical.is_relative_to(base):
+        raise RefusedError(f"--out must be inside {root}")
+    # Every component below the root must be a plain directory (or not exist yet).
+    probe = base
+    for part in lexical.relative_to(base).parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise RefusedError("--out must not be or pass through a symlink")
+    return target
 
 
 class Pseudonyms:
@@ -145,32 +165,43 @@ async def record(out_dir: Path, env: Mapping[str, str]) -> int:
         client_id=SecretToken(env["PLAID_CLIENT_ID"]),
         secret=SecretToken(env["PLAID_SECRET"]),
     )
-    ps = Pseudonyms()
     raw_pages: list[dict[str, Any]] = []
     async with PlaidClient(credentials) as plaid:
         created = await plaid.post(
             "/sandbox/public_token/create",
             {"institution_id": SANDBOX_INSTITUTION, "initial_products": ["transactions"]},
         )
-        exchanged = await plaid.item_public_token_exchange(SecretToken(str(created["public_token"])))
-        cursor: str | None = None
-        for _ in range(MAX_PAGES):
-            body: dict[str, Any] = {"access_token": exchanged.access_token.reveal(), "count": 100}
-            if cursor:
-                body["cursor"] = cursor
-            page = await plaid.post("/transactions/sync", body)
-            raw_pages.append(page)
-            cursor = page.get("next_cursor") or cursor
-            if page.get("has_more") is not True:
-                break
-        await plaid.post(
-            "/item/remove", {"access_token": exchanged.access_token.reveal()}
-        )  # sandbox cleanup
+        exchanged = await plaid.item_public_token_exchange(
+            SecretToken(str(created["public_token"]))
+        )
+        try:
+            cursor: str | None = None
+            for _ in range(MAX_PAGES):
+                body: dict[str, Any] = {
+                    "access_token": exchanged.access_token.reveal(),
+                    "count": 100,
+                }
+                if cursor:
+                    body["cursor"] = cursor
+                page = await plaid.post("/transactions/sync", body)
+                raw_pages.append(page)
+                cursor = page.get("next_cursor") or cursor
+                if page.get("has_more") is not True:
+                    break
+        finally:
+            # The sandbox Item is removed even when paging fails.
+            await plaid.post("/item/remove", {"access_token": exchanged.access_token.reveal()})
+    write_pages(out_dir, raw_pages, Pseudonyms())
+    return len(raw_pages)
+
+
+def write_pages(out_dir: Path, raw_pages: list[dict[str, Any]], ps: Pseudonyms) -> None:
+    """Write sanitized pages. ``"x"`` mode: an existing file is an error, never overwritten."""
     out_dir.mkdir(parents=True, exist_ok=True)
     for index, page in enumerate(raw_pages, start=1):
         clean = sanitize_page(page, ps, index, last=index == len(raw_pages))
-        (out_dir / f"sync_page{index}.json").write_text(dump(clean))
-    return len(raw_pages)
+        with open(out_dir / f"sync_page{index}.json", "x", encoding="utf-8") as handle:
+            handle.write(dump(clean))
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:
@@ -187,10 +218,15 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         if not environment.get(name):
             print(f"refused: {name} is not set", file=sys.stderr)
             return 2
-    if args.out.exists() and any(args.out.iterdir()):
+    try:
+        out = resolve_out(args.out)
+    except RefusedError as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    if out.exists() and any(out.iterdir()):
         print("refused: --out must be empty or new", file=sys.stderr)
         return 2
-    count = asyncio.run(record(args.out, environment))
+    count = asyncio.run(record(out, environment))
     print(f"wrote {count} sanitized pages")
     return 0
 

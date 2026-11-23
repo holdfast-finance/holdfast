@@ -148,9 +148,11 @@ async def test_cursor_is_sent_and_omitted_when_none() -> None:
 
 async def test_history_not_complete_while_plaid_is_still_loading() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        data = json.loads(page("sync_page2"))
-        data["transactions_update_status"] = "INITIAL_UPDATE_COMPLETE"
-        return httpx.Response(200, content=json.dumps(data))
+        # Edit the bytes: no float-parsing json.loads, and no dumper that would need Decimal.
+        content = page("sync_page2").replace(
+            b"HISTORICAL_UPDATE_COMPLETE", b"INITIAL_UPDATE_COMPLETE"
+        )
+        return httpx.Response(200, content=content)
 
     assert (await run(handler)).history_complete is False
 

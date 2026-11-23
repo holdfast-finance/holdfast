@@ -107,7 +107,7 @@ def map_balance(row: dict[str, Any], as_of: date) -> ConnectorBalance | None:
         current = -current  # owed (positive at Plaid) is negative here
     limit = money(balances.get("limit"), "limit")
     if limit is not None and limit < 0:
-        limit = None  # a negative limit is not a limit
+        raise MappingError("limit is negative")  # refuse, never turn it into "no limit"
     return ConnectorBalance(
         external_account_id=_required_text(row, "account_id"),
         as_of=as_of,
@@ -152,3 +152,16 @@ def map_transaction(row: dict[str, Any]) -> ConnectorTxn:
 def map_removed(row: dict[str, Any]) -> tuple[str, str]:
     """A removal key is ``(external_account_id, external_id)``."""
     return (_required_text(row, "account_id"), _required_text(row, "transaction_id"))
+
+
+def check_currency(row: dict[str, Any], account_currency: str | None) -> None:
+    """Refuse a transaction the ledger would store under the wrong currency.
+
+    ``ConnectorTxn`` has no currency field, so P5b stores each row under its account's currency.
+    A row in another ISO currency, or in an unofficial one (crypto, points), must not be.
+    """
+    iso = _text(row.get("iso_currency_code"))
+    if iso is None and _text(row.get("unofficial_currency_code")) is not None:
+        raise MappingError("transaction is in an unofficial currency")
+    if iso is not None and account_currency is not None and iso != account_currency:
+        raise MappingError("transaction currency differs from its account")
