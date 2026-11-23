@@ -276,17 +276,13 @@ class LedgerService:
             Transaction.category_id,
             Transaction.category_source,
             has_splits,
-            Account.owner_person_id,
+            func.public.app_account_writable(Transaction.account_id),
         ).outerjoin(ImportRun, ImportRun.id == Transaction.import_run_id)
 
-    def _can_edit(self, owner_person_id: uuid.UUID | None) -> bool:
-        # The exact predicate of the C6a brief: no owner, or the reader is the owner. Never reads
-        # `visibility`. A principal with no person can't edit. C3b swaps this for
-        # app_account_writable() and adds an equivalence test. That test must record the no-person
-        # case: the helper returns true for joint rows there while can_edit is false, and
-        # _edit refuses a no-person principal itself (Bulwark M1).
-        person = self.principal.person_id
-        return person is not None and (owner_person_id is None or owner_person_id == person)
+    def _can_edit(self, account_writable: bool | None) -> bool:
+        # The account helper also permits a joint account in a session with no person.
+        # Ledger edits require a person even on a joint account.
+        return self.principal.person_id is not None and bool(account_writable)
 
     def _out(self, r: Any) -> TransactionOut:
         return TransactionOut.model_validate(
