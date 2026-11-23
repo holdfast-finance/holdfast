@@ -15,7 +15,14 @@ tool is alpha and its interface can change.
    variables from the worker's environment. It fails closed: no bubblewrap, no private data
    directory (set `HOLDFAST_PRIVATE_DIR`, or `none` on a machine with no real data), or a dry run
    that does not report `"confined": true`, and nothing starts. Call it by absolute path or from
-   the repo root; it works from any directory. `--confine` alone is not enough: it is a filesystem
+   the repo root; it works from any directory. It also refuses to start without the real-data
+   instance directory (`HOLDFAST_INSTANCE_DIR`, or the pointer file `make instance-init` writes;
+   `none` on a machine that hosts no instance) and hides it, the pointer directory and the
+   instance's engine socket (`docs/ops/instances.md`). The worker always starts in the repo root,
+   never in the caller's directory, so the script first fixes what depended on it: `FC_REPO`
+   defaults to the git checkout you are standing in (run the main checkout's wrapper from a
+   worktree and the worker gets that worktree), and a relative `FC_REPO`, `--prompt-file` or
+   `--output` is made absolute against your directory. `--confine` alone is not enough: it is a filesystem
    view under the lead's own user and groups, not a user boundary, and it hides no sockets.
    Residual risk until a separate OS user exists for these workers: loopback TCP ports and
    abstract Unix sockets (the X server) stay reachable.

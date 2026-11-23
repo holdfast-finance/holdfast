@@ -242,13 +242,13 @@ class GuardVolumesTest(unittest.TestCase):
 
     def test_a_missing_or_non_string_command_fails_closed(self) -> None:
         for raw in (
-            '{"tool_input": {}}',
-            "{}",
-            '{"tool_input": {"cmd": "ls"}}',
-            '{"tool_input": {"command": null}}',
-            '{"tool_input": {"command": ["ls"]}}',
-            '{"tool_input": {"command": 5}}',
-            '{"tool_input": {"command": {"a": 1}}}',
+            '{"tool_name": "Bash", "tool_input": {}}',
+            '{"tool_name": "Bash"}',
+            '{"tool_name": "Bash", "tool_input": {"cmd": "ls"}}',
+            '{"tool_name": "Bash", "tool_input": {"command": null}}',
+            '{"tool_name": "Bash", "tool_input": {"command": ["ls"]}}',
+            '{"tool_name": "Bash", "tool_input": {"command": 5}}',
+            '{"tool_name": "Bash", "tool_input": {"command": {"a": 1}}}',
         ):
             with self.subTest(raw=raw):
                 self.assertEqual(run_hook("", raw=raw).returncode, 2)
@@ -335,8 +335,33 @@ class GuardVolumesTest(unittest.TestCase):
         raw = json.dumps({"tool_name": "Write", "tool_input": {"content": "x"}})
         self.assertEqual(run_hook("", raw=raw).returncode, 2)
 
+    def test_routing_follows_tool_name_not_the_shape_of_the_input(self) -> None:
+        bad = "rm -rf $HOLDFAST_INSTANCE_DIR"
+        # A command next to a harmless file_path still gets the command check.
+        mixed = {"tool_name": "Bash", "tool_input": {"command": bad, "file_path": "/tmp/x"}}
+        self.assertEqual(run_hook("", raw=json.dumps(mixed)).returncode, 2)
+        mixed["tool_input"]["notebook_path"] = "/tmp/y.ipynb"
+        self.assertEqual(run_hook("", raw=json.dumps(mixed)).returncode, 2)
+        # A file tool is checked by path only, so a harmless path passes.
+        file_tool = {"tool_name": "Write", "tool_input": {"command": bad, "file_path": "/tmp/x"}}
+        self.assertEqual(run_hook("", raw=json.dumps(file_tool)).returncode, 0)
+        # A file tool aimed at the instance is blocked whatever else it carries.
+        file_tool["tool_input"]["file_path"] = "/mnt/vault/hf data/a"
+        self.assertEqual(run_hook("", INSTANCE, raw=json.dumps(file_tool)).returncode, 2)
+        # Anything else, and a missing name, is blocked.
+        for payload in (
+            {"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}},
+            {"tool_name": "Task", "tool_input": {"command": "ls"}},
+            {"tool_name": "", "tool_input": {"command": "ls"}},
+            {"tool_name": 5, "tool_input": {"command": "ls"}},
+            {"tool_input": {"command": "ls"}},
+            {"tool_input": {"file_path": "/tmp/x"}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(run_hook("", raw=json.dumps(payload)).returncode, 2)
+
     def test_non_bash_payloads_and_empty_commands_pass(self) -> None:
-        for payload in ('{"tool_input": {"command": ""}}',):
+        for payload in ('{"tool_name": "Bash", "tool_input": {"command": ""}}',):
             result = subprocess.run(
                 [BASH, str(HOOK)],
                 input=payload,

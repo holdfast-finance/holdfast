@@ -53,7 +53,9 @@ class FcDelegateTest(unittest.TestCase):
         self.private.mkdir()
         self.log = self.tmp / "calls.jsonl"
 
-    def run_script(self, *args: str, **env_over: str | None) -> subprocess.CompletedProcess[str]:
+    def run_script(
+        self, *args: str, cwd: Path | None = None, **env_over: str | None
+    ) -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.tmp),
@@ -67,7 +69,12 @@ class FcDelegateTest(unittest.TestCase):
         for key in [k for k, v in env.items() if v is None]:
             del env[key]
         return subprocess.run(
-            [BASH, str(SCRIPT), *args], env=env, capture_output=True, text=True, check=False
+            [BASH, str(SCRIPT), *args],
+            env=env,
+            cwd=cwd or self.tmp,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
     def calls(self) -> list[dict[str, Any]]:
@@ -272,6 +279,53 @@ class FcDelegateTest(unittest.TestCase):
         self.assertIn(str(sock.resolve()), self.hidden())
         self.pointer("instance-docker-sock", str(self.tmp / "gone.sock"))
         self.assertEqual(self.run_script("codex", "task").returncode, 2)
+
+    def test_repo_defaults_to_the_callers_checkout_and_explicit_wins(self) -> None:
+        # A lead running this checkout's wrapper from a worktree hands the worker that worktree.
+        work = self.tmp / "work tree"
+        work.mkdir()
+        subprocess.run(["git", "init", "-q", str(work)], check=True)
+        result = self.run_script("codex", "task", cwd=work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.calls()[1]["argv"]
+        self.assertEqual(argv[argv.index("--repo") + 1], str(work.resolve()))
+        self.assertLess(argv.index("--repo"), argv.index("run"))
+        # Outside any repository nothing is added.
+        self.log.unlink()
+        self.assertEqual(self.run_script("codex", "task").returncode, 0)
+        self.assertNotIn("--repo", self.calls()[1]["argv"])
+        # An explicit FC_REPO wins, and a relative one is made absolute against the caller.
+        self.log.unlink()
+        self.run_script("codex", "task", cwd=work, FC_REPO="/explicit")
+        argv = self.calls()[1]["argv"]
+        self.assertEqual(argv[argv.index("--repo") + 1], "/explicit")
+        self.log.unlink()
+        self.run_script("codex", "task", cwd=work, FC_REPO="sub/repo")
+        argv = self.calls()[1]["argv"]
+        self.assertEqual(argv[argv.index("--repo") + 1], f"{work}/sub/repo")
+
+    def test_relative_prompt_file_and_output_are_made_absolute_before_the_cd(self) -> None:
+        work = self.tmp / "caller"
+        work.mkdir()
+        result = self.run_script(
+            "codex", "--prompt-file", "p.txt", "--output", "o.json", "--name", "n", cwd=work
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.calls()[1]["argv"]
+        self.assertEqual(argv[argv.index("--prompt-file") + 1], f"{work}/p.txt")
+        self.assertEqual(argv[argv.index("--output") + 1], f"{work}/o.json")
+        self.assertEqual(argv[argv.index("--name") + 1], "n")
+        self.log.unlink()
+        self.run_script("codex", "--prompt-file=q.txt", "--output=/abs/o.json", "--", "-", cwd=work)
+        argv = self.calls()[1]["argv"]
+        self.assertIn(f"--prompt-file={work}/q.txt", argv)
+        self.assertIn("--output=/abs/o.json", argv)
+        # A lone dash (stdin) and ordinary arguments are untouched.
+        self.log.unlink()
+        self.run_script("codex", "--prompt-file", "-", "relative task words", cwd=work)
+        argv = self.calls()[1]["argv"]
+        self.assertEqual(argv[argv.index("--prompt-file") + 1], "-")
+        self.assertIn("relative task words", argv)
 
     def test_session_and_repo_go_before_the_subcommands(self) -> None:
         result = self.run_script("grok", "task", FIRSTCHAIR_SESSION="s1", FC_REPO="/r")

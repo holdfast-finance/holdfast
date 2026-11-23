@@ -40,7 +40,9 @@
 # command the shell would run. That fails closed: a command that merely mentions these phrases (a
 # commit message, say) is blocked too. Put such text in a file and use `git commit -F`.
 # It also fails closed when `jq` is missing, when the input is not JSON, and when
-# `.tool_input.command` is absent or not a string (and no file path is given).
+# `.tool_input.command` is absent or not a string. It routes on `.tool_name` (Bash to the command
+# check, the four file tools to the path check, anything else or no name is blocked), never on
+# which fields the input happens to carry.
 #
 # Out of scope, stated plainly: `eval` and `bash -c` built from pieces, base64 or `printf`
 # assembled commands, `$IFS` or `$'\x72m'` ANSI-C spellings, interpreters (`python -c
@@ -63,24 +65,32 @@ if [ -z "$dir" ] && [ -f "$cfgdir/instance-dir" ]; then
 fi
 case "$dir" in none | "") dir="" ;; esac
 
-# ---- File tools: a path, not a command. ----
-file="$(jq -r '(.tool_input.file_path // .tool_input.notebook_path // empty) | strings' <<<"$input" 2>/dev/null)" ||
+# ---- Route on the tool's name, never on the shape of its input. ----
+# A Bash call that also carries a file_path must still get the command check, so the name decides.
+tool="$(jq -r '.tool_name | strings' <<<"$input" 2>/dev/null)" ||
   block "hook input is not the JSON this guard expects"
-if [ -n "$file" ]; then
-  resolved="$(realpath -m -- "$file" 2>/dev/null)" || resolved="$file"
-  case "$resolved" in
-    */instance.env | */holdfast/instance-dir | */holdfast/instance-docker-sock)
-      block "a file tool write to instance.env or an instance pointer file (real data, ADR 0019)" ;;
-  esac
-  if [ -n "$dir" ]; then
-    rdir="$(realpath -m -- "$dir" 2>/dev/null)" || rdir="$dir"
-    rdir="${rdir%/}"
-    case "$resolved/" in
-      "$rdir"/*) block "a file tool write under the holdfast-instance directory (real data, ADR 0019); the owner does this from their own terminal" ;;
+case "$tool" in
+  Bash) ;;
+  Write | Edit | MultiEdit | NotebookEdit)
+    file="$(jq -r '(.tool_input.file_path // .tool_input.notebook_path // empty) | strings' <<<"$input" 2>/dev/null)" ||
+      block "hook input is not the JSON this guard expects"
+    [ -n "$file" ] || block "a file tool call without a path can't be checked"
+    resolved="$(realpath -m -- "$file" 2>/dev/null)" || resolved="$file"
+    case "$resolved" in
+      */instance.env | */holdfast/instance-dir | */holdfast/instance-docker-sock)
+        block "a file tool write to instance.env or an instance pointer file (real data, ADR 0019)" ;;
     esac
-  fi
-  exit 0
-fi
+    if [ -n "$dir" ]; then
+      rdir="$(realpath -m -- "$dir" 2>/dev/null)" || rdir="$dir"
+      rdir="${rdir%/}"
+      case "$resolved/" in
+        "$rdir"/*) block "a file tool write under the holdfast-instance directory (real data, ADR 0019); the owner does this from their own terminal" ;;
+      esac
+    fi
+    exit 0
+    ;;
+  *) block "unexpected tool '${tool:-<none>}': this guard is wired to Bash and the file tools only" ;;
+esac
 
 # ---- Bash. ----
 cmd="$(jq -er 'if (.tool_input.command | type) == "string" then .tool_input.command else error("no command string") end' <<<"$input" 2>/dev/null)" ||

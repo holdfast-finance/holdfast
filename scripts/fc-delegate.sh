@@ -34,7 +34,10 @@
 #                         file .../holdfast/instance-docker-sock; "none" or neither means no extra
 #                         hide. A path that does not exist is refused.
 #   FIRSTCHAIR_SESSION    passed as --session.
-#   FC_REPO               passed as delegate --repo.
+#   FC_REPO               passed as delegate --repo. Unset: the git checkout the caller is standing
+#                         in. A relative FC_REPO, --prompt-file or --output is made absolute
+#                         against the caller's directory, because the script then moves to the
+#                         repo root.
 #   FC_RUNTIME_DIR        override /run/user/<uid> (tests only).
 set -euo pipefail
 shopt -s nullglob
@@ -153,8 +156,42 @@ done
 
 pre=()
 [ -n "${FIRSTCHAIR_SESSION:-}" ] && pre+=(--session "$FIRSTCHAIR_SESSION")
+
+# The script moves to the repo root below, so anything that depended on the caller's directory is
+# fixed first. The worker's repository is FC_REPO, else the checkout the caller is standing in (a
+# lead running the main checkout's wrapper from a worktree hands the worker that worktree). A
+# relative FC_REPO, --prompt-file or --output is made absolute against the caller's directory. A
+# lone "-" (stdin) is left alone.
+caller=$PWD
+absolute() {
+  case "$1" in
+    - | /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$caller" "$1" ;;
+  esac
+}
+fc_repo=${FC_REPO:-}
+if [ -n "$fc_repo" ]; then
+  fc_repo=$(absolute "$fc_repo")
+else
+  fc_repo=$(git -C "$caller" rev-parse --show-toplevel 2>/dev/null) || fc_repo=""
+fi
 repo=()
-[ -n "${FC_REPO:-}" ] && repo+=(--repo "$FC_REPO")
+[ -n "$fc_repo" ] && repo+=(--repo "$fc_repo")
+
+fc_args=()
+want_path=0
+for arg in "$@"; do
+  if [ "$want_path" = 1 ]; then
+    fc_args+=("$(absolute "$arg")")
+    want_path=0
+    continue
+  fi
+  case "$arg" in
+    --prompt-file | --output) fc_args+=("$arg"); want_path=1 ;;
+    --prompt-file=* | --output=*) fc_args+=("${arg%%=*}=$(absolute "${arg#*=}")") ;;
+    *) fc_args+=("$arg") ;;
+  esac
+done
 
 clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS
   -u SSH_AUTH_SOCK -u GPG_AGENT_INFO -u DOCKER_HOST)
@@ -164,9 +201,9 @@ clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_A
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # Dry run first: the same arguments must resolve to a confined worker, or nothing starts.
-plan=$("${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "$@" "${flags[@]}" --dry-run) ||
+plan=$("${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "${fc_args[@]}" "${flags[@]}" --dry-run) ||
   die "firstchair dry run failed"
 python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("confined") is True else 1)' "$plan" ||
   die "dry run did not report \"confined\": true; refusing to start the worker"
 
-exec "${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "$@" "${flags[@]}"
+exec "${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "${fc_args[@]}" "${flags[@]}"
