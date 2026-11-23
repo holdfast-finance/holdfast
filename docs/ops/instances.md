@@ -87,7 +87,10 @@ fails if any of the three disappears.
 ## Moving the dev stack's data into `holdfast-instance` (Keel runs this, once)
 
 Not part of H2's code and not run by it. Do it on the instance host, from your own terminal, with
-the dev stack still up and idle. Back up first (`docs/ops/backup.md`).
+the dev stack still up and idle. Back up first (`docs/ops/backup.md`). **The owner runs steps 4 and
+5 (the dump redirect into the instance directory and the `cp` into `documents/`) from their own
+terminal**: the Claude hook blocks writes into the instance directory, and Codex and Grok workers
+can't see it.
 
 1. `make instance-init`. Do not run `instance-up` yet: it migrates an empty database.
 2. Copy `FERNET_KEY` and `IMPORT_ID_KEY` from the dev `.env` into `instance.env`, by editor, without

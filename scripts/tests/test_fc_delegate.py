@@ -23,7 +23,7 @@ BASH = shutil.which("bash") or "/bin/bash"
 FAKE_FIRSTCHAIR = """#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_LOG"], "a") as log:
-    log.write(json.dumps({"argv": sys.argv[1:], "display": os.environ.get("DISPLAY")}) + "\\n")
+    log.write(json.dumps({"argv": sys.argv[1:], "display": os.environ.get("DISPLAY"), "cwd": os.getcwd()}) + "\\n")
 if "--dry-run" in sys.argv:
     print(json.dumps({"confined": os.environ.get("FAKE_CONFINED", "true") == "true"}))
 """
@@ -169,15 +169,93 @@ class FcDelegateTest(unittest.TestCase):
         self.assertIn("does not exist", result.stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_variable_wins_over_the_pointer_and_none_beats_it(self) -> None:
+    def test_variable_and_pointer_must_name_the_same_directory(self) -> None:
         a = self.tmp / "a"
         b = self.tmp / "b"
         a.mkdir()
         b.mkdir()
         self.pointer("instance-dir", str(b))
-        self.assertEqual(self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(a)).returncode, 0)
-        self.assertIn(str(a.resolve()), self.hidden())
-        self.assertNotIn(str(b.resolve()), self.hidden())
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(a))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("different directories", result.stderr)
+        self.assertEqual(self.calls(), [])
+        # The same directory spelled through a symlink agrees.
+        link = self.tmp / "link-to-b"
+        link.symlink_to(b)
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(link))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(b.resolve()), self.hidden())
+
+    def test_none_comes_only_from_the_variable_and_not_over_a_pointer(self) -> None:
+        # A pointer that says none is not an opt-out.
+        self.pointer("instance-dir", "none")
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("none", result.stderr)
+        # The variable's none can't override a pointer that names a directory.
+        real = self.tmp / "real"
+        real.mkdir()
+        self.pointer("instance-dir", str(real))
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR="none")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("pointer", result.stderr)
+
+    def test_instance_path_must_be_a_directory(self) -> None:
+        plain = self.tmp / "plain file"
+        plain.write_text("x")
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(plain))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_the_pointer_directory_is_hidden_so_a_worker_cannot_retarget_it(self) -> None:
+        instance = self.tmp / "inst"
+        instance.mkdir()
+        self.pointer("instance-dir", str(instance))
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str((self.tmp / ".config" / "holdfast").resolve()), self.hidden())
+
+    def test_an_attacker_made_pointer_under_xdg_config_home_is_refused(self) -> None:
+        decoy = self.tmp / "decoy"
+        decoy.mkdir()
+        evil = self.tmp / "evil"
+        # Says none: refused. Names a decoy while the variable names the real one: refused.
+        self.pointer("instance-dir", "none", evil)
+        result = self.run_script(
+            "codex", "task", HOLDFAST_INSTANCE_DIR=None, XDG_CONFIG_HOME=str(evil)
+        )
+        self.assertEqual(result.returncode, 2)
+        real = self.tmp / "real2"
+        real.mkdir()
+        self.pointer("instance-dir", str(decoy), evil)
+        result = self.run_script(
+            "codex", "task", HOLDFAST_INSTANCE_DIR=str(real), XDG_CONFIG_HOME=str(evil)
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("different directories", result.stderr)
+
+    def test_the_worker_starts_from_the_repo_root_not_the_callers_directory(self) -> None:
+        instance = self.tmp / "inst2"
+        instance.mkdir()
+        env = {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": str(self.tmp),
+            "FAKE_LOG": str(self.log),
+            "FC_RUNTIME_DIR": str(self.runtime),
+            "HOLDFAST_PRIVATE_DIR": str(self.private),
+            "HOLDFAST_INSTANCE_DIR": str(instance),
+        }
+        result = subprocess.run(
+            [BASH, str(SCRIPT), "codex", "task"],
+            env=env,
+            cwd=instance,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for call in self.calls():
+            self.assertEqual(Path(call["cwd"]).resolve(), ROOT.resolve())
 
     def test_missing_engine_socket_refuses_and_a_pointer_socket_is_hidden(self) -> None:
         result = self.run_script(

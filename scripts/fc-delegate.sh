@@ -23,7 +23,11 @@
 #                         HOLDFAST_PRIVATE_DIR: unset falls back to the pointer file
 #                         ${XDG_CONFIG_HOME:-$HOME/.config}/holdfast/instance-dir that
 #                         `make instance-init` writes; with neither, the script refuses. "none" on
-#                         a machine that hosts no instance. A path that does not exist is refused.
+#                         a machine that hosts no instance. A path that is not a directory is refused. When both the
+#                         variable and the pointer are present they must name the same
+#                         directory. "none" is accepted only from the variable, and not at all
+#                         when a pointer names a directory. The pointer directory is hidden from
+#                         the worker, and the worker starts in the repository root.
 #   HOLDFAST_INSTANCE_DOCKER_SOCK
 #                         the container-engine socket that runs holdfast-instance when it is not a
 #                         standard path (a dedicated rootless engine). Falls back to the pointer
@@ -67,22 +71,40 @@ fi
 # The real-data instance (H2): its bind-mounted data directory and, when it runs on an engine of
 # its own, that engine's socket. The standard sockets and the runtime directory are hidden below.
 cfg=${XDG_CONFIG_HOME:-$HOME/.config}/holdfast
-# Value from the variable, else from a pointer file (first line), else empty.
-resolve_setting() {
-  local value=$1 file=$2
-  if [ -z "$value" ] && [ -f "$file" ]; then
-    IFS= read -r value <"$file" || true
-  fi
+# The pointer directory itself is hidden, so a worker can't rewrite the pointer files that the
+# next launch (and the Claude hook) trust.
+[ -d "$cfg" ] && hides+=("$(realpath "$cfg")")
+
+read_pointer() { # first line of a pointer file, or empty
+  local value=""
+  if [ -f "$1" ]; then IFS= read -r value <"$1" || true; fi
   printf '%s' "$value"
 }
-instance=$(resolve_setting "${HOLDFAST_INSTANCE_DIR:-}" "$cfg/instance-dir")
-[ -n "$instance" ] ||
+check_dir() { # a named instance directory must exist and be a directory
+  [ -e "$1" ] || die "instance directory '$1' does not exist; fix HOLDFAST_INSTANCE_DIR or $cfg/instance-dir"
+  [ -d "$1" ] || die "instance path '$1' is not a directory"
+}
+
+env_dir=${HOLDFAST_INSTANCE_DIR:-}
+ptr_dir=$(read_pointer "$cfg/instance-dir")
+# "none" is an explicit statement by the person launching the worker, so only the variable can
+# say it, and only when no pointer names an instance on this machine.
+[ "$ptr_dir" != "none" ] || die "$cfg/instance-dir says 'none'; 'none' is accepted only from HOLDFAST_INSTANCE_DIR"
+if [ "$env_dir" = "none" ]; then
+  [ -z "$ptr_dir" ] || die "HOLDFAST_INSTANCE_DIR=none, but the pointer $cfg/instance-dir names a directory; remove one of them"
+elif [ -z "$env_dir" ] && [ -z "$ptr_dir" ]; then
   die "no instance directory: set HOLDFAST_INSTANCE_DIR (or run make instance-init, which writes $cfg/instance-dir), or set it to 'none' on a machine that hosts no instance"
-if [ "$instance" != "none" ]; then
-  [ -e "$instance" ] || die "instance directory '$instance' does not exist; fix HOLDFAST_INSTANCE_DIR or $cfg/instance-dir, or set it to 'none'"
-  hides+=("$(realpath "$instance")")
+else
+  for named in "$env_dir" "$ptr_dir"; do
+    [ -z "$named" ] || check_dir "$named"
+  done
+  if [ -n "$env_dir" ] && [ -n "$ptr_dir" ] && [ "$(realpath "$env_dir")" != "$(realpath "$ptr_dir")" ]; then
+    die "HOLDFAST_INSTANCE_DIR and the pointer $cfg/instance-dir name different directories"
+  fi
+  hides+=("$(realpath "${env_dir:-$ptr_dir}")")
 fi
-sock=$(resolve_setting "${HOLDFAST_INSTANCE_DOCKER_SOCK:-}" "$cfg/instance-docker-sock")
+sock=${HOLDFAST_INSTANCE_DOCKER_SOCK:-}
+[ -n "$sock" ] || sock=$(read_pointer "$cfg/instance-docker-sock")
 if [ -n "$sock" ] && [ "$sock" != "none" ]; then
   [ -e "$sock" ] || die "instance engine socket '$sock' does not exist; fix HOLDFAST_INSTANCE_DOCKER_SOCK or $cfg/instance-docker-sock, or set it to 'none'"
   hides+=("$(realpath "$sock")")
@@ -136,6 +158,10 @@ repo=()
 
 clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS
   -u SSH_AUTH_SOCK -u GPG_AGENT_INFO -u DOCKER_HOST)
+
+# Start from the repository root, never from the caller's directory: a shell left inside the
+# instance directory would otherwise hand the worker a working directory in real data.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # Dry run first: the same arguments must resolve to a confined worker, or nothing starts.
 plan=$("${clean_env[@]}" firstchair "${pre[@]}" delegate "${repo[@]}" run "$@" "${flags[@]}" --dry-run) ||

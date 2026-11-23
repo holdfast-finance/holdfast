@@ -225,8 +225,118 @@ class GuardVolumesTest(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(run_hook("", raw=raw).returncode, 2)
 
+    def test_path_qualified_verbs_are_matched_by_basename(self) -> None:
+        for cmd in (
+            "/bin/rm -rf $HOLDFAST_INSTANCE_DIR",
+            "/usr/bin/mv $HOLDFAST_INSTANCE_DIR /tmp/x",
+            "/usr/bin/shred -u $HOLDFAST_INSTANCE_DIR/instance.env",
+            "/usr/bin/truncate -s0 $HOLDFAST_INSTANCE_DIR/a",
+            "/usr/bin/rmdir $HOLDFAST_INSTANCE_DIR/redis",
+            "/usr/bin/unlink $HOLDFAST_INSTANCE_DIR/a",
+            "/usr/bin/cp /tmp/x $HOLDFAST_INSTANCE_DIR/instance.env",
+            "/usr/bin/sed -i s/a/b/ instance.env",
+            "/usr/bin/env rm -rf $HOLDFAST_INSTANCE_DIR",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+
+    def test_a_missing_or_non_string_command_fails_closed(self) -> None:
+        for raw in (
+            '{"tool_input": {}}',
+            "{}",
+            '{"tool_input": {"cmd": "ls"}}',
+            '{"tool_input": {"command": null}}',
+            '{"tool_input": {"command": ["ls"]}}',
+            '{"tool_input": {"command": 5}}',
+            '{"tool_input": {"command": {"a": 1}}}',
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(run_hook("", raw=raw).returncode, 2)
+
+    def test_more_ways_to_delete_are_blocked(self) -> None:
+        for cmd in (
+            "docker-compose -p holdfast-instance down -v",
+            "docker compose -p holdfast-instance down --volumes",
+            "docker compose --project-name holdfast-instance down -v --remove-orphans",
+            "docker rm -v x",
+            "docker rm -fv x",
+            "docker container rm --volumes x",
+            "docker compose rm -sv db",
+            "rsync -a --delete /tmp/empty/ $HOLDFAST_INSTANCE_DIR/",
+            "git -C $HOLDFAST_INSTANCE_DIR clean -fdx",
+            "find $HOLDFAST_INSTANCE_DIR -name x -delete",
+            "docker-compose volume rm x",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+
+    def test_ordinary_compose_and_sync_commands_stay_allowed(self) -> None:
+        for cmd in (
+            "docker compose -p holdfast-instance down",
+            "docker compose -p holdfast-sandbox down -v",
+            "docker rm -f x",
+            "docker compose rm -f db",
+            "rsync -a src/ dst/",
+            "git clean -fdx",
+            "git status",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allowed(cmd)
+
+    def test_the_pointer_files_are_protected(self) -> None:
+        for cmd in (
+            "rm ~/.config/holdfast/instance-dir",
+            "rm -f $XDG_CONFIG_HOME/holdfast/instance-docker-sock",
+            "echo /tmp/decoy > ~/.config/holdfast/instance-dir",
+            "cp /tmp/x ~/.config/holdfast/instance-dir",
+            "sed -i s/a/b/ ~/.config/holdfast/instance-dir",
+            "mv /tmp/x ~/.config/holdfast/instance-dir",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+        self.assert_allowed("cat ~/.config/holdfast/instance-dir")
+
+    def file_payload(self, tool: str, path: str, key: str = "file_path") -> str:
+        return json.dumps({"tool_name": tool, "tool_input": {key: path, "content": "x"}})
+
+    def test_write_and_edit_tools_cannot_touch_the_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            cfg = Path(home) / ".config" / "holdfast"
+            cfg.mkdir(parents=True)
+            (cfg / "instance-dir").write_text("/mnt/vault/hf pointer\n")
+            cases = (
+                ("Write", "/mnt/vault/hf pointer/instance.env", None),
+                ("Edit", "/mnt/vault/hf pointer/documents/a.pdf", None),
+                ("MultiEdit", "/mnt/vault/hf pointer/x/../postgres/PG_VERSION", None),
+                ("Write", "/mnt/vault/hf data/redis/dump.rdb", INSTANCE),
+                ("Write", "/anywhere/instance.env", INSTANCE),
+                ("Write", str(cfg / "instance-dir"), None),
+                ("Write", str(cfg / "instance-docker-sock"), None),
+                ("Write", "/mnt/vault/hf data/./x/../../hf data/a", INSTANCE),
+            )
+            for tool, path, inst in cases:
+                with self.subTest(tool=tool, path=path):
+                    result = run_hook("", inst, home, raw=self.file_payload(tool, path))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+            nb = self.file_payload("NotebookEdit", "/mnt/vault/hf data/n.ipynb", "notebook_path")
+            self.assertEqual(run_hook("", INSTANCE, home, raw=nb).returncode, 2)
+            for tool, path, inst in (
+                ("Write", "/mnt/vault/hf data2/a", INSTANCE),
+                ("Write", "/mnt/vault/hf/a", INSTANCE),
+                ("Edit", "/tmp/notes.txt", INSTANCE),
+                ("Write", "docs/ops/instances.md", INSTANCE),
+                ("Write", str(cfg / "something-else"), None),
+            ):
+                with self.subTest(tool=tool, path=path, allowed=True):
+                    result = run_hook("", inst, home, raw=self.file_payload(tool, path))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_write_tool_without_a_path_fails_closed(self) -> None:
+        raw = json.dumps({"tool_name": "Write", "tool_input": {"content": "x"}})
+        self.assertEqual(run_hook("", raw=raw).returncode, 2)
+
     def test_non_bash_payloads_and_empty_commands_pass(self) -> None:
-        for payload in ('{"tool_input": {}}', '{"tool_input": {"command": ""}}'):
+        for payload in ('{"tool_input": {"command": ""}}',):
             result = subprocess.run(
                 [BASH, str(HOOK)],
                 input=payload,
@@ -247,6 +357,13 @@ class GuardVolumesTest(unittest.TestCase):
             and any("guard-volumes.sh" in h["command"] for h in e["hooks"])
         ]
         self.assertEqual(len(wired), 1)
+        files = [
+            e
+            for e in entries
+            if all(m in e["matcher"] for m in ("Write", "Edit", "MultiEdit", "NotebookEdit"))
+            and any("guard-volumes.sh" in h["command"] for h in e["hooks"])
+        ]
+        self.assertEqual(len(files), 1)
         self.assertTrue(HOOK.stat().st_mode & 0o111, "hook must be executable")
 
 

@@ -1,45 +1,53 @@
 #!/usr/bin/env bash
-# PreToolUse guard for Bash (H2, PHASE-2 contract section 6.1 row 6).
+# PreToolUse guard for Bash, Write, Edit, MultiEdit and NotebookEdit (H2, PHASE-2 contract
+# section 6.1 row 6).
 #
 # Why: the owner's real data lives in the `holdfast-instance` compose project, on bind mounts
 # under the instance directory (a 0700 directory outside the repo, ADR 0019). A stray prune,
 # `rm -rf` or overwritten `instance.env` run from a Claude session would destroy it, and the
-# backup is only as fresh as the last `docs/ops/backup.md` run. This hook blocks (exit 2):
+# backup is only as fresh as the last `docs/ops/backup.md` run.
 #
-#   1. `docker|podman volume rm|remove|prune`, which delete volumes by name or in bulk. The
-#      sandbox project is torn down with `make sandbox-destroy`, which is allowed.
-#   2. `docker|podman system prune ... --volumes` and `system reset` (the bulk forms).
-#   3. A destructive file verb (rm, rmdir, unlink, shred, truncate, mv, find -delete) in a command
-#      that also names the instance: the directory, `instance.env`, or the project name
-#      `holdfast-instance`.
-#   4. A write to the instance directory or `instance.env`: a redirect (`>`, `>>`, `>|`) whose
-#      target names it, or cp, dd, tee, install, or sed -i in a command that names it. This
-#      over-blocks a backup such as `cp "$DIR/instance.env" /safe/`; take backups from your own
-#      terminal.
+# THIS IS A SEATBELT AGAINST CLAUDE'S ACCIDENTS, NOT A BOUNDARY AGAINST AN ADVERSARY. It stops the
+# mistakes and the plain spellings a model actually produces. The real controls are the 0700
+# directory and bind mounts, `instance-up`'s mode check, the backup, and the confinement of
+# Codex and Grok workers (scripts/fc-delegate.sh hides the instance directory, the pointer files
+# and the container sockets from them, and refuses to start without that).
 #
-# "Names the directory" means the literal `HOLDFAST_INSTANCE_DIR`, its value from this shell, or
-# the path in the pointer file `${XDG_CONFIG_HOME:-$HOME/.config}/holdfast/instance-dir` that
-# `make instance-init` writes. The pointer makes the hook work in a session that never exported
-# the variable.
+# Bash commands, blocked (exit 2):
+#   1. `docker|podman|docker-compose volume rm|remove|prune`, which delete volumes by name or in
+#      bulk. The sandbox is torn down with `make sandbox-destroy`, which is allowed.
+#   2. `system prune ... --volumes`, `system reset`, `docker rm -v|--volumes` (removes a
+#      container's anonymous volumes), and `... -p holdfast-instance ... down -v|--volumes`.
+#   3. A destructive verb (rm, rmdir, unlink, shred, truncate, mv, `find -delete`,
+#      `rsync --delete`, `git clean`) in a command that also names the instance. A verb counts
+#      by its basename, so `/bin/rm` is `rm`.
+#   4. A write: a redirect (`>`, `>>`, `>|`) whose target names the instance, or cp, dd, tee,
+#      install or `sed -i` in a command that names it. This over-blocks a backup such as
+#      `cp "$DIR/instance.env" /safe/`; take backups from your own terminal.
 #
-# It matches on the whole command string, not per segment, after normalising it: backslash-newline
-# is removed and every quote and backslash is deleted, so `d'ocker' "volume" rm`, `"rm" -rf` and
-# `r\m` read as the plain command the shell would run. That fails closed: a command that merely
-# mentions these phrases (a commit message, say) is blocked too. Put such text in a file and use
-# `git commit -F`. The hook also fails closed when `jq` is missing or its input can't be parsed.
+# "Names the instance" means any of: the literal `HOLDFAST_INSTANCE_DIR`; the directory's value
+# from this shell or from the pointer file `${XDG_CONFIG_HOME:-$HOME/.config}/holdfast/instance-dir`
+# that `make instance-init` writes (so a session that never exported the variable is covered);
+# `instance.env`; the pointer files themselves (`holdfast/instance-dir`,
+# `holdfast/instance-docker-sock`); and, for deletes only, the project name `holdfast-instance`.
 #
-# What it can NOT catch (it is a guard rail against mistakes, not a sandbox):
-#   - deletion through another language or tool: `python -c 'shutil.rmtree(...)'`, `perl`,
-#     `node`, `git clean`, `rsync --delete`, a script file that was written earlier;
-#   - deleting data through the services: `docker exec db dropdb|psql -c 'DROP ...'`,
-#     `docker run -v <path>:/x alpine ...` where the path comes from a variable not named above;
-#   - a path built at run time (`d=$(printf ...)`), a `cd` into the directory followed by a
-#     relative `rm`, or a symlink pointing at it;
-#   - `chmod`/`chown` that lock the owner out, and `ln -sf` swaps;
-#   - any command outside a Claude session: the owner's terminal, and Codex or Grok workers.
-#     Those workers are confined instead: scripts/fc-delegate.sh hides the instance directory and
-#     the container sockets and refuses to start without them.
-# The real protections are the 0700 bind mounts, `instance-up`'s mode check, and the backup.
+# File tools (Write, Edit, MultiEdit, NotebookEdit): blocked when the target, resolved with `..`
+# and `.` removed, is the instance directory or anything under it, a file named `instance.env`,
+# or one of the pointer files.
+#
+# How it matches: on the whole command string after normalising it. Backslash-newline is removed
+# and every quote and backslash is deleted, so `d'ocker' "volume" rm` and `r\m` read as the plain
+# command the shell would run. That fails closed: a command that merely mentions these phrases (a
+# commit message, say) is blocked too. Put such text in a file and use `git commit -F`.
+# It also fails closed when `jq` is missing, when the input is not JSON, and when
+# `.tool_input.command` is absent or not a string (and no file path is given).
+#
+# Out of scope, stated plainly: `eval` and `bash -c` built from pieces, base64 or `printf`
+# assembled commands, `$IFS` or `$'\x72m'` ANSI-C spellings, interpreters (`python -c
+# 'shutil.rmtree(...)'`, node, perl, ruby), a script file written earlier, `cd` into the
+# directory then a relative `rm`, a path built at run time, a symlink pointing at it, deleting
+# data through the services (`docker exec db dropdb`, `DROP TABLE`), `chmod`/`chown` that lock the
+# owner out, and anything outside a Claude session (the owner's terminal, Codex and Grok workers).
 set -uo pipefail
 
 block() { echo "guard-volumes: BLOCKED - $1" >&2; exit 2; }
@@ -47,34 +55,67 @@ block() { echo "guard-volumes: BLOCKED - $1" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || block "jq is not installed, so this command can't be checked"
 input="$(cat)"
 [ -n "${input//[[:space:]]/}" ] || block "empty hook input"
-cmd="$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null)" ||
+
+cfgdir="${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/holdfast"
+dir="${HOLDFAST_INSTANCE_DIR:-}"
+if [ -z "$dir" ] && [ -f "$cfgdir/instance-dir" ]; then
+  IFS= read -r dir <"$cfgdir/instance-dir" || true
+fi
+case "$dir" in none | "") dir="" ;; esac
+
+# ---- File tools: a path, not a command. ----
+file="$(jq -r '(.tool_input.file_path // .tool_input.notebook_path // empty) | strings' <<<"$input" 2>/dev/null)" ||
   block "hook input is not the JSON this guard expects"
+if [ -n "$file" ]; then
+  resolved="$(realpath -m -- "$file" 2>/dev/null)" || resolved="$file"
+  case "$resolved" in
+    */instance.env | */holdfast/instance-dir | */holdfast/instance-docker-sock)
+      block "a file tool write to instance.env or an instance pointer file (real data, ADR 0019)" ;;
+  esac
+  if [ -n "$dir" ]; then
+    rdir="$(realpath -m -- "$dir" 2>/dev/null)" || rdir="$dir"
+    rdir="${rdir%/}"
+    case "$resolved/" in
+      "$rdir"/*) block "a file tool write under the holdfast-instance directory (real data, ADR 0019); the owner does this from their own terminal" ;;
+    esac
+  fi
+  exit 0
+fi
+
+# ---- Bash. ----
+cmd="$(jq -er 'if (.tool_input.command | type) == "string" then .tool_input.command else error("no command string") end' <<<"$input" 2>/dev/null)" ||
+  block "hook input has no command string, so it can't be checked"
 
 # Normalise: join backslash-newline continuations, drop quotes and backslashes, flatten whitespace.
 flat="$(printf '%s' "$cmd" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n//g' | tr -d "'\"\\\\" | tr '\n\t' '  ')"
 
+engines='(docker|podman|docker-compose|podman-compose)'
+lead='(^|[^[:alnum:]_-])'      # a command word may follow a path: /usr/bin/docker
+verb_lead='(^|[^[:alnum:]_.-])' # same for rm, mv, cp, ...: /bin/rm
+
 # 1. volume rm / remove / prune. `.*` between the words covers `docker -H x volume rm`.
-grep -Eq '(^|[^[:alnum:]_-])(docker|podman)( .*)? volume +(rm|remove|prune)( |$)' <<<"$flat" &&
+grep -Eq "$lead$engines( .*)? volume +(rm|remove|prune)( |\$)" <<<"$flat" &&
   block "docker volume rm/prune deletes named volumes (use 'make sandbox-destroy' for the sandbox; real data is on bind mounts and is never pruned from a session)"
 
-# 2. system prune with --volumes (any position, with or without =true), and system reset.
-grep -Eq '(^|[^[:alnum:]_-])(docker|podman)( .*)? system +prune( .*)? --volumes' <<<"$flat" &&
+# 2. system prune --volumes, system reset, rm -v, and down -v on the instance project.
+grep -Eq "$lead$engines( .*)? system +prune( .*)? --volumes" <<<"$flat" &&
   block "docker system prune --volumes deletes every unused volume"
-grep -Eq '(^|[^[:alnum:]_-])(docker|podman)( .*)? system +reset( |$)' <<<"$flat" &&
+grep -Eq "$lead$engines( .*)? system +reset( |\$)" <<<"$flat" &&
   block "system reset wipes the container engine's storage, volumes included"
-
-# What names the instance. The pointer file covers a session without the variable exported.
-esc() { sed 's/[][\.*^$+?(){}|/]/\\&/g' <<<"${1%/}"; }
-dir="${HOLDFAST_INSTANCE_DIR:-}"
-if [ -z "$dir" ] && [ -f "${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/holdfast/instance-dir" ]; then
-  IFS= read -r dir <"${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/holdfast/instance-dir" || true
+grep -Eq "$lead$engines( .*)? rm( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat" &&
+  block "docker rm -v removes a container's anonymous volumes"
+if grep -Eq 'holdfast-instance' <<<"$flat" &&
+  grep -Eq "(^| )down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat"; then
+  block "down -v on the holdfast-instance project (the real-data stack is stopped with 'make instance-down')"
 fi
-case "$dir" in none | "") dir="" ;; esac
-paths=('HOLDFAST_INSTANCE_DIR' 'instance\.env')
+
+# What names the instance. Regexes (ERE), so metacharacters in the real path are escaped.
+esc() { sed 's/[][\.*^$+?(){}|/]/\\&/g' <<<"${1%/}"; }
+paths=('HOLDFAST_INSTANCE_DIR' 'instance\.env' 'holdfast/instance-(dir|docker-sock)')
 [ -n "$dir" ] && paths+=("$(esc "$dir")")
 
 # 3. a destructive verb plus a reference to the instance.
-verbs='(^|[^[:alnum:]_./-])(rm|rmdir|unlink|shred|truncate|mv)( |$)|find .* -delete'
+verbs="${verb_lead}(rm|rmdir|unlink|shred|truncate|mv)( |\$)|find .* -delete|${verb_lead}rsync( .*)? --delete|${verb_lead}git( .*)? clean( |\$)"
 if grep -Eq "$verbs" <<<"$flat"; then
   for ref in "${paths[@]}" 'holdfast-instance'; do
     grep -Eq -- "$ref" <<<"$flat" &&
@@ -82,14 +123,14 @@ if grep -Eq "$verbs" <<<"$flat"; then
   done
 fi
 
-# 4. a write to the instance directory or instance.env.
-writers='(^|[^[:alnum:]_./-])(cp|dd|tee|install)( |$)|(^|[^[:alnum:]_./-])sed( .*)? (-[a-zA-Z]*i|--in-place)'
+# 4. a write to the instance directory, instance.env or a pointer file.
+writers="${verb_lead}(cp|dd|tee|install)( |\$)|${verb_lead}sed( .*)? (-[a-zA-Z]*i|--in-place)"
 for ref in "${paths[@]}"; do
   grep -Eq -- ">[|]?[[:space:]]*[^[:space:]]*$ref" <<<"$flat" &&
-    block "a redirect into the holdfast-instance directory or instance.env (real data, ADR 0019)"
+    block "a redirect into the holdfast-instance directory, instance.env or a pointer file (real data, ADR 0019)"
   if grep -Eq "$writers" <<<"$flat"; then
     grep -Eq -- "$ref" <<<"$flat" &&
-      block "a write to the holdfast-instance directory or instance.env (real data, ADR 0019); the owner does this from their own terminal"
+      block "a write to the holdfast-instance directory, instance.env or a pointer file (real data, ADR 0019); the owner does this from their own terminal"
   fi
 done
 exit 0
