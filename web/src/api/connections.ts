@@ -64,6 +64,8 @@ export function createLinkToken(body: LinkTokenBody) {
 export function useExchange() {
   const client = useQueryClient()
   return useMutation({
+    // The public token is the mutation's variable: don't let the cache keep it.
+    gcTime: 0,
     mutationFn: (args: { publicToken: string; reservationId: string }) =>
       readData(
         api.POST('/api/connections/plaid/exchange', {

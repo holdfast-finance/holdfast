@@ -24,6 +24,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConnectionList } from '@/features/connections/ConnectionList'
 import { LinkFlow } from '@/features/connections/LinkFlow'
+import { SectionSkeleton } from '@/components/layout/RouteSkeletons'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import {
@@ -146,7 +147,10 @@ export function ConnectionsSettings() {
 
   const [linking, setLinking] = useState(false)
 
-  if (me && !isOwner) {
+  // No owner-only actions until we know who is looking.
+  if (!me) return <SectionSkeleton />
+
+  if (!isOwner) {
     return (
       <div className="flex flex-col gap-6">
         <SettingsSection

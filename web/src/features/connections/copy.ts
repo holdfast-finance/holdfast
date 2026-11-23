@@ -72,6 +72,14 @@ export function abandonErrorMessage(error: unknown): string {
       return 'That is not the phrase. Type it exactly as shown.'
     }
     if (error.code === ERROR_CODES.notFound) return "That link doesn't exist any more."
+    if (error.code === ERROR_CODES.plaidError) {
+      return 'Plaid refused the request. Nothing was changed. Check with Plaid, or try again later.'
+    }
+    if (error.code === ERROR_CODES.reauthRequired || error.code === ERROR_CODES.rateLimited) {
+      return errorMessage(error)
+    }
+    // Any other code: fixed words, never the server's text.
+    return 'That did not work and nothing was changed. Try again.'
   }
   return errorMessage(error)
 }

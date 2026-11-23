@@ -1,5 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { AlertCircle } from 'lucide-react'
+import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
@@ -7,6 +8,7 @@ import { ABANDON_PHRASE, useAbandonReservation, type SlotOut } from '@/api/conne
 import { Field } from '@/components/forms/Field'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { clearOAuthSession } from '@/features/connections/oauthSession'
 import { abandonErrorMessage, isAbandonConflict } from '@/features/connections/copy'
 
 const schema = z.object({
@@ -35,6 +37,11 @@ export function AbandonForm({
   const abandon = useAbandonReservation()
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { phrase: '' } })
   const error = form.formState.errors.phrase?.message
+  const { setFocus } = form
+  useEffect(() => {
+    setFocus('phrase')
+  }, [setFocus])
+  const conflict = isAbandonConflict(abandon.error)
   return (
     <form
       noValidate
@@ -43,7 +50,12 @@ export function AbandonForm({
         void form.handleSubmit((values) => {
           abandon.mutate(
             { reservationId, confirmPhrase: values.phrase.trim() },
-            { onSuccess: onDone },
+            {
+              onSuccess: (slot) => {
+                clearOAuthSession()
+                onDone(slot)
+              },
+            },
           )
         })(event)
       }}
@@ -67,18 +79,22 @@ export function AbandonForm({
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" variant="destructive" disabled={abandon.isPending}>
-          {abandon.isPending
-            ? 'Asking Plaid…'
-            : abandon.error && !isAbandonConflict(abandon.error)
-              ? 'Try again'
-              : 'Release this slot'}
-        </Button>
-        {isAbandonConflict(abandon.error) && (
+        {conflict && (
           <Button type="button" disabled={resolving} onClick={onResolve}>
             Check with Plaid
           </Button>
         )}
+        <Button
+          type="submit"
+          variant={conflict ? 'outline' : 'destructive'}
+          disabled={abandon.isPending}
+        >
+          {abandon.isPending
+            ? 'Asking Plaid…'
+            : abandon.error && !conflict
+              ? 'Try again'
+              : 'Release this slot'}
+        </Button>
       </div>
     </form>
   )

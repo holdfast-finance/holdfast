@@ -18,10 +18,21 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { AbandonForm } from '@/features/connections/AbandonForm'
-import { SLOT_STATE_LABELS, STATUS_LABELS } from '@/features/connections/copy'
+import { SLOT_STATE_LABELS, STATUS_LABELS, linkErrorMessage } from '@/features/connections/copy'
 import { useIsDesktop } from '@/hooks/useBreakpoint'
 
 const DATE = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+function ResolveError({ error }: { error: unknown }) {
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-sm text-destructive-text"
+    >
+      {linkErrorMessage(error)}
+    </div>
+  )
+}
 
 function ConnectionRow({ connection }: { connection: Connection }) {
   return (
@@ -81,7 +92,7 @@ function ReservationRow({
       <p className="text-sm text-muted-foreground">
         Holdfast is holding a slot until Plaid says what happened.
       </p>
-      {resolve.error && <FormError error={resolve.error} />}
+      {resolve.error && <ResolveError error={resolve.error} />}
       <div className="flex flex-wrap gap-2">
         <Button
           variant="outline"
@@ -157,11 +168,15 @@ export function ConnectionList({ isOwner }: { isOwner: boolean }) {
                 setReleasing(null)
               }}
               onResolve={() => {
-                resolve.mutate(releasing)
-                setReleasing(null)
+                resolve.mutate(releasing, {
+                  onSuccess: () => {
+                    setReleasing(null)
+                  },
+                })
               }}
             />
           )}
+          {releasing && resolve.error && <ResolveError error={resolve.error} />}
         </SheetContent>
       </Sheet>
     </div>

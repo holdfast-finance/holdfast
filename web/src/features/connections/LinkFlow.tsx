@@ -35,6 +35,7 @@ import {
   STATUS_LABELS,
   linkErrorMessage,
 } from '@/features/connections/copy'
+import { clearOAuthSession, saveOAuthSession } from '@/features/connections/oauthSession'
 import { openPlaidLink } from '@/features/connections/plaidLink'
 import { useIsDesktop } from '@/hooks/useBreakpoint'
 
@@ -219,7 +220,14 @@ export function LinkFlow({ env, onClose }: { env: Env; onClose: () => void }) {
       const reservation = token.reservation_id
       setStage('linking')
       await openPlaidLink(token.link_token, {
+        onEvent: (eventName) => {
+          // A bank is about to take over the tab: Link must be re-opened with this token.
+          if (eventName === 'OPEN_OAUTH' && reservation) {
+            saveOAuthSession({ token: token.link_token, reservationId: reservation })
+          }
+        },
         onSuccess: (publicToken) => {
+          clearOAuthSession()
           setStage('finishing')
           if (!reservation) return
           exchange.mutate(
@@ -233,11 +241,16 @@ export function LinkFlow({ env, onClose }: { env: Env; onClose: () => void }) {
               onError: () => {
                 void settle(reservation)
               },
+              // Drop the observer so the cache can discard the spent public token (gcTime 0).
+              onSettled: () => {
+                exchange.reset()
+              },
             },
           )
         },
         // Closing Link proves nothing: ask the server, which asks Plaid. Never abandon here.
         onExit: () => {
+          clearOAuthSession()
           if (reservation) void settle(reservation)
           else setStage('plan')
         },
@@ -265,6 +278,10 @@ export function LinkFlow({ env, onClose }: { env: Env; onClose: () => void }) {
     >
       <SheetContent
         side={isDesktop ? 'right' : 'bottom'}
+        onCloseAutoFocus={(event) => {
+          // Link is opening: handing focus back to the page now would pull it out of Plaid's frame.
+          if (stage === 'linking') event.preventDefault()
+        }}
         className="max-h-[92dvh] gap-5 overflow-y-auto p-5 pb-8"
       >
         <SheetHeader className="p-0">

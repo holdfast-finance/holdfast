@@ -3,7 +3,8 @@
  * frame, and nothing else). No npm wrapper: one script tag, one typed function, no dependency.
  *
  * The Link token is passed straight into `Plaid.create` and goes out of scope. It is never put
- * in React state, a store, storage or a log. The public token goes from `onSuccess` to the
+ * in React state, a store or a log. The one exception is a bank's OAuth hand-off, when it sits
+ * in sessionStorage until Link is back (see oauthSession.ts). The public token goes from `onSuccess` to the
  * exchange call and nowhere else.
  */
 
@@ -13,6 +14,8 @@ interface PlaidCreateConfig {
   token: string
   onSuccess: (publicToken: string) => void
   onExit: () => void
+  onEvent?: (eventName: string) => void
+  receivedRedirectUri?: string
 }
 
 interface PlaidHandler {
@@ -59,6 +62,10 @@ export interface LinkCallbacks {
   onSuccess: (publicToken: string) => void
   /** Fires on every close without success. It never decides anything: callers resolve. */
   onExit: () => void
+  /** Link's event names only (never metadata). OPEN_OAUTH means a bank is taking over the tab. */
+  onEvent?: (eventName: string) => void
+  /** The full return URL, when resuming after a bank's OAuth page. */
+  receivedRedirectUri?: string
 }
 
 /** Open Link for a token. Rejects if Plaid's script could not be loaded. */
@@ -75,6 +82,12 @@ export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Pr
       handler?.destroy()
       callbacks.onExit()
     },
+    onEvent: (eventName) => {
+      callbacks.onEvent?.(eventName)
+    },
+    ...(callbacks.receivedRedirectUri
+      ? { receivedRedirectUri: callbacks.receivedRedirectUri }
+      : {}),
   })
   handler.open()
 }

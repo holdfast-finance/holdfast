@@ -35,6 +35,9 @@ export const ConnectionsSettings = lazy(() =>
     default: m.ConnectionsSettings,
   })),
 )
+export const ConnectionsOAuth = lazy(() =>
+  import('@/pages/settings/ConnectionsOAuth').then((m) => ({ default: m.ConnectionsOAuth })),
+)
 /** Step-up prompt: zod + react-hook-form stay out of the entry chunk until it first opens. */
 export const ReauthDialog = lazy(() =>
   import('@/components/ReauthDialog').then((m) => ({ default: m.ReauthDialog })),
