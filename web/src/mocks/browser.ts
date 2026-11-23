@@ -41,6 +41,8 @@ function save(): void {
       transactions: db.transactions,
       importRuns: db.importRuns,
       importedFiles: db.importedFiles,
+      plaid: db.plaid,
+      connections: db.connections,
       session: db.session,
       failedLogins: db.failedLogins,
       seq: db.seq,

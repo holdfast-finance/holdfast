@@ -4,6 +4,8 @@ import { Navigate, type RouteObject } from 'react-router'
 import { RequireAuth } from '@/app/guards'
 import { PAGES, type PageId } from '@/app/nav'
 import {
+  ConnectionsOAuth,
+  ConnectionsSettings,
   HouseholdSettings,
   ImportPage,
   InvitePage,
@@ -61,7 +63,16 @@ export const routes: RouteObject[] = [
                 path: 'security',
                 element: withSuspense(<SecuritySettings />, <SectionSkeleton />),
               },
+              {
+                path: 'connections',
+                element: withSuspense(<ConnectionsSettings />, <SectionSkeleton />),
+              },
             ],
+          },
+          // Where a bank's OAuth page returns (the suggested PLAID_REDIRECT_URI).
+          {
+            path: 'plaid/oauth-return',
+            element: withSuspense(<ConnectionsOAuth />, <SectionSkeleton />),
           },
           {
             path: 'transactions',

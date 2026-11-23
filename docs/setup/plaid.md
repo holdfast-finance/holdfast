@@ -48,3 +48,29 @@ Don't want a Plaid account? Use SimpleFIN or import statements instead. Both wor
 
 Your keys stay in `.env` on your server. Holdfast never logs them, shows them or sends them
 anywhere but Plaid.
+
+## Accepted risk: Plaid Link script without SRI
+
+Holdfast loads Plaid Link from `https://cdn.plaid.com/link/v2/stable/link-initialize.js` with no
+Subresource Integrity hash. Plaid ships that file as a moving "stable" target and publishes no
+hashes, so a pinned hash would break Link on every Plaid release. We accept the risk, with these
+mitigations:
+
+- The production CSP has no `unsafe-inline` for scripts, and allows scripts only from Holdfast
+  itself and `cdn.plaid.com`.
+- The script is added only when an owner opens the link sheet on Settings -> Connections, which
+  follows a step-up check. Nothing loads it on any other page.
+- The Link token and public token are never stored by Holdfast. The one exception is the Link
+  token held in `sessionStorage` while a bank's OAuth page is open, cleared when Link exits,
+  succeeds or is released.
+
+Open item for the P10 threat model: the CSP allowance for `cdn.plaid.com` is site-wide, so any
+page could load a script from that host, not just the Connections page.
+
+## Linking from a phone or an OAuth bank
+
+Banks that sign you in on their own site send the browser back to your redirect URI. Register the
+`suggested_redirect_uri` from the check (it ends in `/plaid/oauth-return`), set `PLAID_REDIRECT_URI`
+to the same value and restart. Holdfast keeps the link's token in this tab's `sessionStorage` only
+while the bank's page is open, and picks the link up again on return. If the tab was closed in
+between, start the link again.

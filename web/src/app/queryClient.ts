@@ -10,6 +10,8 @@ export const queryKeys = {
   household: ['household'] as const,
   people: ['household', 'people'] as const,
   audit: ['audit'] as const,
+  plaidSetup: ['plaid', 'setup'] as const,
+  connections: ['connections'] as const,
 }
 
 function sameKey(a: QueryKey, b: QueryKey): boolean {
