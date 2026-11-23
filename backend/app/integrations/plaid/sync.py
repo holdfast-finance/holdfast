@@ -12,6 +12,7 @@ with a kind, a code and Plaid's request ID only.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -152,6 +153,9 @@ async def _paginate(
                 previous = live.pop(key, None)
                 gone.pop(key, None)
                 # A row new in this batch stays "added" even when a later page modifies it.
+                if previous is not None and txn.pending_external_id is None and not txn.is_pending:
+                    # A later copy that lost the pending link must not unlink the posted row.
+                    txn = replace(txn, pending_external_id=previous[1].pending_external_id)
                 live[key] = ("added" if kind == "added" or _is_added(previous) else kind, txn)
         for row in _rows(page, "removed"):
             key = map_removed(row)

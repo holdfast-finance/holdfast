@@ -147,6 +147,7 @@ def map_transaction(row: dict[str, Any]) -> ConnectorTxn:
         pfc_detailed=_text(category.get("detailed")),
         is_pending=pending,
         pending_external_id=None if pending else _text(row.get("pending_transaction_id")),
+        currency=_text(row.get("iso_currency_code")),
     )
 
 
@@ -156,13 +157,20 @@ def map_removed(row: dict[str, Any]) -> tuple[str, str]:
 
 
 def check_currency(row: dict[str, Any], account_currency: str | None) -> None:
-    """Refuse a transaction the ledger would store under the wrong currency.
+    """Refuse a transaction whose currency cannot be verified against its account.
 
-    ``ConnectorTxn`` has no currency field, so P5b stores each row under its account's currency.
-    A row in another ISO currency, or in an unofficial one (crypto, points), must not be.
+    A row with no currency code at all passes (the account's currency applies). A row that
+    carries any code, ISO or unofficial, needs an account whose currency is known and equal to
+    it. An unofficial currency (crypto, points) is never accepted. ``account_currency`` is
+    ``None`` when the account is absent from every page or reports no currency.
     """
     iso = _text(row.get("iso_currency_code"))
-    if iso is None and _text(row.get("unofficial_currency_code")) is not None:
+    unofficial = _text(row.get("unofficial_currency_code"))
+    if iso is None and unofficial is None:
+        return
+    if iso is None:
         raise MappingError("transaction is in an unofficial currency")
-    if iso is not None and account_currency is not None and iso != account_currency:
+    if account_currency is None:
+        raise MappingError("transaction currency cannot be checked against its account")
+    if iso != account_currency:
         raise MappingError("transaction currency differs from its account")
