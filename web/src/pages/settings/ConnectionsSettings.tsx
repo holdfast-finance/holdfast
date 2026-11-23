@@ -1,4 +1,14 @@
-import { Check, CircleDashed, ExternalLink, Minus, RefreshCw, TriangleAlert, X } from 'lucide-react'
+import {
+  Check,
+  CircleDashed,
+  ExternalLink,
+  Link2,
+  Minus,
+  RefreshCw,
+  TriangleAlert,
+  X,
+} from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router'
 
 import { useMe } from '@/api/auth'
@@ -12,6 +22,8 @@ import { CopyButton } from '@/components/CopyButton'
 import { FormError } from '@/components/forms/Field'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConnectionList } from '@/features/connections/ConnectionList'
+import { LinkFlow } from '@/features/connections/LinkFlow'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import {
@@ -29,6 +41,7 @@ const STATE_STYLE: Record<PlaidSetupStep['state'], { icon: typeof Check; tone: s
   blocked: { icon: X, tone: 'bg-destructive/12 text-destructive-text' },
   optional: { icon: Minus, tone: 'bg-muted text-muted-foreground' },
   unchecked: { icon: CircleDashed, tone: 'bg-muted text-muted-foreground' },
+  warn: { icon: TriangleAlert, tone: 'bg-warning/12 text-warning-text' },
 }
 
 const ENV_LABELS: Record<PlaidSetup['env'], string> = {
@@ -39,8 +52,8 @@ const ENV_LABELS: Record<PlaidSetup['env'], string> = {
 function headline(setup: PlaidSetup): string {
   if (setup.ready) {
     return setup.env === 'sandbox'
-      ? 'Plaid is set up for Sandbox. Bank linking arrives in the next release.'
-      : 'Plaid is set up for real data. Bank linking arrives in the next release.'
+      ? 'Plaid is set up for Sandbox. You can link a test bank above.'
+      : 'Plaid is set up for real data. You can link a bank above.'
   }
   if (!setup.checked && setup.steps[0]?.state === 'done') {
     return 'Your keys are in place. Run the check to try them against Plaid.'
@@ -131,18 +144,55 @@ export function ConnectionsSettings() {
   const setup = usePlaidSetup(isOwner)
   const check = useCheckPlaidSetup()
 
+  const [linking, setLinking] = useState(false)
+
   if (me && !isOwner) {
     return (
-      <SettingsSection id="plaid" title="Plaid">
-        <p className="text-sm text-muted-foreground">
-          Only the household owner can set up bank connections.
-        </p>
-      </SettingsSection>
+      <div className="flex flex-col gap-6">
+        <SettingsSection
+          id="connections"
+          title="Connections"
+          description="Only the household owner can link or change connections."
+        >
+          <ConnectionList isOwner={false} />
+        </SettingsSection>
+      </div>
     )
   }
 
   return (
     <div className="flex flex-col gap-6">
+      <SettingsSection
+        id="connections"
+        title="Connections"
+        description="Banks linked through Plaid."
+        action={
+          <Button
+            disabled={!setup.data?.ready}
+            onClick={() => {
+              setLinking(true)
+            }}
+          >
+            <Link2 aria-hidden="true" />
+            Link a bank
+          </Button>
+        }
+      >
+        {setup.data && !setup.data.ready && (
+          <p className="text-sm text-muted-foreground">
+            Finish the Plaid checklist below first. Linking opens once every required step is done.
+          </p>
+        )}
+        <ConnectionList isOwner />
+      </SettingsSection>
+      {linking && setup.data && (
+        <LinkFlow
+          env={setup.data.env}
+          onClose={() => {
+            setLinking(false)
+          }}
+        />
+      )}
       <SettingsSection
         id="plaid"
         title="Plaid"

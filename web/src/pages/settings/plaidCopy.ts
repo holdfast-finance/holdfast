@@ -28,6 +28,7 @@ export const STATE_LABELS: Record<PlaidSetupStep['state'], string> = {
   blocked: 'Blocked',
   optional: 'Optional',
   unchecked: 'Not checked',
+  warn: 'Heads up',
 }
 
 export const PRODUCT_LABELS: Record<string, string> = {
@@ -47,6 +48,7 @@ export const PRODUCT_STATE_LABELS: Record<PlaidProductStatus['state'], string> =
   implicit: 'Included',
   unchecked: 'Not checked',
   error: "Couldn't check",
+  not_allowed: 'Link will not ask for this',
 }
 
 export interface StepLink {
@@ -125,6 +127,9 @@ const REASONS: Record<string, StepCopy> = {
   few_slots_left: {
     body: 'You are close to the Trial limit. Removing a bank never gives a slot back, so relink instead of re-adding.',
   },
+  product_not_allowed: {
+    body: 'PLAID_PRODUCTS lists a product Link may not request (auth, identity and similar would share account numbers or personal details). Allowed: transactions, liabilities, investments. Fix it in .env and restart.',
+  },
   no_slots_left: {
     body: 'All Trial slots are used. Existing banks keep syncing and can be relinked; new ones cannot be added.',
   },
@@ -137,6 +142,7 @@ const DEFAULTS: Record<PlaidSetupStep['id'], Record<PlaidSetupStep['state'], str
     blocked: 'A key is missing.',
     optional: '',
     unchecked: '',
+    warn: '',
   },
   keys_valid: {
     done: 'Plaid answered with these keys.',
@@ -144,6 +150,7 @@ const DEFAULTS: Record<PlaidSetupStep['id'], Record<PlaidSetupStep['state'], str
     blocked: "Couldn't ask Plaid.",
     optional: '',
     unchecked: 'Run the check to try the keys against Plaid.',
+    warn: '',
   },
   products: {
     done: 'Every product you asked for is on your plan.',
@@ -151,6 +158,7 @@ const DEFAULTS: Record<PlaidSetupStep['id'], Record<PlaidSetupStep['state'], str
     blocked: "Couldn't check products.",
     optional: '',
     unchecked: 'Checked once the keys work.',
+    warn: '',
   },
   redirect_uri: {
     done: 'Plaid has this address on its allowlist.',
@@ -158,6 +166,7 @@ const DEFAULTS: Record<PlaidSetupStep['id'], Record<PlaidSetupStep['state'], str
     blocked: "Couldn't check the redirect URI.",
     optional: 'Not needed on a desktop browser.',
     unchecked: 'Checked once the keys work.',
+    warn: '',
   },
   item_slots: {
     done: 'Each bank login uses one slot. Removing a bank never gives it back.',
@@ -165,6 +174,7 @@ const DEFAULTS: Record<PlaidSetupStep['id'], Record<PlaidSetupStep['state'], str
     blocked: 'No slots left.',
     optional: '',
     unchecked: '',
+    warn: '',
   },
 }
 

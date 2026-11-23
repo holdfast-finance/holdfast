@@ -43,6 +43,14 @@ import {
   newestFirst,
   totalsByCurrency,
 } from '@/mocks/ledger'
+import { ABANDON_PHRASE } from '@/api/connections'
+import {
+  linkPlan,
+  linkReservation,
+  linkTokenRefusal,
+  MOCK_LINK_TOKEN,
+  slotOut,
+} from '@/mocks/connections'
 import { MOCK_CHECK_LIMIT, plaidSetup } from '@/mocks/plaid'
 
 /*
@@ -71,6 +79,14 @@ const STATUS: Record<KnownErrorCode, number> = {
   last_credential: 409,
   conflict: 409,
   busy: 409,
+  confirm_required: 409,
+  no_slots_left: 409,
+  product_not_allowed: 409,
+  days_not_allowed: 409,
+  sandbox_on_real_data: 409,
+  sandbox_connection_present: 409,
+  plaid_error: 409,
+  plaid_unavailable: 502,
   not_found: 404,
   rate_limited: 429,
   validation_error: 422,
@@ -846,6 +862,129 @@ export const handlers = [
         return HttpResponse.json(plaidSetup(db.plaid, true))
       },
       { owner: true },
+    ),
+  ),
+  // Plaid Link (P4-link): plan, token, exchange, resolve, abandon, and the list.
+  http.get(
+    path('/connections'),
+    authed((_ctx, user) =>
+      HttpResponse.json({
+        connections: db.connections.connections,
+        open_reservations:
+          user.role === 'owner'
+            ? db.connections.reservations
+                .filter((r) => r.state === 'reserved' || r.state === 'unknown')
+                .map((r) => ({ id: r.id, state: r.state, env: r.env, created_at: r.created_at }))
+            : [],
+      }),
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/link-plan'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        const kind = str(body, 'login_kind')
+        if (kind !== 'bank_card' && kind !== 'retirement_hsa' && kind !== 'brokerage') {
+          return apiError(ERROR_CODES.validationError, 'Choose what kind of login this is.')
+        }
+        return HttpResponse.json(linkPlan(db.connections, kind, db.plaid.env === 'production'))
+      },
+      { owner: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/link-token'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        if (db.plaid.env === 'production') {
+          const refusal = linkTokenRefusal(db.connections, body)
+          if (refusal) return apiError(refusal.code, refusal.message)
+        }
+        const id = crypto.randomUUID()
+        db.connections.reservations.push({
+          id,
+          state: 'reserved',
+          env: db.plaid.env,
+          created_at: now(),
+          outcome: 'open',
+        })
+        audit('plaid.link_token')
+        return HttpResponse.json({
+          link_token: MOCK_LINK_TOKEN,
+          expiration: null,
+          reservation_id: id,
+        })
+      },
+      { owner: true, reauth: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/exchange'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        const reservation = db.connections.reservations.find(
+          (r) => r.id === str(body, 'reservation_id'),
+        )
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        const connection = linkReservation(db.connections, reservation)
+        return HttpResponse.json({ connection })
+      },
+      { owner: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/reservations/:id/resolve'),
+    authed(
+      ({ params }) => {
+        const reservation = db.connections.reservations.find((r) => r.id === params.id)
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        if (reservation.state === 'reserved' && !db.connections.plaidDown) {
+          if (reservation.outcome === 'item') linkReservation(db.connections, reservation)
+          if (reservation.outcome === 'nothing') reservation.state = 'abandoned'
+        }
+        return HttpResponse.json(slotOut(db.connections, reservation))
+      },
+      { owner: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/reservations/:id/abandon'),
+    authed(
+      async ({ request, params }) => {
+        const body = await readJson(request)
+        if (str(body, 'confirm_phrase') !== ABANDON_PHRASE) {
+          return apiError(ERROR_CODES.confirmRequired, 'Type the confirmation phrase exactly.')
+        }
+        const reservation = db.connections.reservations.find((r) => r.id === params.id)
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        if (reservation.state !== 'reserved' && reservation.state !== 'unknown') {
+          return apiError(ERROR_CODES.conflict, 'That reservation is already settled.')
+        }
+        if (db.connections.plaidDown) {
+          return apiError(
+            ERROR_CODES.plaidUnavailable,
+            "Plaid couldn't confirm that no Item was made. Try again shortly.",
+          )
+        }
+        if (db.connections.abandonConflict) {
+          return apiError(
+            ERROR_CODES.conflict,
+            'Link created an Item. Resolve the reservation instead.',
+          )
+        }
+        reservation.state = 'abandoned'
+        return HttpResponse.json(slotOut(db.connections, reservation))
+      },
+      { owner: true, reauth: true },
     ),
   ),
   http.get(

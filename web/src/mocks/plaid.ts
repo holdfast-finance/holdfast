@@ -124,5 +124,8 @@ export function plaidSetup(s: PlaidScenario, live: boolean): PlaidSetup {
     suggested_redirect_uri: MOCK_SUGGESTED_REDIRECT,
     item_slots_used: s.env === 'sandbox' ? 0 : s.slotsUsed,
     item_slots_total: 10,
+    ledger_orphans: 0,
+    tokens_unreadable: 0,
+    warnings: [],
   }
 }

@@ -1,6 +1,7 @@
 import type { ImportRun } from '@/api/imports'
 import type { Account, Transaction } from '@/api/ledger'
 import type { AuditEntry, FilingRole, UserRole } from '@/api/contracts'
+import { defaultConnectionsScenario, type ConnectionsScenario } from '@/mocks/connections'
 import { defaultPlaidScenario, type PlaidScenario } from '@/mocks/plaid'
 
 /*
@@ -71,6 +72,8 @@ export interface MockState {
   importedFiles: string[]
   /** Plaid setup scenario (see `./plaid.ts`). */
   plaid: PlaidScenario
+  /** Plaid Link scenario: ledger, connections, reservations (see ./connections.ts). */
+  connections: ConnectionsScenario
   session: MockSession | null
   challenges: Set<string>
   failedLogins: number
@@ -89,6 +92,7 @@ function emptyState(): MockState {
     importRuns: [],
     importedFiles: [],
     plaid: defaultPlaidScenario(),
+    connections: defaultConnectionsScenario(),
     session: null,
     challenges: new Set(),
     failedLogins: 0,
