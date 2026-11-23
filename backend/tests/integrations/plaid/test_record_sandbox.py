@@ -97,7 +97,7 @@ def test_main_refuses_in_production_before_any_work(
 
 
 def test_sanitized_page_has_no_ids_tokens_or_person_text() -> None:
-    page = rec.sanitize_page(RAW, rec.Pseudonyms(), 1, last=True)
+    page = rec.sanitize_page(RAW, rec.Pseudonyms(), 1)
     text = rec.dump(page)
     for canary in (
         "REAL",
@@ -131,7 +131,7 @@ def test_sanitized_page_has_no_ids_tokens_or_person_text() -> None:
 
 
 def test_references_still_line_up_and_numbers_are_exact() -> None:
-    page = rec.sanitize_page(RAW, rec.Pseudonyms(), 1, last=True)
+    page = rec.sanitize_page(RAW, rec.Pseudonyms(), 1)
     text = rec.dump(page)
     assert '"amount": 12.34' in text  # a bare number, not a string and not a float repr
     assert '"current": 100.10' in text

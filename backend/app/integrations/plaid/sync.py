@@ -82,7 +82,16 @@ async def fetch_sync(
     max_pages: int = MAX_PAGES,
     today: Callable[[], date] | None = None,
 ) -> SyncBatch:
-    """Read ``/transactions/sync`` from ``cursor`` until Plaid has no more, or ``max_pages``."""
+    """Read ``/transactions/sync`` from ``cursor`` until Plaid has no more, or ``max_pages``.
+
+    Pages fold by ``(account, transaction)`` id in page order, so each id appears at most once:
+    a later page wins, and a later removal drops an earlier row.
+
+    **Fail closed, on purpose.** One unmappable row (a bad amount, a missing date, a foreign
+    currency, a malformed field) refuses the whole fetch with ``UNMAPPABLE_RESPONSE`` and returns
+    no batch. Nothing is stored unflagged and the cursor stays where it was. P5b records the
+    ``error_class`` and Sync Health (P8) shows the Item as failing until the row is understood.
+    """
     as_of = (today or (lambda: datetime.now(UTC).date()))()
     for _attempt in range(MAX_RESTARTS + 1):
         try:
@@ -110,9 +119,9 @@ async def _paginate(
 ) -> SyncBatch:
     accounts: dict[str, ConnectorAccount] = {}
     balances: dict[str, ConnectorBalance] = {}
-    added: list[ConnectorTxn] = []
-    modified: list[ConnectorTxn] = []
-    removed: list[tuple[str, str]] = []
+    # Folded by (account, transaction) id in page order: the last word on an id wins.
+    live: dict[tuple[str, str], tuple[str, ConnectorTxn]] = {}
+    gone: dict[tuple[str, str], None] = {}
     raw_txns: list[dict[str, Any]] = []
     cursor = start
     has_more = True
@@ -124,6 +133,7 @@ async def _paginate(
             "count": PAGE_SIZE,
             "options": {"include_original_description": True},
         }
+        sent = cursor
         if cursor:
             body["cursor"] = cursor
         page = await plaid.post(SYNC_PATH, body)
@@ -134,11 +144,20 @@ async def _paginate(
             balance = map_balance(row, as_of)
             if balance is not None:
                 balances[balance.external_account_id] = balance
-        for row in (*_rows(page, "added"), *_rows(page, "modified")):
-            raw_txns.append(row)
-        added.extend(map_transaction(r) for r in _rows(page, "added"))
-        modified.extend(map_transaction(r) for r in _rows(page, "modified"))
-        removed.extend(map_removed(r) for r in _rows(page, "removed"))
+        for kind in ("added", "modified"):
+            for row in _rows(page, kind):
+                raw_txns.append(row)
+                txn = map_transaction(row)
+                key = (txn.external_account_id, txn.external_id)
+                previous = live.pop(key, None)
+                gone.pop(key, None)
+                # A row new in this batch stays "added" even when a later page modifies it.
+                live[key] = ("added" if kind == "added" or _is_added(previous) else kind, txn)
+        for row in _rows(page, "removed"):
+            key = map_removed(row)
+            live.pop(key, None)
+            gone.pop(key, None)
+            gone[key] = None
         more = page.get("has_more")
         if not isinstance(more, bool):
             raise MappingError("has_more is not a boolean")
@@ -147,6 +166,9 @@ async def _paginate(
             cursor = next_cursor
         elif more:
             raise MappingError("has_more without a next_cursor")
+        if more and cursor == sent:
+            # Looping on one cursor would never finish. Return nothing and let the job retry.
+            raise ConnectorError("retryable", "CURSOR_NOT_ADVANCING", None)
         has_more = more
         status = page.get("transactions_update_status")
         del page
@@ -156,13 +178,17 @@ async def _paginate(
     return SyncBatch(
         accounts=tuple(accounts.values()),
         balances=tuple(balances.values()),
-        added=tuple(added),
-        modified=tuple(modified),
-        removed=tuple(removed),
+        added=tuple(t for kind, t in live.values() if kind == "added"),
+        modified=tuple(t for kind, t in live.values() if kind == "modified"),
+        removed=tuple(gone),
         next_cursor=cursor or None,
         has_more=has_more,
         history_complete=(not has_more and status == HISTORY_DONE),
     )
+
+
+def _is_added(entry: tuple[str, ConnectorTxn] | None) -> bool:
+    return entry is not None and entry[0] == "added"
 
 
 def _rows(page: dict[str, Any], key: str) -> list[dict[str, Any]]:

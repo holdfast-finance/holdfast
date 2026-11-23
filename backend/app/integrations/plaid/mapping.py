@@ -137,7 +137,8 @@ def map_transaction(row: dict[str, Any]) -> ConnectorTxn:
     return ConnectorTxn(
         external_account_id=_required_text(row, "account_id"),
         external_id=_required_text(row, "transaction_id"),
-        posted_date=_date(row.get("date"), "date"),
+        # Plaid can send a null ``date``. The authorized date is the nearest honest stand-in.
+        posted_date=_date(row.get("date") or row.get("authorized_date"), "date"),
         authorized_date=_date(authorized, "authorized_date") if authorized is not None else None,
         amount=-amount,  # the one and only sign flip (outflow negative)
         description_raw=description,

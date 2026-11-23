@@ -52,6 +52,12 @@ async def batch() -> SyncBatch:
     return await run(two_pages)
 
 
+async def first_page() -> SyncBatch:
+    """Page 1 only, before page 2 modifies or removes any of its rows."""
+    async with client_for(two_pages) as plaid:
+        return await fetch_sync(plaid, SecretToken(ACCESS), None, max_pages=1, today=lambda: TODAY)
+
+
 # ------------------------------------------------------------------ signs, one per product
 
 
@@ -62,7 +68,7 @@ async def test_depository_debit_is_negative_and_credit_positive() -> None:
 
 
 async def test_card_purchase_is_negative_and_payment_positive() -> None:
-    by_id = {t.external_id: t for t in (await batch()).added}
+    by_id = {t.external_id: t for t in (await first_page()).added}
     assert by_id["tx-purchase"].amount == Decimal("-19.99")
     assert by_id["tx-payment"].amount == Decimal("300.00")
 
@@ -78,9 +84,19 @@ async def test_loan_and_card_balances_are_negative_when_owed() -> None:
     assert balances["acct-chk"].as_of == TODAY
 
 
+async def first_page_modified() -> SyncBatch:
+    """Only page 2's rows: start from cursor-1, so nothing is folded away."""
+    return await run(two_pages, cursor="cursor-1")
+
+
 async def test_modified_amount_is_negated_once() -> None:
-    (modified,) = (await batch()).modified
-    assert modified.amount == Decimal("-20.49")
+    # Page 2 modifies a row page 1 added: one row, the modified amount, still in "added".
+    result = await batch()
+    assert result.modified == ()
+    (purchase,) = [t for t in result.added if t.external_id == "tx-purchase"]
+    assert purchase.amount == Decimal("-20.49")
+    (single,) = (await first_page_modified()).modified
+    assert single.amount == Decimal("-20.49")
 
 
 async def test_zero_amount_has_no_negative_zero() -> None:
@@ -99,7 +115,7 @@ async def test_zero_amount_has_no_negative_zero() -> None:
 
 async def test_pages_merge_and_history_is_complete() -> None:
     result = await batch()
-    assert len(result.added) == 6
+    assert len(result.added) == 5  # the pending row was removed again on page 2
     assert result.next_cursor == "cursor-2"
     assert result.has_more is False
     assert result.history_complete is True
@@ -112,11 +128,13 @@ async def test_pages_merge_and_history_is_complete() -> None:
 
 
 async def test_pending_posts_through_pending_transaction_id_and_removal() -> None:
+    pending = {t.external_id: t for t in (await first_page()).added}["tx-pending-1"]
+    assert pending.is_pending is True
+    assert pending.pending_external_id is None
+    assert pending.amount == Decimal("-7.00")
     result = await batch()
     by_id = {t.external_id: t for t in result.added}
-    assert by_id["tx-pending-1"].is_pending is True
-    assert by_id["tx-pending-1"].pending_external_id is None
-    assert by_id["tx-pending-1"].amount == Decimal("-7.00")
+    assert "tx-pending-1" not in by_id  # posted and removed within one batch: only posted lands
     assert by_id["tx-posted-1"].is_pending is False
     assert by_id["tx-posted-1"].pending_external_id == "tx-pending-1"
     assert result.removed == (("acct-chk", "tx-pending-1"),)
@@ -127,7 +145,8 @@ async def test_description_prefers_original_and_pfc_maps() -> None:
     assert by_id["tx-debit"].description_raw == "SYNTH GROCER #12"
     assert by_id["tx-credit"].description_raw == "SYNTH PAYROLL"
     assert by_id["tx-debit"].pfc_detailed == "FOOD_AND_DRINK_GROCERIES"
-    assert by_id["tx-pending-1"].pfc_primary is None
+    pending = {t.external_id: t for t in (await first_page()).added}["tx-pending-1"]
+    assert pending.pfc_primary is None
     assert by_id["tx-debit"].authorized_date == date(2026, 10, 31)
 
 
@@ -204,7 +223,7 @@ async def test_mutation_discards_pages_and_restarts_from_the_original_cursor() -
 
     result = await run(handler)
     assert calls == [None, "cursor-1", None, "cursor-1"]  # restart from the start, not page 2
-    assert len(result.added) == 6  # page 1 was not counted twice
+    assert len(result.added) == 5  # page 1 was not counted twice
     assert result.next_cursor == "cursor-2"
 
 

@@ -36,10 +36,22 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "backend" / "tests" / "fixt
 SANDBOX_INSTITUTION = "ins_109508"  # Plaid's "First Platypus Bank" test institution
 MAX_PAGES = 20
 
-_ACCOUNT_KEYS = ("type", "subtype")
-_BALANCE_KEYS = ("current", "available", "limit", "iso_currency_code")
-_TXN_KEYS = ("amount", "date", "authorized_date", "pending", "iso_currency_code")
 _PFC_KEYS = ("primary", "detailed")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_CURRENCY = re.compile(r"[A-Z]{3}")
+_PFC = re.compile(r"[A-Z_]{1,64}")
+_TYPES = frozenset({"depository", "credit", "loan", "investment", "brokerage", "other"})
+# Plaid's documented account subtypes. Anything else becomes "other".
+_SUBTYPES = frozenset(
+    {
+        "checking", "savings", "cd", "money market", "hsa", "cash management", "ebt", "paypal",
+        "prepaid", "credit card", "auto", "business", "commercial", "construction", "consumer",
+        "home equity", "line of credit", "loan", "mortgage", "overdraft", "student", "personal",
+        "401k", "403b", "457b", "529", "ira", "roth", "roth 401k", "sep ira", "simple ira",
+        "pension", "retirement", "brokerage", "mutual fund", "crypto exchange", "isa",
+        "cash isa", "other",
+    }
+)  # fmt: skip
 _STATUS_VALUES = {"NOT_READY", "INITIAL_UPDATE_COMPLETE", "HISTORICAL_UPDATE_COMPLETE"}
 
 
@@ -83,8 +95,33 @@ class Pseudonyms:
         return table[value]
 
 
+def _match(value: object, pattern: re.Pattern[str], placeholder: str) -> str:
+    """Keep a string only when the whole of it matches ``pattern``."""
+    if isinstance(value, str) and pattern.fullmatch(value):
+        return value
+    return placeholder
+
+
+def _optional(value: object, pattern: re.Pattern[str], placeholder: str) -> str | None:
+    return None if value is None else _match(value, pattern, placeholder)
+
+
+def _number(value: object) -> Decimal | int | None:
+    """A Plaid number, or ``None`` for anything else (so a string never rides in a money slot)."""
+    if isinstance(value, bool) or not isinstance(value, int | Decimal):
+        return None
+    return value
+
+
 def _txn(row: dict[str, Any], ps: Pseudonyms) -> dict[str, Any]:
-    out: dict[str, Any] = {k: row[k] for k in _TXN_KEYS if k in row}
+    amount = _number(row.get("amount"))
+    out: dict[str, Any] = {
+        "amount": 0 if amount is None else amount,
+        "date": _match(row.get("date"), _DATE, "1970-01-01"),
+        "authorized_date": _optional(row.get("authorized_date"), _DATE, "1970-01-01"),
+        "pending": row.get("pending") is True,
+        "iso_currency_code": _optional(row.get("iso_currency_code"), _CURRENCY, "XXX"),
+    }
     out["account_id"] = ps.get("account", row.get("account_id"), "acct-{n}")
     out["transaction_id"] = ps.get("txn", row.get("transaction_id"), "txn-{n:04d}")
     out["pending_transaction_id"] = ps.get("txn", row.get("pending_transaction_id"), "txn-{n:04d}")
@@ -96,7 +133,9 @@ def _txn(row: dict[str, Any], ps: Pseudonyms) -> dict[str, Any]:
     out["original_description"] = ps.get("merchant", original, "Merchant {n}")
     category = row.get("personal_finance_category")
     out["personal_finance_category"] = (
-        {k: category[k] for k in _PFC_KEYS if k in category} if isinstance(category, dict) else None
+        {k: _match(category.get(k), _PFC, "OTHER") for k in _PFC_KEYS if k in category}
+        if isinstance(category, dict)
+        else None
     )
     return out
 
@@ -109,22 +148,33 @@ def _removed(row: dict[str, Any], ps: Pseudonyms) -> dict[str, Any]:
 
 
 def _account(row: dict[str, Any], ps: Pseudonyms) -> dict[str, Any]:
-    out: dict[str, Any] = {k: row[k] for k in _ACCOUNT_KEYS if k in row}
     account_id = ps.get("account", row.get("account_id"), "acct-{n}")
-    out["account_id"] = account_id
-    out["name"] = f"Account {str(account_id).split('-')[-1]}"
-    out["official_name"] = None
-    out["mask"] = "0000"
+    kind = row.get("type")
+    subtype = row.get("subtype")
+    out: dict[str, Any] = {
+        "type": kind if isinstance(kind, str) and kind in _TYPES else "other",
+        "subtype": subtype if isinstance(subtype, str) and subtype in _SUBTYPES else "other",
+        "account_id": account_id,
+        "name": f"Account {str(account_id).split('-')[-1]}",
+        "official_name": None,
+        "mask": "0000",
+    }
     balances = row.get("balances")
     if isinstance(balances, dict):
-        out["balances"] = {k: balances.get(k) for k in _BALANCE_KEYS}
+        out["balances"] = {
+            "current": _number(balances.get("current")),
+            "available": _number(balances.get("available")),
+            "limit": _number(balances.get("limit")),
+            "iso_currency_code": _optional(balances.get("iso_currency_code"), _CURRENCY, "XXX"),
+        }
     return out
 
 
-def sanitize_page(
-    page: dict[str, Any], ps: Pseudonyms, cursor_index: int, last: bool
-) -> dict[str, Any]:
-    """Rebuild one /transactions/sync response from allowlisted keys only."""
+def sanitize_page(page: dict[str, Any], ps: Pseudonyms, cursor_index: int) -> dict[str, Any]:
+    """Rebuild one /transactions/sync response from allowlisted keys and strict patterns only.
+
+    ``has_more`` is Plaid's own value, so a recording cut off by the page cap still says so.
+    """
     status = page.get("transactions_update_status")
     return {
         "accounts": [_account(a, ps) for a in page.get("accounts") or [] if isinstance(a, dict)],
@@ -132,7 +182,7 @@ def sanitize_page(
         "modified": [_txn(r, ps) for r in page.get("modified") or [] if isinstance(r, dict)],
         "removed": [_removed(r, ps) for r in page.get("removed") or [] if isinstance(r, dict)],
         "next_cursor": f"cursor-{cursor_index}",
-        "has_more": not last,
+        "has_more": page.get("has_more") is True,
         "transactions_update_status": status if status in _STATUS_VALUES else "NOT_READY",
         "request_id": f"recorded-{cursor_index}",
     }
@@ -199,7 +249,7 @@ def write_pages(out_dir: Path, raw_pages: list[dict[str, Any]], ps: Pseudonyms) 
     """Write sanitized pages. ``"x"`` mode: an existing file is an error, never overwritten."""
     out_dir.mkdir(parents=True, exist_ok=True)
     for index, page in enumerate(raw_pages, start=1):
-        clean = sanitize_page(page, ps, index, last=index == len(raw_pages))
+        clean = sanitize_page(page, ps, index)
         with open(out_dir / f"sync_page{index}.json", "x", encoding="utf-8") as handle:
             handle.write(dump(clean))
 
