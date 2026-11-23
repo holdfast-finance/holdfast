@@ -289,20 +289,29 @@ def test_merchant_key_version_mismatch_is_distinct() -> None:
         conditions_from_json({"v": 1, "merchant_key": "MOONFERN", "merchant_key_version": 2})
 
 
-# --- regex is refused everywhere (until C3d) --------------------------------
+# --- regex goes through RE2 only (C3d) --------------------------------------
 
 
-@pytest.mark.parametrize("pattern", ["a", "^moonfern$", r"\d+", "(", "", "x" * 500])
-def test_compile_pattern_refuses_everything(pattern: str) -> None:
-    with pytest.raises(RuleValidationError, match=r"^Patterns aren't available yet\.$"):
+@pytest.mark.parametrize("pattern", ["(", "", "x" * 500, "a*"])
+def test_compile_pattern_refuses_invalid_empty_long_or_empty_matching(pattern: str) -> None:
+    with pytest.raises(RuleValidationError):
         compile_pattern(pattern)
 
 
-def test_regex_condition_and_codec_refuse() -> None:
-    with pytest.raises(RuleValidationError, match="Patterns aren't available yet"):
-        DescriptionCondition("regex", "^moon")
-    with pytest.raises(RuleValidationError, match="Patterns aren't available yet"):
-        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "^moon"}})
+@pytest.mark.parametrize(
+    ("pattern", "subject"), [("a", "A1"), ("^moonfern$", "MOONFERN"), (r"\d+", "store 42")]
+)
+def test_compile_pattern_accepts_plain_patterns(pattern: str, subject: str) -> None:
+    assert compile_pattern(pattern).search(subject) is True
+
+
+def test_regex_condition_and_codec_go_through_the_engine() -> None:
+    assert DescriptionCondition("regex", "^moon").mode == "regex"
+    conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "^moon"}})
+    with pytest.raises(RuleValidationError):
+        DescriptionCondition("regex", "(")
+    with pytest.raises(RuleValidationError):
+        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "("}})
 
 
 def test_description_value_never_appears_in_repr() -> None:
