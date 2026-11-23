@@ -73,8 +73,14 @@ fails if any of the three disappears.
   fails closed; it can't see a path assembled at run time. It's a guard rail, not a sandbox.
 - `scripts/fc-delegate.sh` binds Codex and Grok workers: it hides `$HOLDFAST_INSTANCE_DIR`, a
   dedicated engine socket in `$HOLDFAST_INSTANCE_DOCKER_SOCK`, the standard container sockets and
-  the whole per-user runtime directory (session bus, systemd user manager, keyring). Export both
-  variables in the shell that launches workers.
+  the whole per-user runtime directory (session bus, systemd user manager, keyring). It fails
+  closed: with no `HOLDFAST_INSTANCE_DIR` and no pointer file it refuses to start, unless you set
+  `HOLDFAST_INSTANCE_DIR=none` on a machine that hosts no instance. `make instance-init` writes the
+  pointer files `${XDG_CONFIG_HOME:-$HOME/.config}/holdfast/instance-dir` (and `instance-docker-sock`
+  when that variable is set), mode 0600, which both `fc-delegate.sh` and the hook fall back to.
+- The hook also blocks overwriting `instance.env` or files under the directory (redirects, cp, dd,
+  tee, install, `sed -i`), and fails closed without `jq` or on unparseable input. Its header lists
+  what it cannot catch.
 - `make down` in the dev checkout, and `docker compose down -v` in any project, leave
   `holdfast-instance` alone: different project name, bind mounts instead of volumes.
 

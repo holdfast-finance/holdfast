@@ -19,12 +19,16 @@
 # Environment:
 #   HOLDFAST_PRIVATE_DIR  the private data directory; must exist. "none" on a machine with no
 #                         real data. Default: $XDG_DATA_HOME/holdfast-private.
-#   HOLDFAST_INSTANCE_DIR the holdfast-instance data directory (H2); hidden when set. Unset on a
-#                         machine that does not host the instance.
+#   HOLDFAST_INSTANCE_DIR the holdfast-instance data directory (H2). Required, like
+#                         HOLDFAST_PRIVATE_DIR: unset falls back to the pointer file
+#                         ${XDG_CONFIG_HOME:-$HOME/.config}/holdfast/instance-dir that
+#                         `make instance-init` writes; with neither, the script refuses. "none" on
+#                         a machine that hosts no instance. A path that does not exist is refused.
 #   HOLDFAST_INSTANCE_DOCKER_SOCK
-#                         the container-engine socket that runs holdfast-instance, when it is not
-#                         one of the standard paths below (for example a dedicated rootless
-#                         engine); hidden when set.
+#                         the container-engine socket that runs holdfast-instance when it is not a
+#                         standard path (a dedicated rootless engine). Falls back to the pointer
+#                         file .../holdfast/instance-docker-sock; "none" or neither means no extra
+#                         hide. A path that does not exist is refused.
 #   FIRSTCHAIR_SESSION    passed as --session.
 #   FC_REPO               passed as delegate --repo.
 #   FC_RUNTIME_DIR        override /run/user/<uid> (tests only).
@@ -62,8 +66,27 @@ fi
 
 # The real-data instance (H2): its bind-mounted data directory and, when it runs on an engine of
 # its own, that engine's socket. The standard sockets and the runtime directory are hidden below.
-[ -n "${HOLDFAST_INSTANCE_DIR:-}" ] && [ -e "$HOLDFAST_INSTANCE_DIR" ] && hides+=("$(realpath "$HOLDFAST_INSTANCE_DIR")")
-[ -n "${HOLDFAST_INSTANCE_DOCKER_SOCK:-}" ] && [ -e "$HOLDFAST_INSTANCE_DOCKER_SOCK" ] && hides+=("$(realpath "$HOLDFAST_INSTANCE_DOCKER_SOCK")")
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/holdfast
+# Value from the variable, else from a pointer file (first line), else empty.
+resolve_setting() {
+  local value=$1 file=$2
+  if [ -z "$value" ] && [ -f "$file" ]; then
+    IFS= read -r value <"$file" || true
+  fi
+  printf '%s' "$value"
+}
+instance=$(resolve_setting "${HOLDFAST_INSTANCE_DIR:-}" "$cfg/instance-dir")
+[ -n "$instance" ] ||
+  die "no instance directory: set HOLDFAST_INSTANCE_DIR (or run make instance-init, which writes $cfg/instance-dir), or set it to 'none' on a machine that hosts no instance"
+if [ "$instance" != "none" ]; then
+  [ -e "$instance" ] || die "instance directory '$instance' does not exist; fix HOLDFAST_INSTANCE_DIR or $cfg/instance-dir, or set it to 'none'"
+  hides+=("$(realpath "$instance")")
+fi
+sock=$(resolve_setting "${HOLDFAST_INSTANCE_DOCKER_SOCK:-}" "$cfg/instance-docker-sock")
+if [ -n "$sock" ] && [ "$sock" != "none" ]; then
+  [ -e "$sock" ] || die "instance engine socket '$sock' does not exist; fix HOLDFAST_INSTANCE_DOCKER_SOCK or $cfg/instance-docker-sock, or set it to 'none'"
+  hides+=("$(realpath "$sock")")
+fi
 
 candidates=(
   # System-wide sockets a worker could abuse: the container engine (root-equivalent for the

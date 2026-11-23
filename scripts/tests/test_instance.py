@@ -89,6 +89,48 @@ class InstanceCheckTest(unittest.TestCase):
         self.assertEqual(self.check(str(self.dir), "env-file").returncode, 2)
         self.dir.chmod(0o700)
 
+    def test_path_with_a_colon_or_newline_is_rejected(self) -> None:
+        # A colon would corrupt the `-v dir:/instance` mount spec; a newline breaks the pointer file.
+        for bad in (f"{self.tmp}/a:b", f"{self.tmp}/a\nb"):
+            with self.subTest(bad=bad):
+                for verb in ("check", "init"):
+                    result = self.check(bad, verb)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("':'", result.stderr)
+
+    def test_init_writes_the_pointer_file_and_uses_the_backend_image_variable(self) -> None:
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        log = self.tmp / "docker.log"
+        docker = fake / "docker"
+        docker.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+        docker.chmod(0o755)
+        target = self.tmp / "fresh instance"
+        home = self.tmp / "home"
+        home.mkdir()
+        sock = self.tmp / "engine.sock"
+        sock.write_text("")
+        env = {
+            "PATH": f"{fake}:/usr/bin:/bin",
+            "HOME": str(home),
+            "HOLDFAST_INSTANCE_DIR": str(target),
+            "HOLDFAST_INSTANCE_DOCKER_SOCK": str(sock),
+            "BACKEND_IMAGE": "example/backend:test",
+        }
+        result = subprocess.run(
+            [BASH, str(SCRIPT), "init"], env=env, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = home / ".config" / "holdfast"
+        self.assertEqual((cfg / "instance-dir").read_text().strip(), str(target))
+        self.assertEqual((cfg / "instance-docker-sock").read_text().strip(), str(sock))
+        self.assertEqual(oct((cfg / "instance-dir").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(cfg.stat().st_mode & 0o777), "0o700")
+        calls = log.read_text()
+        self.assertIn("example/backend:test", calls)
+        self.assertNotIn("holdfast-backend:local", calls)
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o700")
+
     def test_make_instance_up_refuses_before_touching_docker(self) -> None:
         # The Makefile runs the check first, so a loose directory never reaches `docker compose`.
         make = shutil.which("make")

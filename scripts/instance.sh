@@ -9,6 +9,7 @@
 #                this user, is mode 0700 and sits outside the repository (ADR 0019).
 #   init         create the directory (0700), its subdirectories and instance.env (fresh keys)
 #                on first use, then run check. Never overwrites an existing instance.env.
+#               It also writes the pointer files under ${XDG_CONFIG_HOME:-$HOME/.config}/holdfast.
 #   env-file     print the path of instance.env (after check).
 #   sandbox-env  create .env.sandbox with fresh synthetic keys if it is absent.
 set -euo pipefail
@@ -23,6 +24,10 @@ require_dir_var() {
   [ -n "${HOLDFAST_INSTANCE_DIR:-}" ] ||
     die "set HOLDFAST_INSTANCE_DIR to a directory outside the repo (for example on an encrypted disk)"
   case "$HOLDFAST_INSTANCE_DIR" in /*) ;; *) die "HOLDFAST_INSTANCE_DIR must be an absolute path" ;; esac
+  # A colon corrupts the `-v dir:/instance` mount spec below, a newline the pointer file.
+  case "$HOLDFAST_INSTANCE_DIR" in
+    *:* | *$'\n'*) die "HOLDFAST_INSTANCE_DIR must not contain ':' or a newline" ;;
+  esac
 }
 
 check() {
@@ -39,9 +44,25 @@ check() {
   [ "$(dir_mode "$d/instance.env")" = "600" ] || die "$d/instance.env must be mode 600"
 }
 
+# Where agents look the directory up when HOLDFAST_INSTANCE_DIR is not exported: scripts/fc-delegate.sh
+# (hides it from Codex and Grok workers, and refuses to start without it) and
+# .claude/hooks/guard-volumes.sh. One path per file, mode 0600, in a 0700 directory.
+write_pointers() {
+  local cfg=${XDG_CONFIG_HOME:-$HOME/.config}/holdfast
+  (umask 077 && mkdir -p "$cfg")
+  chmod 700 "$cfg"
+  (umask 077 && printf '%s\n' "$1" >"$cfg/instance-dir")
+  chmod 600 "$cfg/instance-dir"
+  if [ -n "${HOLDFAST_INSTANCE_DOCKER_SOCK:-}" ]; then
+    (umask 077 && printf '%s\n' "$HOLDFAST_INSTANCE_DOCKER_SOCK" >"$cfg/instance-docker-sock")
+    chmod 600 "$cfg/instance-docker-sock"
+  fi
+}
+
 init() {
   require_dir_var
   local d=$HOLDFAST_INSTANCE_DIR port=${HOLDFAST_INSTANCE_PORT:-9443}
+  local image=${BACKEND_IMAGE:-holdfast-backend:local}
   [ ! -L "$d" ] || die "$d is a symlink"
   # umask first: the directory is never visible to other users, even briefly.
   (umask 077 && mkdir -p "$d")
@@ -65,13 +86,14 @@ init() {
   # files to the redis user). Postgres keeps DAC_OVERRIDE and chowns its own directory. The
   # 0700 parent still keeps every other user out. Plain `docker run` as root with the image's
   # own chown/chmod, as `make docs-dir` does.
-  docker run --rm --user 0 --entrypoint chown -v "$d:/instance" holdfast-backend:local \
+  docker run --rm --user 0 --entrypoint chown -v "$d:/instance" "$image" \
     -R 10001:10001 /instance/documents
-  docker run --rm --user 0 --entrypoint chown -v "$d:/instance" holdfast-backend:local \
+  docker run --rm --user 0 --entrypoint chown -v "$d:/instance" "$image" \
     -R 0:0 /instance/caddy_data /instance/caddy_config /instance/redis
-  docker run --rm --user 0 --entrypoint chmod -v "$d:/instance" holdfast-backend:local \
+  docker run --rm --user 0 --entrypoint chmod -v "$d:/instance" "$image" \
     755 /instance/redis
   check
+  write_pointers "$d"
   echo "instance directory ready: $d (mode 700)"
 }
 

@@ -55,7 +55,7 @@ down: ## Stop the stack (keeps volumes)
 # ---- holdfast-instance (real data). HOLDFAST_INSTANCE_DIR has no default: you choose the path. ----
 instance-init: ## Create HOLDFAST_INSTANCE_DIR (0700), its subdirectories and instance.env with fresh keys
 	docker build -t $(BACKEND_IMAGE) backend
-	scripts/instance.sh init
+	BACKEND_IMAGE=$(BACKEND_IMAGE) scripts/instance.sh init
 
 instance-up: ## Start holdfast-instance (refuses unless HOLDFAST_INSTANCE_DIR is mode 0700 outside the repo)
 	scripts/instance.sh check

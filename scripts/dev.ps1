@@ -222,6 +222,7 @@ switch ($Target) {
     }
     'instance-init' {
         docker build -t $BackendImage backend
+        $env:BACKEND_IMAGE = $BackendImage
         Invoke-Instance 'init'
     }
     'instance-up' {

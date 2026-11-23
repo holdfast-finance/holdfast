@@ -53,16 +53,19 @@ class FcDelegateTest(unittest.TestCase):
         self.private.mkdir()
         self.log = self.tmp / "calls.jsonl"
 
-    def run_script(self, *args: str, **env_over: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, *args: str, **env_over: str | None) -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.tmp),
             "FAKE_LOG": str(self.log),
             "FC_RUNTIME_DIR": str(self.runtime),
             "HOLDFAST_PRIVATE_DIR": str(self.private),
+            "HOLDFAST_INSTANCE_DIR": "none",
             "DISPLAY": ":0",
         }
         env.update(env_over)
+        for key in [k for k, v in env.items() if v is None]:
+            del env[key]
         return subprocess.run(
             [BASH, str(SCRIPT), *args], env=env, capture_output=True, text=True, check=False
         )
@@ -114,6 +117,83 @@ class FcDelegateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         hidden = [a for a in self.calls()[1]["argv"] if "instance" in a]
         self.assertEqual(hidden, [])
+
+    def pointer(self, name: str, value: str, config_home: Path | None = None) -> None:
+        base = config_home or (self.tmp / ".config")
+        (base / "holdfast").mkdir(parents=True, exist_ok=True)
+        (base / "holdfast" / name).write_text(value + "\n")
+
+    def hidden(self) -> list[str]:
+        argv = self.calls()[1]["argv"]
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "--hide"]
+
+    def test_neither_variable_nor_pointer_fails_closed(self) -> None:
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("HOLDFAST_INSTANCE_DIR", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_none_is_the_explicit_opt_out(self) -> None:
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_instance_directory_refuses(self) -> None:
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(self.tmp / "nope"))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not exist", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_pointer_file_supplies_the_directory_when_the_variable_is_unset(self) -> None:
+        instance = self.tmp / "ptr dir"
+        instance.mkdir()
+        self.pointer("instance-dir", str(instance))
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(instance.resolve()), self.hidden())
+
+    def test_pointer_file_honours_xdg_config_home(self) -> None:
+        instance = self.tmp / "xdg dir"
+        instance.mkdir()
+        xdg = self.tmp / "xdg"
+        self.pointer("instance-dir", str(instance), xdg)
+        result = self.run_script(
+            "codex", "task", HOLDFAST_INSTANCE_DIR=None, XDG_CONFIG_HOME=str(xdg)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(instance.resolve()), self.hidden())
+
+    def test_pointer_to_a_missing_directory_refuses(self) -> None:
+        self.pointer("instance-dir", str(self.tmp / "gone"))
+        result = self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not exist", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_variable_wins_over_the_pointer_and_none_beats_it(self) -> None:
+        a = self.tmp / "a"
+        b = self.tmp / "b"
+        a.mkdir()
+        b.mkdir()
+        self.pointer("instance-dir", str(b))
+        self.assertEqual(self.run_script("codex", "task", HOLDFAST_INSTANCE_DIR=str(a)).returncode, 0)
+        self.assertIn(str(a.resolve()), self.hidden())
+        self.assertNotIn(str(b.resolve()), self.hidden())
+
+    def test_missing_engine_socket_refuses_and_a_pointer_socket_is_hidden(self) -> None:
+        result = self.run_script(
+            "codex", "task", HOLDFAST_INSTANCE_DOCKER_SOCK=str(self.tmp / "no.sock")
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not exist", result.stderr)
+        sock = self.tmp / "engine2.sock"
+        sock.write_text("")
+        self.pointer("instance-docker-sock", str(sock))
+        self.log.unlink(missing_ok=True)
+        result = self.run_script("codex", "task")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(sock.resolve()), self.hidden())
+        self.pointer("instance-docker-sock", str(self.tmp / "gone.sock"))
+        self.assertEqual(self.run_script("codex", "task").returncode, 2)
 
     def test_session_and_repo_go_before_the_subcommands(self) -> None:
         result = self.run_script("grok", "task", FIRSTCHAIR_SESSION="s1", FC_REPO="/r")
@@ -176,6 +256,7 @@ class FcDelegateTest(unittest.TestCase):
             "FAKE_LOG": str(self.log),
             "FC_RUNTIME_DIR": str(self.runtime),
             "HOLDFAST_PRIVATE_DIR": str(self.private),
+            "HOLDFAST_INSTANCE_DIR": "none",
             "FAKE_CONFINED": "false",
         }
         result = subprocess.run(
@@ -196,6 +277,7 @@ class FcDelegateTest(unittest.TestCase):
             "FAKE_LOG": str(self.log),
             "FC_RUNTIME_DIR": str(self.runtime),
             "HOLDFAST_PRIVATE_DIR": str(self.private),
+            "HOLDFAST_INSTANCE_DIR": "none",
         }
         result = subprocess.run(
             [BASH, str(SCRIPT), "codex", "task"],

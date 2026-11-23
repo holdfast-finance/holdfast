@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,14 +20,27 @@ JQ = shutil.which("jq")
 INSTANCE = "/mnt/vault/hf data"  # a synthetic path, with a space, for the resolved-value rule
 
 
-def run_hook(command: str, instance_dir: str | None = None) -> subprocess.CompletedProcess[str]:
-    env = {"PATH": "/usr/bin:/bin"}
-    if instance_dir is not None:
-        env["HOLDFAST_INSTANCE_DIR"] = instance_dir
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    return subprocess.run(
-        [BASH, str(HOOK)], input=payload, env=env, capture_output=True, text=True, check=False
-    )
+def run_hook(
+    command: str,
+    instance_dir: str | None = None,
+    home: str | None = None,
+    raw: str | None = None,
+    path: str = "/usr/bin:/bin",
+) -> subprocess.CompletedProcess[str]:
+    # HOME is an empty throwaway directory unless a test supplies one, so a developer's real
+    # pointer file is never read.
+    with tempfile.TemporaryDirectory() as empty:
+        env = {"PATH": path, "HOME": home or empty}
+        if instance_dir is not None:
+            env["HOLDFAST_INSTANCE_DIR"] = instance_dir
+        payload = (
+            raw
+            if raw is not None
+            else json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        )
+        return subprocess.run(
+            [BASH, str(HOOK)], input=payload, env=env, capture_output=True, text=True, check=False
+        )
 
 
 @unittest.skipIf(JQ is None, "jq is required by the hook")
@@ -129,6 +143,87 @@ class GuardVolumesTest(unittest.TestCase):
         ):
             with self.subTest(cmd=cmd):
                 self.assert_allowed(cmd)
+
+    def test_quoting_and_continuation_cannot_hide_a_command(self) -> None:
+        for cmd in (
+            'docker "volume" rm x',
+            '"docker" volume prune -f',
+            "d'ocker' volume rm x",
+            "docker volume \\\nrm x",
+            "docker vol''ume rm x",
+            '"rm" -rf "$HOLDFAST_INSTANCE_DIR"',
+            "r''m -rf $HOLDFAST_INSTANCE_DIR/postgres",
+            "r\\m -rf $HOLDFAST_INSTANCE_DIR",
+            "docker system prune '--volumes'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+
+    def test_system_reset_is_blocked(self) -> None:
+        for cmd in ("podman system reset", "podman system reset -f", "docker system reset"):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+
+    def test_overwriting_the_env_file_or_instance_files_is_blocked(self) -> None:
+        for cmd in (
+            ': > "$HOLDFAST_INSTANCE_DIR/instance.env"',
+            "echo x >> $HOLDFAST_INSTANCE_DIR/instance.env",
+            "echo x >instance.env",
+            "cat /dev/null >| /somewhere/instance.env",
+            "cp /tmp/x $HOLDFAST_INSTANCE_DIR/instance.env",
+            "dd if=/dev/zero of=$HOLDFAST_INSTANCE_DIR/instance.env",
+            "echo x | tee $HOLDFAST_INSTANCE_DIR/documents/a",
+            "install -m 600 /tmp/x $HOLDFAST_INSTANCE_DIR/instance.env",
+            "sed -i s/a/b/ $HOLDFAST_INSTANCE_DIR/instance.env",
+            "sed -i.bak s/a/b/ instance.env",
+            "sed --in-place s/a/b/ instance.env",
+            "truncate -s0 instance.env",
+            'echo x > "$HOLDFAST_INSTANCE_DIR"/postgres/PG_VERSION',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_blocked(cmd)
+
+    def test_reading_and_unrelated_writes_are_allowed(self) -> None:
+        for cmd in (
+            "cp .env.example /tmp/x",
+            "echo hi > /tmp/out.txt",
+            "make instance-up 2>&1",
+            "docker compose -p holdfast-instance ps 2>&1",
+            "sed -i s/a/b/ README.md",
+            "sed -n 1,5p README.md",
+            "ls -l $HOLDFAST_INSTANCE_DIR > /tmp/listing",
+            "tee /tmp/log",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allowed(cmd)
+
+    def test_pointer_file_names_the_directory_when_the_variable_is_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            cfg = Path(home) / ".config" / "holdfast"
+            cfg.mkdir(parents=True)
+            (cfg / "instance-dir").write_text("/mnt/vault/hf pointer\n")
+            for cmd in (
+                "rm -rf '/mnt/vault/hf pointer/postgres'",
+                "echo x > '/mnt/vault/hf pointer/documents/a'",
+            ):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(run_hook(cmd, None, home).returncode, 2)
+            self.assertEqual(run_hook("rm -rf /mnt/other", None, home).returncode, 0)
+        # No variable and no pointer: only the literal names are recognised.
+        self.assert_allowed("rm -rf /mnt/vault/hf-pointer-unknown")
+
+    def test_fails_closed_without_jq_and_on_unparseable_input(self) -> None:
+        with tempfile.TemporaryDirectory() as only:
+            for tool in ("tr", "grep", "sed", "cat"):
+                found = shutil.which(tool)
+                assert found is not None
+                Path(only, tool).symlink_to(found)
+            result = run_hook("ls", path=only)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("jq", result.stderr)
+        for raw in ("not json", "", '{"tool_input": "oops"}', "[1,2"):
+            with self.subTest(raw=raw):
+                self.assertEqual(run_hook("", raw=raw).returncode, 2)
 
     def test_non_bash_payloads_and_empty_commands_pass(self) -> None:
         for payload in ('{"tool_input": {}}', '{"tool_input": {"command": ""}}'):
