@@ -49,6 +49,9 @@ because a denylist there had already missed entries.
    through `scripts/fc-delegate.sh`, which wraps `firstchair delegate run`. Running the raw CLIs,
    running `firstchair delegate run` directly, and running PR #8's `external-agent-launch.sh` are
    all out.
+   *(Amended by 0039: this point now covers headless workers. Live sessions the owner opens and
+   controls may run unconfined. Headless Grok write workers stay refused, and the wrapper enforces
+   that.)*
 2. **What the wrapper does** (as of PR #72). It adds `--confine`, then a `--hide` for each of
    these that exists:
    - the private data directory (`HOLDFAST_PRIVATE_DIR`, default

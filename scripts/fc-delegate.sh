@@ -38,6 +38,11 @@ for arg in "$@"; do
     { [[ "--confine" == "$name"* ]] || [[ "--hide" == "$name"* ]]; }; then
     die "do not pass $arg; this script sets --confine and every --hide itself"
   fi
+  # Headless Grok stays read-only (ADR 0036 point 4, ADR 0039 item 3). Refuse the flag and any
+  # abbreviation argparse would expand to it.
+  if [ "${#name}" -ge 3 ] && [[ "--allow-grok-write" == "$name"* ]]; then
+    die "do not pass $arg; headless Grok workers are read-only (ADR 0036, ADR 0039)"
+  fi
 done
 
 command -v bwrap >/dev/null 2>&1 || die "bubblewrap (bwrap) is not installed; refusing to run unconfined"

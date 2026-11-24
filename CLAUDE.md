@@ -121,8 +121,9 @@ Docker Compose for services.
   secrets, seed phrases or files under `data/`, `.env` and `secrets/`. `format.sh` formats edited
   Python/TS files once the toolchains exist.
 - **Other vendors' CLIs (Codex as Anvil, Grok as Helm):** live sessions the owner opens and controls
-  may run unconfined and both build on their own branches (ADR 0039, `docs/process/TRIAD.md`). Only
-  Keel merges. Headless jobs Keel launches go only through `firstchair`,
+  may run unconfined and both build on their own branches (ADR 0039, `docs/process/TRIAD.md`). Reach
+  is not use: no session opens the private data directory without a brief from Keel or the owner
+  (`.claude/rules/security.md`). Only Keel merges. Headless jobs Keel launches go only through `firstchair`,
   never their raw CLIs. The full command and flag reference, and when to use `delegate`, `conduct`
   and `run`, is `docs/process/FIRSTCHAIR.md`: read it before the first dispatch of a session. The
   rules that matter most:
@@ -131,7 +132,7 @@ Docker Compose for services.
     (private data directory per ADR 0019, container sockets, session bus, systemd user manager,
     keyring) and refuses to start if confinement cannot be proven. `conduct` cannot confine, so a
     score uses only the `claude` and `self` seats here.
-  - Headless: Codex writes, Grok reads. Pass `--allow-grok-write` only on Keel's explicit brief.
+  - Headless: Codex writes, Grok reads. Never pass `--allow-grok-write` (the wrapper refuses it).
   - Workers never commit, push or merge. Keel applies the diff (`delegate apply --to <worktree>`),
     runs the suite itself, commits with the agent's trailer, then `delegate finish`.
   - Their reviews are second opinions and never satisfy `review-gate`.
