@@ -1,7 +1,7 @@
 """The one writer of ledger money fields (ADR 0011, PLAN 20 money review).
 
 ``LedgerWriter`` is the only code allowed to create a ``Transaction`` or ``TransactionSplit``, or
-to set a transaction's ``amount``, ``category_id``/``category_source``, ``is_transfer`` or
+to set a transaction's ``amount``, category and rule provenance, ``is_transfer`` or
 ``transfer_group_id``. ``tests/test_ledger_single_writer.py`` is a lint over ``app/`` that fails
 the build if any other module does; the real guarantee is RLS plus the database triggers. Reads
 live in ``app.services.ledger``.
@@ -17,8 +17,9 @@ always audited. Automated categorisation goes through ``apply_category`` with a 
 and changes nothing, and it is never audited row by row, nor are ingest inserts: the import or
 sync run is the record. A request can never pick the audit path: ``"user"`` is not an auto source.
 
-**Failure semantics.** Every check runs before a row is touched. A database failure leaves the
-caller's transaction failed: roll back (``scoped_session`` does on exit). Database errors are
+**Failure semantics.** Rule previews use a savepoint to undo a partial match. Other mutations
+validate before changing rows. After a database failure, roll back the transaction
+(``scoped_session`` does on exit). Database errors are
 translated and raised outside the ``except`` block, so no SQL parameters (descriptions, amounts)
 ride on ``__cause__`` or ``__context__``. A row the caller cannot see or write behaves as missing
 (``LedgerNotFoundError``). Deadlocks and serialization failures become ``LedgerRetryableError``.
@@ -36,11 +37,13 @@ from datetime import date
 from decimal import Decimal
 from typing import TypeVar
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import Uuid, any_, bindparam, delete, select, update
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.sql.dml import Update
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db_context import is_household_wide
@@ -131,6 +134,7 @@ class NewTransaction:
     category_source: AutoCategorySource | None = None
     is_pending: bool = False
     pending_external_id: str | None = None
+    category_rule_id: uuid.UUID | None = None
 
 
 class UpsertAction(enum.StrEnum):
@@ -237,6 +241,7 @@ class LedgerWriter:
             plaid_pfc_detailed=new.plaid_pfc_detailed,
             category_id=new.category_id,
             category_source=category_source,
+            category_rule_id=new.category_rule_id if category_source == "rule" else None,
             is_pending=new.is_pending,
             pending_external_id=new.pending_external_id,
         )
@@ -263,6 +268,7 @@ class LedgerWriter:
         previous = txn.category_id
         txn.category_id = category_id
         txn.category_source = "user"
+        txn.category_rule_id = None
         await self._flush()
         self._audit(
             "ledger.category_set",
@@ -282,6 +288,7 @@ class LedgerWriter:
         self._require_live(txn)
         previous = txn.category_source
         txn.category_source = None
+        txn.category_rule_id = None
         await self._flush()
         self._audit(
             "ledger.category_released",
@@ -295,12 +302,14 @@ class LedgerWriter:
         transaction_id: uuid.UUID,
         category_id: uuid.UUID | None,
         source: AutoCategorySource,
+        rule_id: uuid.UUID | None = None,
     ) -> bool:
         """Automated categorisation (rules, Plaid, ML). Not audited per row.
 
         Precedence is user > rule > plaid > ml. A source never overwrites a higher-ranked one: the
         row is left untouched and this returns ``False``. An equal or higher source applies and
-        returns ``True``. A user's choice (including "no category") always holds.
+        returns ``True``. A user's choice (including "no category") always holds. Rules skip split
+        rows.
         """
         try:
             auto = AutoCategorySource(source)
@@ -312,10 +321,72 @@ class LedgerWriter:
         self._require_live(txn)
         if not can_replace_category(txn.category_source, auto.value):
             return False
+        if auto is AutoCategorySource.RULE and await self._has_splits(transaction_id):
+            return False
         txn.category_id = category_id
         txn.category_source = None if category_id is None else auto.value
+        txn.category_rule_id = rule_id if txn.category_source == "rule" else None
         await self._flush()
         return True
+
+    async def apply_rule_bulk(
+        self, rule_id: uuid.UUID, category_id: uuid.UUID, transaction_ids: Sequence[uuid.UUID]
+    ) -> int:
+        """Apply a validated preview to live, unsplit rows under the caller's RLS."""
+        stmt = (
+            update(Transaction)
+            .where(
+                Transaction.category_source.is_distinct_from("user"),
+                ~select(TransactionSplit.id)
+                .where(TransactionSplit.transaction_id == Transaction.id)
+                .exists(),
+            )
+            .values(category_id=category_id, category_source="rule", category_rule_id=rule_id)
+        )
+        return await self._write_rule_categories(stmt, rule_id, transaction_ids, "rule.applied")
+
+    async def clear_rule_categories(
+        self, rule_id: uuid.UUID, transaction_ids: Sequence[uuid.UUID]
+    ) -> int:
+        """Clear the live rows in a validated preview that still carry this rule."""
+        stmt = (
+            update(Transaction)
+            .where(Transaction.category_rule_id == rule_id, Transaction.category_source == "rule")
+            .values(category_id=None, category_source=None, category_rule_id=None)
+        )
+        return await self._write_rule_categories(stmt, rule_id, transaction_ids, "rule.cleared")
+
+    async def _write_rule_categories(
+        self,
+        stmt: Update,
+        rule_id: uuid.UUID,
+        transaction_ids: Sequence[uuid.UUID],
+        action: str,
+    ) -> int:
+        user = self._require_user()
+        ids = bindparam("ids", list(transaction_ids), type_=ARRAY(Uuid()))
+        stmt = stmt.where(Transaction.id == any_(ids), Transaction.superseded_by_id.is_(None))
+        # A stale preview may still match some rows. Roll them back even if the caller catches
+        # preview_stale and continues its outer transaction.
+        async with self._s.begin_nested():
+            result = await self._db(
+                self._s.scalars(stmt.returning(Transaction.id)),
+                TransactionNotFoundError,
+            )
+            count = len(result.all())
+            if count != len(transaction_ids):
+                raise LedgerRuleError("preview_stale")
+            audit.add(
+                self._s,
+                action,
+                household_id=self._household_id,
+                user_id=user,
+                ip=self._ip,
+                entity="rule",
+                entity_id=rule_id,
+                detail={"rule_id": str(rule_id)},
+            )
+        return count
 
     # ------------------------------------------------------------------ amount
 
@@ -509,6 +580,7 @@ class LedgerWriter:
                     await self._require_category(new.category_id)
                     txn.category_id = new.category_id
                     txn.category_source = incoming
+                    txn.category_rule_id = new.category_rule_id if incoming == "rule" else None
                     changed = True
         splits_cleared = dissolved = False
         if txn.amount != new.amount:
@@ -618,6 +690,7 @@ class LedgerWriter:
         pending, post = rows[pending_id], rows[posted_id]
         if outranks(pending.category_source, post.category_source):
             post.category_id, post.category_source = pending.category_id, pending.category_source
+            post.category_rule_id = pending.category_rule_id
         post.notes = pending.notes
         post.is_tax_relevant = pending.is_tax_relevant
         post.tax_tag = pending.tax_tag
@@ -688,9 +761,10 @@ class LedgerWriter:
         ):
             self.counts["supersede_conflict"] += 1
             raise SupersedeConflict("supersede_transfer_conflict")
-        # 1. Category by rank. (C3b adds category_rule_id to this move.)
+        # 1. Category and provenance by rank.
         if outranks(old.category_source, new.category_source):
             new.category_id, new.category_source = old.category_id, old.category_source
+            new.category_rule_id = old.category_rule_id
         # 2. Splits.
         if await self._has_splits(old_id):
             if await self._has_splits(new_id):
@@ -765,6 +839,7 @@ class LedgerWriter:
         old.notes = first_present(old.notes, win.notes)
         if outranks(win.category_source, old.category_source):
             old.category_id, old.category_source = win.category_id, win.category_source
+            old.category_rule_id = win.category_rule_id
         await self._flush()
         self.counts["rows_unsuperseded"] += 1
 

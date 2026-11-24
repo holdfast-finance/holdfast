@@ -934,7 +934,7 @@ export const handlers = [
         const connection = linkReservation(db.connections, reservation)
         return HttpResponse.json({ connection })
       },
-      { owner: true },
+      { owner: true, reauth: true },
     ),
   ),
   http.post(

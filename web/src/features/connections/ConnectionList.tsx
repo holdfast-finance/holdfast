@@ -18,7 +18,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { AbandonForm } from '@/features/connections/AbandonForm'
-import { SLOT_STATE_LABELS, STATUS_LABELS, linkErrorMessage } from '@/features/connections/copy'
+import { SLOT_STATE_LABELS, STATUS_LABELS, resolveErrorMessage } from '@/features/connections/copy'
 import { useIsDesktop } from '@/hooks/useBreakpoint'
 
 const DATE = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -29,7 +29,7 @@ function ResolveError({ error }: { error: unknown }) {
       role="alert"
       className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-sm text-destructive-text"
     >
-      {linkErrorMessage(error)}
+      {resolveErrorMessage(error)}
     </div>
   )
 }
@@ -140,6 +140,7 @@ export function ConnectionList({ isOwner }: { isOwner: boolean }) {
               key={r.id}
               reservation={r}
               onRelease={() => {
+                resolve.reset()
                 setReleasing(r.id)
               }}
             />

@@ -67,10 +67,13 @@ export function useExchange() {
     // The public token is the mutation's variable: don't let the cache keep it.
     gcTime: 0,
     mutationFn: (args: { publicToken: string; reservationId: string }) =>
-      readData(
-        api.POST('/api/connections/plaid/exchange', {
-          body: { public_token: args.publicToken, reservation_id: args.reservationId },
-        }),
+      // After a long bank detour the step-up may have gone stale: prompt, then retry once.
+      withReauth(() =>
+        readData(
+          api.POST('/api/connections/plaid/exchange', {
+            body: { public_token: args.publicToken, reservation_id: args.reservationId },
+          }),
+        ),
       ),
     onSettled: () => client.invalidateQueries({ queryKey: queryKeys.connections }),
   })
