@@ -12,7 +12,12 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   else
     base=$remote_sha
   fi
-  range=${base:+$base..}$local_sha
+  if [ -z "$base" ]; then
+    # No origin/main to measure from: scan from the root commit rather than skip.
+    base=$(git rev-list --max-parents=0 "$local_sha" | tail -1)
+    echo "pre-push: origin/main not found; scanning $local_sha from its root commit" >&2
+  fi
+  range=$base..$local_sha
   if command -v gitleaks >/dev/null 2>&1; then
     gitleaks git --no-banner --redact --log-opts="$range" "$root" >/dev/null 2>&1 ||
       { echo "pre-push: gitleaks flagged $range. Run: gitleaks git -v --log-opts=$range" >&2; status=1; }
@@ -20,10 +25,10 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     echo "pre-push: gitleaks is required (or set HOLDFAST_SKIP_GITLEAKS=1 once)" >&2; status=1
   fi
   scan="${HOLDFAST_PRIVATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/holdfast-private}/tools/scan_rev.py"
-  if [ -f "$scan" ] && [ -n "$base" ]; then
+  "$root/scripts/check-private-data.sh" range "$range" || status=1
+  if [ -f "$scan" ]; then
     python3 -I "$scan" "$root" "$base" "$local_sha" >&2 ||
       { echo "pre-push: real-data scan flagged $range (file:line above)" >&2; status=1; }
   fi
 done
-"$root/scripts/check-private-data.sh" || status=1
 exit $status

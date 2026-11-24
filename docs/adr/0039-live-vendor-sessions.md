@@ -39,7 +39,7 @@ choice between vendors, not a technical boundary, and the owner is entitled to m
    `--allow-grok-write` is never passed. `scripts/fc-delegate.sh` now refuses that flag. Only Keel
    merges, tags and releases. Keel owns design, frontend and architecture decisions.
 5. **Every seat scans before it pushes.** On this public repo a pushed branch is already
-   published. `.githooks/pre-push` runs gitleaks over the pushed range, `check-private-data.sh`,
+   published. `.githooks/pre-push` runs gitleaks over the pushed range, `check-private-data.sh range` (every file added in any pushed commit),
    and the private `scan_rev.py` when it's present. Anvil and Helm use the repo hooks
    (`core.hooksPath .githooks`) and never push with `--no-verify`.
 
@@ -65,8 +65,10 @@ choice between vendors, not a technical boundary, and the owner is entitled to m
   The last one matters most. `main` requires `ci-required` and `review-gate` but no approvals,
   so "only Keel merges" holds by protocol, not by GitHub. A live session using the owner's
   token could merge. Mitigations here are behavioral (items 2 and 4) plus the pre-push scan
-  (item 5). ADR 0036 point 7's trigger applies to live sessions too: any session using a
-  socket, credential or merge right outside its role is an incident, and the owner reviews it.
+  (item 5). ADR 0036 point 7's trigger applies to live sessions too, with the same
+  consequence: if any session uses a socket, credential or merge right outside its role, live
+  Codex and Grok sessions stop until the separate OS user exists, unless the owner explicitly
+  restarts them after reviewing the incident.
 - `CLAUDE.md` and `.claude/rules/security.md` are updated in the same commit.
 - Follow-ups:
   - A separate OS user that owns the private data directory, so that no coding session from any
