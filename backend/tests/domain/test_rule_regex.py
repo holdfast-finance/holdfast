@@ -24,7 +24,74 @@ from tests.domain.regex_corpus import CORPUS, REQUIRED_REJECTIONS
 def test_required_corpus_patterns_are_refused(pattern: str) -> None:
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
-    assert str(caught.value) == PATTERN_TOO_SLOW
+    assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
+
+
+@pytest.mark.parametrize("pattern", REQUIRED_REJECTIONS)
+def test_probe_alone_still_refuses_the_required_patterns(
+    pattern: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The structural limits are not the only defence: with them off, the probe refuses."""
+    monkeypatch.setattr(rule_regex, "MAX_REPEAT_COUNT", 10_000)
+    monkeypatch.setattr(rule_regex, "MAX_PROGRAM_SIZE", 10**9)
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "allowed"),
+    (
+        ("A{16}", True),
+        ("A{17}", False),
+        ("A{2,17}", False),
+        ("A{17,}", False),
+        ("(?:A{4}){8}", False),
+        ("(?:A{4}){4}", True),
+        ("(?:(?:A{4}){2}){3}", False),
+        ("(?:A{17})", False),
+        ("A{4}B{4}C{4}D{4}E{4}", True),
+        (r"A\{99\}", True),
+        ("A{,99}", True),
+    ),
+)
+def test_counted_repetition_is_capped_and_nested_counts_multiply(
+    pattern: str, allowed: bool
+) -> None:
+    if allowed:
+        assert compile_pattern(pattern)
+        return
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+
+
+def test_program_size_ceiling_rejects_oversized_programs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rule_regex, "MAX_PROGRAM_SIZE", 5)
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern("AMZN MKTP|AMAZON")
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+
+
+def test_benign_corpus_stays_well_under_the_program_size_ceiling() -> None:
+    benign = [p for p in CORPUS if p not in REQUIRED_REJECTIONS]
+    sizes = [rule_regex._compile_cold(p).programsize for p in benign]
+    assert max(sizes) * 8 <= rule_regex.MAX_PROGRAM_SIZE
+
+
+def test_literal_case_folding_is_simple_not_full() -> None:
+    assert "ẞ" in rule_regex._literal_alphabet("ß") or "ß" in rule_regex._literal_alphabet("ß")
+    assert "SS" not in rule_regex._literal_alphabet("ß")
+    scanned = rule_regex._scan("ß")
+    assert scanned.literals == ("ß",)
+
+
+def test_group_alphabet_includes_the_samples_of_classes_inside_it() -> None:
+    scanned = rule_regex._scan("(?:[x]|[y])*[x](?:[x]|[y]|[z]){3}[w]")
+    alphabets = {a.upper() for a in rule_regex._group_alphabets(scanned.groups)}
+    assert any(set("XY") <= set(a) for a in alphabets)
 
 
 @pytest.mark.parametrize("pattern", CORPUS)
@@ -38,8 +105,10 @@ def test_corpus_gate(pattern: str, record_property: Callable[[str, object], None
     except RuleValidationError:
         return
 
-    atoms, literals, runs, groups = rule_regex._scan(pattern)
-    alphabets = tuple(rule_regex._atom_alphabets(atoms))
+    scanned = rule_regex._scan(pattern)
+    literals, runs = scanned.literals, scanned.runs
+    alphabets = tuple(rule_regex._atom_alphabets(scanned.atoms))
+    groups = rule_regex._group_alphabets(scanned.groups)
     union = "".join(dict.fromkeys("".join(alphabets))) or "ABCXYZ0129 "
     rng = Random(1729)  # noqa: S311 -- deterministic synthetic fixture
     subjects = tuple("".join(rng.choices(union, k=1024)) for _ in range(128))
@@ -175,9 +244,12 @@ def test_probe_family_cap_rejects_and_never_accepts(monkeypatch: pytest.MonkeyPa
 
 
 def test_group_alphabets_are_probed_and_negated_classes_use_non_ascii_samples() -> None:
-    atoms, _, _, groups = rule_regex._scan("(?:X|Y)*X(?:X|Y|Z){20}W")
-    assert atoms == ()
-    assert set(groups) == {"XY", "XYZ"}
+    scanned = rule_regex._scan("(?:X|Y)*X(?:X|Y|Z){20}W")
+    assert scanned.atoms == ()
+    assert {"".join(sorted(a.upper())) for a in rule_regex._group_alphabets(scanned.groups)} == {
+        "XY",
+        "XYZ",
+    }
     (alphabet,) = rule_regex._atom_alphabets(("[^ -~]",))
     assert "É" in alphabet
     assert "A" not in alphabet

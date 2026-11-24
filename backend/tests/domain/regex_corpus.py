@@ -19,6 +19,10 @@ REQUIRED_REJECTIONS = (
     "(?:Q|J)*Q(?:Q|J|K){30}J(?:Q|J|K){30}W",
     r"[^\x00-\x7F]*É[^\x00-\x7F]{20}Ω",
     "[^ -~]*É[^ -~]{20}#",
+    r"(?:\p{Greek}|\p{Cyrillic})*\p{Greek}(?:\p{Greek}|\p{Cyrillic}){40}#",
+    "(?:[q]|[j])*[q](?:[q]|[j]|[k]){90}[w]",
+    "(?:[x]|[y])*[x](?:[x]|[y]|[z]){20}[w]",
+    "(?:ß|X)*ß(?:ß|X|Y){90}W",
 )
 
 CORPUS = (

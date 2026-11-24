@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import lru_cache
 from random import Random
 from time import perf_counter_ns
 from typing import Protocol
@@ -19,6 +20,11 @@ MAX_SUBJECT_LENGTH = 256
 PROBE_LIMIT_MICROSECONDS = 10
 MAX_CLASS_ATOMS = 16
 MAX_PROBE_FAMILIES = 160
+# Counted repetition above this is refused, nested counts multiplied: bank descriptions never
+# need more, and it bounds the DFA state growth the probe can only sample.
+MAX_REPEAT_COUNT = 16
+# RE2 program size ceiling (instructions). See PHASE-4-contract 2.2 for the measurements.
+MAX_PROGRAM_SIZE = 2000
 REGEX_BUDGET_SECONDS = 10
 INGEST_REGEX_US_PER_ROW = 500
 
@@ -71,6 +77,8 @@ class CompiledPattern(Protocol):
 class _EnginePattern(Protocol):
     def search(self, text: str) -> object | None: ...
     def fullmatch(self, text: str) -> object | None: ...
+    @property
+    def programsize(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -153,19 +161,47 @@ def _literal_escape(token: str) -> str:
     return controls.get(kind, kind)
 
 
-def _scan(
-    pattern: str,
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Scan syntax after RE2 validates it. Track literal runs across quoted text.
+@dataclass(frozen=True, slots=True)
+class _Scan:
+    atoms: tuple[str, ...]
+    literals: tuple[str, ...]
+    runs: tuple[str, ...]
+    # One entry per parenthesised group: its literal letters and the class atoms inside it,
+    # nested groups included.
+    groups: tuple[tuple[str, tuple[str, ...]], ...]
+    # The largest repetition count, multiplied through nesting: (?:a{4}){8} is 32.
+    max_repeat: int
 
-    Returns class atoms, literal letters, literal runs and group alphabets. A group
-    alphabet is the literal letters inside one parenthesised group, nested ones included.
-    """
+
+def _fold_key(text: str) -> str:
+    """A case-insensitive dedupe key that never relies on full case mapping (ß is not SS)."""
+    lowered = text.lower()
+    return lowered if len(lowered) == len(text) else text
+
+
+def _repeat_count(pattern: str, start: int) -> tuple[int, int] | None:
+    """Parse ``{n}``, ``{n,}`` or ``{n,m}`` at ``start``. Return (end, largest count)."""
+    close = pattern.find("}", start + 1)
+    if close == -1:
+        return None
+    count = pattern[start + 1 : close].split(",", 1)
+    if not (count[0].isascii() and count[0].isdigit()):
+        return None
+    if len(count) == 2 and count[1] and not (count[1].isascii() and count[1].isdigit()):
+        return None
+    return close + 1, max(int(part) for part in count if part)
+
+
+def _scan(pattern: str) -> _Scan:
+    """Scan syntax after RE2 validates it. Track literal runs across quoted text."""
     atoms: dict[str, None] = {}
-    groups: dict[str, None] = {}
-    open_groups: list[dict[str, None]] = []
-    literals: dict[str, None] = {}
-    runs: dict[str, None] = {}
+    groups: dict[tuple[str, tuple[str, ...]], None] = {}
+    # Each open group: literal letters, class atoms, and the largest repeat weight inside.
+    open_groups: list[tuple[dict[str, str], dict[str, None], list[int]]] = []
+    top_weight = [1]
+    last_weight = 1
+    literals: dict[str, str] = {}
+    runs: dict[str, str] = {}
     recent = ""
     i = 0
     while i < len(pattern):
@@ -173,6 +209,8 @@ def _scan(
         end = i + 1
         literal = ""
         atom = ""
+        repeated = False
+        closed_weight = 0
         if char == "[":
             end = _bracket_end(pattern, i)
             atom = pattern[i:end]
@@ -195,53 +233,89 @@ def _scan(
                 end += 1
             end += 1
             if pattern[end - 1] != ")":
-                open_groups.append({})
+                open_groups.append(({}, {}, [1]))
         elif char == "(":
-            open_groups.append({})
+            open_groups.append(({}, {}, [1]))
         elif char == ")":
             if open_groups:
-                members = "".join(open_groups.pop())
-                if len(members) > 1:
-                    groups[members] = None
-        elif char == "{" and (close := pattern.find("}", end)) != -1:
-            count = pattern[end:close].split(",", 1)
-            if (
-                count[0].isascii()
-                and count[0].isdigit()
-                and (len(count) == 1 or not count[1] or (count[1].isascii() and count[1].isdigit()))
-            ):
-                end = close + 1
-            else:
-                literal = char
+                letters, members, inner = open_groups.pop()
+                groups[("".join(letters.values()), tuple(members))] = None
+                closed_weight = inner[0]
+                level = open_groups[-1][2] if open_groups else top_weight
+                level[0] = max(level[0], closed_weight)
+                for parent in open_groups:
+                    parent[1].update(members)
+                    for key, letter in letters.items():
+                        parent[0][key] = letter
+        elif char == "{" and (parsed := _repeat_count(pattern, i)) is not None:
+            end, count = parsed
+            repeated = True
+            weight = count * last_weight
+            level = open_groups[-1][2] if open_groups else top_weight
+            level[0] = max(level[0], weight)
+            last_weight = weight
         elif char not in "^$|()*+?":
             literal = char
 
+        if not repeated:
+            last_weight = max(closed_weight, 1)
         if atom:
             atoms[atom] = None
+            for _, members, _ in open_groups:
+                members[atom] = None
         if literal:
-            for letter in literal.upper():
-                literals[letter] = None
-                for group in open_groups:
-                    group[letter] = None
+            for letter in literal:
+                literals.setdefault(_fold_key(letter), letter)
+                for letters, _, _ in open_groups:
+                    letters.setdefault(_fold_key(letter), letter)
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
-                    runs[recent[-size:]] = None
+                    runs.setdefault(_fold_key(recent[-size:]), recent[-size:])
         else:
             recent = ""
         i = end
-    return tuple(atoms), tuple(literals), tuple(runs), tuple(groups)
+    return _Scan(
+        tuple(atoms),
+        tuple(literals.values()),
+        tuple(runs.values()),
+        tuple(groups),
+        top_weight[0],
+    )
+
+
+@lru_cache(maxsize=256)
+def _atom_alphabet(atom: str) -> str:
+    atom_pattern = _compile_cold(atom)
+    # Negated classes use the same non-ASCII-aware sample set as the rest, so a blow-up
+    # built from "not ASCII" is probed over the characters it actually matches.
+    matched = (char for char in _CLASS_SAMPLES + atom if atom_pattern.fullmatch(char))
+    return "".join({_fold_key(char): char for char in matched}.values())
+
+
+@lru_cache(maxsize=256)
+def _literal_alphabet(letter: str) -> str:
+    """Every character the case-insensitive literal matches, by RE2's own simple folding."""
+    engine = _compile_cold(f"\\x{{{ord(letter):x}}}")
+    candidates = dict.fromkeys(_CLASS_SAMPLES + letter + letter.upper() + letter.lower())
+    matched = (char for char in candidates if engine.fullmatch(char))
+    return "".join({_fold_key(char): char for char in matched}.values())
 
 
 def _atom_alphabets(atoms: tuple[str, ...]) -> Iterator[str]:
     for atom in atoms:
-        atom_pattern = _compile_cold(atom)
-        # Negated classes are sampled over the same non-ASCII-aware set as the rest, so a
-        # blow-up built from "not ASCII" is probed over the characters it actually matches.
-        yield "".join(
-            dict.fromkeys(
-                char.upper() for char in _CLASS_SAMPLES + atom if atom_pattern.fullmatch(char)
-            )
-        )
+        yield _atom_alphabet(atom)
+
+
+def _group_alphabets(groups: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[str, ...]:
+    """A group draws on its literals (as RE2 folds them) and the samples of its classes."""
+    found: dict[str, None] = {}
+    for letters, members in groups:
+        merged = "".join(_literal_alphabet(letter) for letter in letters)
+        merged += "".join(_atom_alphabet(member) for member in members)
+        alphabet = "".join(dict.fromkeys(merged))
+        if len(alphabet) > 1:
+            found[alphabet] = None
+    return tuple(found)
 
 
 def _subjects(rng: Random, alphabet: str, count: int, trigger: str = "") -> tuple[str, ...]:
@@ -269,8 +343,11 @@ def _probe_families(
     yield ("A" * MAX_SUBJECT_LENGTH,)
     for members in groups:
         yield _subjects(rng, members, 32)
-    if len(groups) > 1:
-        yield _subjects(rng, "".join(dict.fromkeys("".join(groups))), 32)
+    # One bounded family over every class sample, group alphabet and literal together, so
+    # classes that only interact through a mixed subject are still exercised.
+    union = "".join(dict.fromkeys("".join(alphabets) + "".join(groups) + "".join(literals)))
+    if len(union) > 1:
+        yield _subjects(rng, union, 32)
     for alphabet in dict.fromkeys(alphabets):
         # An atom can have no representative in the bounded sample, for example
         # a negated class that excludes all printable ASCII.
@@ -294,8 +371,7 @@ def _family_mean_ns(pattern: str, subjects: tuple[str, ...]) -> int:
     return min(one_run() for _ in range(3)) // len(subjects)
 
 
-def compile_stored_pattern(pattern: str) -> CompiledPattern:
-    """Compile a previously validated stored pattern without a load-dependent cost probe."""
+def _compile_checked(pattern: str) -> _Pattern:
     if not 1 <= len(pattern) <= MAX_PATTERN_LENGTH or "\0" in pattern:
         raise RuleValidationError("Patterns must be 1 to 128 characters and contain no NUL.")
     engine = _compile_cold(pattern)
@@ -304,20 +380,33 @@ def compile_stored_pattern(pattern: str) -> CompiledPattern:
     return _Pattern(engine)
 
 
+def compile_stored_pattern(pattern: str) -> CompiledPattern:
+    """Compile a previously validated stored pattern without a load-dependent cost probe."""
+    return _compile_checked(pattern)
+
+
 def compile_pattern(pattern: str) -> CompiledPattern:
     """Validate and measure a new pattern before admitting it to the rules engine."""
     if re2 is None:
         raise RuleValidationError(PATTERNS_UNAVAILABLE)
-    compiled = compile_stored_pattern(pattern)
+    compiled = _compile_checked(pattern)
+    # Structural limits run first and bound the whole class of blow-ups. The probe below
+    # is a second line, not the only one.
     try:
-        atoms, literals, runs, groups = _scan(pattern)
+        scanned = _scan(pattern)
     except (IndexError, ValueError):
         # The scanner only sees patterns RE2 accepted; anything it can't parse is refused.
         raise RuleValidationError(PATTERN_INVALID) from None
-    if len(atoms) > MAX_CLASS_ATOMS:
+    if scanned.max_repeat > MAX_REPEAT_COUNT:
+        raise RuleValidationError(PATTERN_TOO_COMPLEX)
+    if compiled.engine.programsize > MAX_PROGRAM_SIZE:
+        raise RuleValidationError(PATTERN_TOO_COMPLEX)
+    if len(scanned.atoms) > MAX_CLASS_ATOMS:
         raise RuleValidationError("This pattern has too many character classes.")
-    alphabets = tuple(_atom_alphabets(atoms))
-    for count, subjects in enumerate(_probe_families(alphabets, literals, runs, groups), 1):
+    alphabets = tuple(_atom_alphabets(scanned.atoms))
+    groups = _group_alphabets(scanned.groups)
+    families = _probe_families(alphabets, scanned.literals, scanned.runs, groups)
+    for count, subjects in enumerate(families, 1):
         if count > MAX_PROBE_FAMILIES:
             # A cap that is hit rejects. It never accepts what it could not finish probing.
             raise RuleValidationError(PATTERN_TOO_COMPLEX)

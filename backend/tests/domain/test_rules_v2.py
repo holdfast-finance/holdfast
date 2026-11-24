@@ -346,25 +346,33 @@ def test_stored_loading_still_refuses_invalid_patterns() -> None:
         conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "("}}, stored=True)
 
 
-def test_no_write_path_can_reach_compile_stored_pattern() -> None:
+def test_no_write_path_can_reach_the_stored_loader() -> None:
     import ast
     import pathlib
 
     app = pathlib.Path(__file__).resolve().parents[2] / "app"
+    forbidden = ("compile_stored_pattern", "_from_store", "stored=True")
     users = {
         str(path.relative_to(app))
         for path in app.rglob("*.py")
-        if "compile_stored_pattern" in path.read_text()
+        if any(name in path.read_text() for name in forbidden)
     }
-    # Only the engine module defines it and the pure codec imports it. Services,
-    # routers and API schemas must go through compile_pattern.
+    # Only the engine module defines the stored compile and the pure codec uses it.
+    # The future loader module is allow-listed here by name when it lands (C3e).
     assert users == {"domain/rule_regex.py", "domain/rules.py"}
+    for request_path in ("api", "services"):
+        for path in (app / request_path).rglob("*.py"):
+            text = path.read_text()
+            assert not any(name in text for name in forbidden), path
     tree = ast.parse((app / "domain" / "rules.py").read_text())
-    calls = [
+    references = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "compile_stored_pattern"
+        if isinstance(node, ast.Name) and node.id == "compile_stored_pattern"
     ]
-    assert len(calls) == 1  # the guarded `stored` branch in DescriptionCondition
+    assert len(references) == 1  # the one reference, in the private _from_store
+
+
+def test_stored_flag_is_not_a_constructor_argument() -> None:
+    with pytest.raises(TypeError):
+        DescriptionCondition("regex", "^moon", True)  # type: ignore[call-arg]

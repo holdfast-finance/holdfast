@@ -138,13 +138,23 @@ MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
 REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
 INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
 MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
+MAX_REPEAT_COUNT = 16             # counted repetition cap, nested counts multiplied. Refused with PATTERN_TOO_COMPLEX
+MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ceiling
 def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
 def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- Structural limits run before the probe (ADR 0024 follow-up). `MAX_PROGRAM_SIZE = 2000` is
+  13x the benign corpus peak (153), leaves `\p{L}+` (1,202) valid, and a 16-fold
+  `\p{Greek}|\p{Cyrillic}` group (1,617) is under it, so the repetition cap is the primary control
+  and the probe refuses that one.
+  The probe remains for patterns inside both limits.
+- `stored` is not a constructor argument. The loader reaches `compile_stored_pattern` only through
+  `DescriptionCondition._from_store`, via `conditions_from_json(obj, stored=True)`. A test fails if
+  `app/api/` or `app/services/` mention either.
 - `search(text, clock, rule_id)` times the call into `RegexClock` (integer nanoseconds). Over budget
   it raises `RegexBudgetExceeded`, and with no `rule_id` it still raises (fail closed).
 - `compile_stored_pattern` is only for rows that already passed the probe: the loader
-  (`conditions_from_json(obj, stored=True)`) uses it so that loading is deterministic (ADR 0024
+  (`conditions_from_json(obj, stored=True)`, which calls `DescriptionCondition._from_store`) uses it so that loading is deterministic (ADR 0024
   point 4b). Create, edit and preview paths use `compile_pattern`. A test fails if any other module
   references it.
 - **C3c deletes the C3a `re` validator** (`_REGEX_TOKEN`, `_compile_safe_regex`, the `re`

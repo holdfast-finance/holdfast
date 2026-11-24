@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import InitVar, dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -74,18 +74,30 @@ class DescriptionCondition:
     """Match normalized descriptions.
 
     Regex mode goes through ``compile_pattern`` (with the save-time cost probe) on the
-    create/save path. The loader passes ``stored=True`` for rows that already passed that
-    probe, which uses ``compile_stored_pattern`` so loading is deterministic (ADR 0024).
-    Only ``conditions_from_json(..., stored=True)`` may set it.
+    create/save path. The loader builds rows that already passed that probe through the
+    private ``_from_store``, which uses ``compile_stored_pattern`` so loading is
+    deterministic (ADR 0024). Nothing under ``app/api`` or ``app/services`` may call it.
     """
 
     mode: Literal["contains", "starts-with", "exact", "regex"]
     value: str = field(repr=False)
-    stored: InitVar[bool] = False
     _literal: str = field(init=False, repr=False, compare=False)
     _regex: CompiledPattern | None = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self, stored: bool) -> None:
+    def __post_init__(self) -> None:
+        self._init(compile_pattern)
+
+    @classmethod
+    def _from_store(
+        cls, mode: Literal["contains", "starts-with", "exact", "regex"], value: str
+    ) -> DescriptionCondition:
+        condition = object.__new__(cls)
+        object.__setattr__(condition, "mode", mode)
+        object.__setattr__(condition, "value", value)
+        condition._init(compile_stored_pattern)
+        return condition
+
+    def _init(self, compile_regex: Callable[[str], CompiledPattern]) -> None:
         if self.mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
         if not self.value.strip():
@@ -93,9 +105,7 @@ class DescriptionCondition:
         if self.mode != "regex" and len(self.value) > MAX_DESCRIPTION_VALUE_LENGTH:
             raise RuleValidationError("Description text is too long.")
         literal = normalize_description(self.value) if self.mode != "regex" else ""
-        regex: CompiledPattern | None = None
-        if self.mode == "regex":
-            regex = compile_stored_pattern(self.value) if stored else compile_pattern(self.value)
+        regex = compile_regex(self.value) if self.mode == "regex" else None
         object.__setattr__(self, "_literal", literal)
         object.__setattr__(self, "_regex", regex)
 
@@ -453,7 +463,10 @@ def conditions_from_json(obj: Mapping[str, object], *, stored: bool = False) -> 
         mode = raw_desc["mode"]
         if mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
-        description = DescriptionCondition(mode, raw_desc["value"], stored)  # type: ignore[arg-type]
+        if stored:
+            description = DescriptionCondition._from_store(mode, raw_desc["value"])  # type: ignore[arg-type]
+        else:
+            description = DescriptionCondition(mode, raw_desc["value"])  # type: ignore[arg-type]
 
     key = obj.get("merchant_key")
     key_version = obj.get("merchant_key_version")

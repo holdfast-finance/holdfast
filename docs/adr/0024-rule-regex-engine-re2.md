@@ -260,3 +260,22 @@ Lattice's measurements, 2026-11-21:
   measured so far: counted classes after an unanchored prefix, decoys, escapes, negation, POSIX and
   frequent literals. A new evasion is a corpus addition and a probe change in `rule_regex.py`,
   reviewed by Bulwark. The cap and the 256-character subject bound the damage in the meantime.
+
+## Follow-up (C3d review rounds 1 and 2): structural limits before the probe
+
+Four rewrites of the blow-up shapes evaded the probe (alternation groups of classes, Unicode
+property classes, single-letter classes, and a literal whose full case mapping differs from RE2's
+simple folding). A heuristic over sampled subjects cannot close a class of attacks alone, so
+`compile_pattern` now applies structural limits first, and the probe is the second line:
+
+- **Counted repetition cap.** Any `{n}`, `{n,}` or `{n,m}` with n or m above 16 is refused, and
+  nested counts multiply: `(?:a{4}){8}` is 32 and is refused. Bank descriptions never need more.
+- **RE2 program-size ceiling** of 2,000 (`MAX_PROGRAM_SIZE`, from the binding's `programsize`).
+  The benign corpus peaks at 153 (13x headroom). `\p{L}+` is 1,202 and passes. A 16-fold
+  `\p{Greek}|\p{Cyrillic}` group is 1,617, and ASCII-class blow-ups are far smaller, so this
+  ceiling is a coarse bound on Unicode class unions, not the primary control.
+- **Probe fixes.** A group's alphabet is its literals (as RE2 folds them, never `str.upper()`)
+  plus the samples of every class inside it. One bounded union family mixes all samples. Dedupe
+  keys use simple lower-casing, so `ß` is not `SS`.
+- With the first two limits switched off, the probe alone still refuses every required rejection,
+  including count-16 variants of the four evasions.
