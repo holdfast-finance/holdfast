@@ -108,9 +108,14 @@ class ConnectorTxn:
     pfc_detailed: str | None
     is_pending: bool
     pending_external_id: str | None
+    # ISO 4217 code the provider reported on this row, or None when it sent none. Ingest checks
+    # it against the stored account currency and never stores a row under another currency.
+    currency: str | None = None
 
     def __post_init__(self) -> None:
         _set(self, "amount", _require_cents(self.amount, "amount"))
+        if self.currency is not None and not _CURRENCY.fullmatch(self.currency):
+            raise ValueError("currency must be three upper-case letters or None")
         if not self.external_id:
             raise ValueError("external_id must not be empty")
         if self.pending_external_id is not None and (
