@@ -115,6 +115,17 @@ class InstanceCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("inside the repository", result.stderr)
 
+    def test_exported_secrets_that_would_override_the_env_file_refuse(self) -> None:
+        for var in ("PLAID_ENV", "FERNET_KEY", "POSTGRES_PASSWORD"):
+            with self.subTest(var=var):
+                result = subprocess.run(
+                    [BASH, str(SCRIPT), "check"],
+                    env={"PATH": "/usr/bin:/bin", "HOLDFAST_INSTANCE_DIR": str(self.dir), var: "x"},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"{var} is exported", result.stderr)
+
     def test_a_symlinked_subdirectory_refuses(self) -> None:
         other = self.tmp / "elsewhere"
         other.mkdir()
@@ -221,6 +232,33 @@ class FixedProjectNamesTest(unittest.TestCase):
     def test_destroy_and_down_carry_the_exact_project_guard(self) -> None:
         for target in ("sandbox-destroy", "sandbox-down"):
             self.assertIn('"holdfast-sandbox" = holdfast-sandbox', self.dry_run(target))
+
+
+class RealDataFlagTest(unittest.TestCase):
+    """Only the prod and instance compose files set HOLDFAST_REAL_DATA (D13)."""
+
+    SERVICES = ("api", "worker", "migrate", "rotate-keys")
+
+    @staticmethod
+    def flagged(*files: str) -> dict[str, bool]:
+        import re
+
+        text = "\n".join((ROOT / f).read_text() for f in files)
+        out = {}
+        for svc in RealDataFlagTest.SERVICES:
+            m = re.search(rf"^  {svc}:\n(.*?)(?=^  \S|^\S|\Z)", text, re.S | re.M)
+            out[svc] = bool(m and re.search(r'HOLDFAST_REAL_DATA: "true"', m.group(1)))
+        return out
+
+    def test_prod_and_instance_set_it_everywhere(self) -> None:
+        for f in ("infra/docker-compose.prod.yml", "docker-compose.instance.yml"):
+            with self.subTest(file=f):
+                self.assertEqual(set(self.flagged(f).values()), {True})
+
+    def test_dev_and_sandbox_never_set_it(self) -> None:
+        for f in ("docker-compose.yml", "docker-compose.dev.yml", "docker-compose.sandbox.yml"):
+            with self.subTest(file=f):
+                self.assertNotIn("HOLDFAST_REAL_DATA", (ROOT / f).read_text())
 
 
 if __name__ == "__main__":

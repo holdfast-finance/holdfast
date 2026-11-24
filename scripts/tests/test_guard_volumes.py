@@ -255,6 +255,13 @@ class GuardVolumesTest(unittest.TestCase):
 
     def test_more_ways_to_delete_are_blocked(self) -> None:
         for cmd in (
+            "docker compose down -v",
+            "docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v",
+            "docker compose -pholdfast down -v",
+            "export COMPOSE_PROJECT_NAME=holdfast; docker compose down -v",
+            "docker compose down --volumes=true",
+            "docker compose down -v=true",
+            "docker-compose down -v",
             "docker compose -p holdfast down -v",
             "docker compose --project-name holdfast down --volumes",
             "docker compose --project-name=holdfast down -v",

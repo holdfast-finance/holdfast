@@ -17,8 +17,8 @@
 #   1. `docker|podman|docker-compose volume rm|remove|prune`, which delete volumes by name or in
 #      bulk. The sandbox is torn down with `make sandbox-destroy`, which is allowed.
 #   2. `system prune ... --volumes`, `system reset`, `docker rm -v|--volumes` (removes a
-#      container's anonymous volumes), and `down -v|--volumes` with `-p holdfast` (the dev stack)
-#      or `holdfast-instance`.
+#      container's anonymous volumes), and any compose `down -v|--volumes` unless
+#      an explicit `-p` names a project other than `holdfast` or `holdfast-instance`.
 #   3. A destructive verb (rm, rmdir, unlink, shred, truncate, mv, `find -delete`,
 #      `rsync --delete`, `git clean`) in a command that also names the instance. A verb counts
 #      by its basename, so `/bin/rm` is `rm`.
@@ -115,13 +115,19 @@ grep -Eq "$lead$engines( .*)? system +reset( |\$)" <<<"$flat" &&
   block "system reset wipes the container engine's storage, volumes included"
 grep -Eq "$lead$engines( .*)? rm( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat" &&
   block "docker rm -v removes a container's anonymous volumes"
-if grep -Eq "(^| )down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat"; then
-  # The live dev stack is the compose project `holdfast`; the real-data stack is `holdfast-instance`.
-  # Only `holdfast-sandbox` may be brought down with -v (make sandbox-destroy).
-  grep -Eq 'holdfast-instance' <<<"$flat" &&
-    block "down -v on the holdfast-instance project (the real-data stack is stopped with 'make instance-down')"
-  grep -Eq "((^| )(-p|--project-name)[ =]+|COMPOSE_PROJECT_NAME=)holdfast( |\$)" <<<"$flat" &&
-    block "down -v on the holdfast project (the dev stack's named volumes; only 'make sandbox-destroy' deletes volumes)"
+# An allowlist: a compose `down` that removes volumes (-v, -vf, --volumes, --volumes=true, -v=true)
+# is blocked unless the command names a project with -p / --project-name (spaced, `=` or attached,
+# as in `-pname`) whose value is neither `holdfast` (the live dev stack) nor `holdfast-instance`
+# (real data). With no explicit project, the name comes from the directory or COMPOSE_PROJECT_NAME,
+# and in this repo that is `holdfast`, so it is blocked too. `make sandbox-destroy` passes because
+# the hook only sees `make`, and `-p holdfast-sandbox down -v` is allowed.
+if grep -Eq "$lead$engines( .*)? down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)(=[^ ]*)?( |\$)" <<<"$flat"; then
+  proj="$(grep -oE '(^| )(-p|--project-name)[ =]*[^ -][^ ]*' <<<"$flat" | tail -n 1 |
+    sed -E 's/^ *(-p|--project-name)[ =]*//')"
+  case "$proj" in
+    "" | holdfast | holdfast-instance)
+      block "down -v removes volumes; without an explicit -p <project> that is not holdfast or holdfast-instance it can hit the dev stack or real data (only 'make sandbox-destroy' deletes volumes)" ;;
+  esac
 fi
 
 # What names the instance. Regexes (ERE), so metacharacters in the real path are escaped.

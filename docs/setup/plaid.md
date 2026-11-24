@@ -26,7 +26,9 @@ Don't want a Plaid account? Use SimpleFIN or import statements instead. Both wor
 5. **Apply for the Trial plan** at <https://dashboard.plaid.com/trial-plan> when Sandbox works.
    It is free and gives you real data for up to 10 bank logins.
 6. **Switch to real data:** add `PLAID_SECRET_PRODUCTION`, set `PLAID_ENV=production`, restart,
-   and run the check again.
+   and run the check again. Production runs only in a real-data deployment: `make up-prod`
+   (`infra/docker-compose.prod.yml`) or the `holdfast-instance` project (`docs/ops/instances.md`).
+   Both set `HOLDFAST_REAL_DATA=true`. The dev stack (`make up`) and the sandbox refuse it.
 
 ## What the check tells you
 
