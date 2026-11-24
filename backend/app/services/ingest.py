@@ -4,21 +4,9 @@
 household-wide (a job) or the service must be given a named ``user_id`` (a request bound to the
 authenticated user); the ledger verbs refuse an anonymous person session.
 
-Order inside one batch (contract 3.4 says removed first; this differs on purpose):
-
-1. accounts resolve through ``connector_account_link`` (ADR 0033 1)
-2. balances
-3. **added, then modified, then removed**
-4. matching and supersession (ADR 0035 4), unless history is incomplete
-
-Why removed goes *last*. Plaid reports a pending row that posted as a ``removed`` entry for the
-pending id **and** an ``added`` row naming it in ``pending_external_id`` (connector.py). That
-removal is the pending row being posted, not a deletion. Applying it first would delete the
-pending row before ``post_pending`` can carry its category, notes and splits to the posted twin,
-and the twin would land as a bare insert. Added-first posts the pending row, so the later
-``remove_external`` finds nothing and returns ``False``, which is success. A genuine removal
-(no posted twin in the batch) still deletes the row, and no row is ever deleted before its posted
-twin lands.
+Process removals before modified and added rows, except when a posted row in the
+same batch names the removed pending ID. Defer that removal until after the upserts
+so the pending-to-posted transition can preserve the existing row's metadata.
 
 The matcher's coverage edge (ADR 0035 1 and 6). A statement row on the last covered day (or the
 first) can have its connector twin dated 1 to 3 days outside coverage, because the statement
@@ -137,26 +125,22 @@ class IngestService:
         await self._balances(connection_id, batch, mapped, counts)
         coverage = await self._coverage(set(mapped.values()))
         slugs = await self._category_ids()
-        by_ext = {a.external_account_id: a for a in batch.accounts}
-
-        posted_pending_ids: set[tuple[str, str]] = set()
-        for txn in batch.added:
-            await self._apply_txn(
-                txn, mapped, coverage, slugs, conn.provider, counts, modified=False, by_ext=by_ext
-            )
-            if txn.pending_external_id:
-                posted_pending_ids.add((txn.external_account_id, txn.pending_external_id))
-        for txn in batch.modified:
-            await self._apply_txn(
-                txn, mapped, coverage, slugs, conn.provider, counts, modified=True, by_ext=by_ext
-            )
-        for ext_account, ext_id in batch.removed:
-            account_id = mapped.get(ext_account)
-            if account_id is None:
-                continue
-            # False means the row is already gone (posted pending id, covered row, replay): success.
-            if await self._writer.remove_external(account_id, ext_id):
-                counts.removed += 1
+        transactions = (*batch.modified, *batch.added)
+        posting_pending_ids = {
+            (txn.external_account_id, txn.pending_external_id)
+            for txn in transactions
+            if txn.pending_external_id and not txn.is_pending
+        }
+        deferred_removals: list[tuple[str, str]] = []
+        for removal in batch.removed:
+            if removal in posting_pending_ids:
+                deferred_removals.append(removal)
+            else:
+                await self._remove_txn(removal, mapped, counts)
+        for txn in transactions:
+            await self._apply_txn(txn, mapped, coverage, slugs, conn.provider, counts)
+        for removal in deferred_removals:
+            await self._remove_txn(removal, mapped, counts)
 
         if batch.history_complete:
             await self.match_accounts(set(mapped.values()), counts, coverage)
@@ -304,6 +288,17 @@ class IngestService:
         rows = await self._s.execute(select(Category.slug, Category.id))
         return {slug: cid for slug, cid in rows}
 
+    async def _remove_txn(
+        self,
+        removal: tuple[str, str],
+        mapped: dict[str, uuid.UUID],
+        counts: IngestCounts,
+    ) -> None:
+        external_account_id, external_id = removal
+        account_id = mapped.get(external_account_id)
+        if account_id is not None and await self._writer.remove_external(account_id, external_id):
+            counts.removed += 1
+
     async def _apply_txn(
         self,
         txn: ConnectorTxn,
@@ -312,9 +307,6 @@ class IngestService:
         slugs: dict[str, uuid.UUID],
         provider: str,
         counts: IngestCounts,
-        *,
-        modified: bool,
-        by_ext: dict[str, ConnectorAccount],
     ) -> None:
         account_id = mapped.get(txn.external_account_id)
         if account_id is None:
