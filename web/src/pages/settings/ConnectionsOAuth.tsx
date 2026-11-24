@@ -7,6 +7,7 @@ import { linkErrorMessage } from '@/features/connections/copy'
 import {
   clearOAuthSession,
   readOAuthSession,
+  saveOAuthSession,
   type OAuthSession,
 } from '@/features/connections/oauthSession'
 import { openPlaidLink } from '@/features/connections/plaidLink'
@@ -39,6 +40,12 @@ export function ConnectionsOAuth() {
     }
     void openPlaidLink(session.token, {
       receivedRedirectUri: returnedTo,
+      // A second bank hop re-opens the OAuth page: keep the token for it.
+      onEvent: (eventName) => {
+        if (eventName === 'OPEN_OAUTH') {
+          saveOAuthSession({ token: session.token, reservationId: session.reservationId })
+        }
+      },
       onSuccess: (publicToken) => {
         clearOAuthSession()
         exchange.mutate(
