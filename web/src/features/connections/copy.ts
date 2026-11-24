@@ -84,6 +84,20 @@ export function abandonErrorMessage(error: unknown): string {
   return errorMessage(error)
 }
 
+/** Resolve failures: known codes get plain words; anything else gets fixed copy, never the server's text. */
+export function resolveErrorMessage(error: unknown): string {
+  if (isApiError(error)) {
+    if (error.code === ERROR_CODES.plaidUnavailable) return linkErrorMessage(error)
+    if (error.code === ERROR_CODES.plaidError) return linkErrorMessage(error)
+    if (error.code === ERROR_CODES.notFound) return "That link doesn't exist any more."
+    if (error.code === ERROR_CODES.reauthRequired || error.code === ERROR_CODES.rateLimited) {
+      return errorMessage(error)
+    }
+    return 'That did not work and nothing was changed. Try again.'
+  }
+  return errorMessage(error)
+}
+
 export function isAbandonConflict(error: unknown): boolean {
   return isApiError(error, ERROR_CODES.conflict)
 }

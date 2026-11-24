@@ -1,14 +1,17 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { act, renderHook, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { ApiError } from '@/api/client'
-import { abandonErrorMessage } from '@/features/connections/copy'
+import { abandonErrorMessage, resolveErrorMessage } from '@/features/connections/copy'
 import { OAUTH_STORAGE_KEY } from '@/features/connections/oauthSession'
-import { db, seedHousehold } from '@/mocks/db'
+import { db, expireReauth, seedHousehold } from '@/mocks/db'
 import { server } from '@/mocks/node'
-import { renderApp } from '@/test/render'
+import { useLogout } from '@/api/auth'
+import { createTestQueryClient, renderApp } from '@/test/render'
+import { useReauthStore } from '@/stores/reauth'
 
 interface LinkConfig {
   token: string
@@ -195,5 +198,96 @@ describe('OAuth resume', () => {
     expect(await screen.findByText(/start the link again/i)).toBeVisible()
     expect(link).toBeNull()
     expect(screen.getByRole('link', { name: 'Back to Connections' })).toBeVisible()
+  })
+})
+
+describe('P9b follow-ups', () => {
+  it('logout clears a stored OAuth Link token', async () => {
+    seedHousehold({ signedIn: true })
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    const { result } = renderHook(() => useLogout(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>
+      ),
+    })
+    await act(async () => {
+      await result.current.mutateAsync()
+    })
+    expect(window.sessionStorage.getItem(OAUTH_STORAGE_KEY)).toBeNull()
+  })
+
+  it('shows fixed copy for an unmapped resolve code, never the server message', () => {
+    const leaky = new ApiError(500, 'something_new', 'Internal SECRET_X detail.')
+    expect(resolveErrorMessage(leaky)).not.toContain('SECRET_X')
+    expect(resolveErrorMessage(new ApiError(502, 'plaid_unavailable', 'x'))).toMatch(/reached/)
+  })
+
+  it('clears a stale resolve error when the release sheet opens', async () => {
+    seedHousehold({ signedIn: true })
+    seedReserved()
+    server.use(
+      http.post('*/api/connections/plaid/reservations/:id/resolve', () =>
+        HttpResponse.json(
+          { error: { code: 'plaid_unavailable', message: 'down' } },
+          { status: 502 },
+        ),
+      ),
+    )
+    renderApp('/settings/connections')
+    await userEvent.click(await screen.findByRole('button', { name: 'Check with Plaid' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/reached/)
+    await userEvent.click(screen.getByRole('button', { name: 'I did not finish' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('re-saves the token when a second OPEN_OAUTH hop happens on the return page', async () => {
+    seedHousehold({ signedIn: true })
+    seedReserved()
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    renderApp('/plaid/oauth-return?oauth_state_id=abc123')
+    await waitFor(() => {
+      expect(link).not.toBeNull()
+    })
+    window.sessionStorage.removeItem(OAUTH_STORAGE_KEY)
+    act(() => {
+      link?.onEvent?.('OPEN_OAUTH')
+    })
+    expect(window.sessionStorage.getItem(OAUTH_STORAGE_KEY)).toContain('link-mock-token-0001')
+  })
+
+  it('retries the exchange after a step-up when reauth went stale during the bank detour', async () => {
+    seedHousehold({ signedIn: true })
+    seedReserved()
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    const { router } = renderApp('/plaid/oauth-return?oauth_state_id=abc123')
+    await waitFor(() => {
+      expect(link).not.toBeNull()
+    })
+    expireReauth()
+    act(() => {
+      link?.onSuccess('public-sandbox-mock')
+    })
+    await waitFor(() => {
+      expect(useReauthStore.getState().pending).not.toBeNull()
+    })
+    expect(db.connections.connections).toHaveLength(0)
+    if (db.session) db.session.reauthAt = Date.now()
+    act(() => {
+      useReauthStore.getState().confirm()
+    })
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/settings/connections')
+    })
+    expect(db.connections.connections).toHaveLength(1)
   })
 })
