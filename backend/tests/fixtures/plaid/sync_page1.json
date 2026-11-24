@@ -1,0 +1,70 @@
+{
+  "accounts": [
+    {
+      "account_id": "acct-chk",
+      "name": "Synthetic Checking",
+      "official_name": null,
+      "mask": "0000",
+      "type": "depository",
+      "subtype": "checking",
+      "balances": {"current": 1250.50, "available": 1200.00, "limit": null, "iso_currency_code": "USD"}
+    },
+    {
+      "account_id": "acct-card",
+      "name": "Synthetic Card",
+      "official_name": null,
+      "mask": "1111",
+      "type": "credit",
+      "subtype": "credit card",
+      "balances": {"current": 410.25, "available": 4589.75, "limit": 5000, "iso_currency_code": "USD"}
+    },
+    {
+      "account_id": "acct-loan",
+      "name": "Synthetic Loan",
+      "official_name": null,
+      "mask": "2222",
+      "type": "loan",
+      "subtype": "student",
+      "balances": {"current": 15000.10, "available": null, "limit": null, "iso_currency_code": "USD"}
+    }
+  ],
+  "added": [
+    {
+      "account_id": "acct-chk", "transaction_id": "tx-debit", "amount": 42.10,
+      "date": "2026-11-01", "authorized_date": "2026-10-31", "pending": false,
+      "pending_transaction_id": null, "name": "SYNTH GROCER", "original_description": "SYNTH GROCER #12",
+      "merchant_name": "Synth Grocer",
+      "personal_finance_category": {"primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_GROCERIES"}
+    },
+    {
+      "account_id": "acct-chk", "transaction_id": "tx-credit", "amount": -2500.00,
+      "date": "2026-11-02", "authorized_date": null, "pending": false,
+      "pending_transaction_id": null, "name": "SYNTH PAYROLL", "merchant_name": null,
+      "personal_finance_category": {"primary": "INCOME", "detailed": "INCOME_WAGES"}
+    },
+    {
+      "account_id": "acct-card", "transaction_id": "tx-purchase", "amount": 19.99,
+      "date": "2026-11-03", "authorized_date": null, "pending": false,
+      "pending_transaction_id": null, "name": "SYNTH STREAMING", "merchant_name": "Synth Streaming",
+      "personal_finance_category": {"primary": "ENTERTAINMENT", "detailed": "ENTERTAINMENT_TV_AND_MOVIES"}
+    },
+    {
+      "account_id": "acct-card", "transaction_id": "tx-payment", "amount": -300.00,
+      "date": "2026-11-04", "authorized_date": null, "pending": false,
+      "pending_transaction_id": null, "name": "PAYMENT THANK YOU", "merchant_name": null,
+      "personal_finance_category": {"primary": "LOAN_PAYMENTS", "detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
+    },
+    {
+      "account_id": "acct-chk", "transaction_id": "tx-pending-1", "amount": 7.00,
+      "date": "2026-11-05", "authorized_date": "2026-11-05", "pending": true,
+      "pending_transaction_id": null, "name": "SYNTH CAFE", "merchant_name": "Synth Cafe",
+      "personal_finance_category": null
+    }
+  ],
+  "modified": [],
+  "removed": [],
+  "next_cursor": "cursor-1",
+  "has_more": true,
+  "transactions_update_status": "HISTORICAL_UPDATE_COMPLETE",
+  "request_id": "req1"
+}
