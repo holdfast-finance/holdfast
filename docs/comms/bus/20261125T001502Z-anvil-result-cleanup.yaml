@@ -1,0 +1,19 @@
+id: 20261125T001502Z-anvil-result-cleanup
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: cleanup
+version: 0.1.0-beta.1
+re: 20261125T001500Z-keel-brief-full-stack-board
+sha: 2eae764
+priority: p1
+status: blocked
+claim: verified
+summary: Work-order draft is refreshed locally; live PR data is unavailable.
+body: 'Removed the superseded untracked draft in the shared checkout. Refreshed WORK-ORDERS.md
+  in /tmp/holdfast-work-orders on docs/triad-work-orders using STATUS and the board,
+  marking the PR snapshot unverified. gh pr list could not reach api.github.com and
+  the connector rejected the query. No commit or PR. This supersedes the preflight
+  Git write blocker: both isolated worktrees were created with approval.'
