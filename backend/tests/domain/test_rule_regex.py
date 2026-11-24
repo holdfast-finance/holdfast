@@ -38,7 +38,7 @@ def test_corpus_gate(pattern: str, record_property: Callable[[str, object], None
     except RuleValidationError:
         return
 
-    atoms, literals, runs = rule_regex._scan(pattern)
+    atoms, literals, runs, groups = rule_regex._scan(pattern)
     alphabets = tuple(rule_regex._atom_alphabets(atoms))
     union = "".join(dict.fromkeys("".join(alphabets))) or "ABCXYZ0129 "
     rng = Random(1729)  # noqa: S311 -- deterministic synthetic fixture
@@ -46,7 +46,7 @@ def test_corpus_gate(pattern: str, record_property: Callable[[str, object], None
     # Independent 1,024-character subjects plus longer versions of the probe families.
     subjects += tuple(
         prefix + "".join(rng.choices(union, k=1024 - len(prefix)))
-        for family in rule_regex._probe_families(alphabets, literals, runs)
+        for family in rule_regex._probe_families(alphabets, literals, runs, groups)
         for prefix in family
     )
     started = perf_counter()
@@ -110,3 +110,74 @@ def test_search_budget_attributes_cost_to_the_costliest_rule(
         compiled.search("REFUND", clock, rule_id=UUID(int=2))
     assert caught.value.rule_id == expensive
     assert clock.elapsed_ns == 11
+
+
+def test_budget_overrun_without_a_rule_id_fails_closed() -> None:
+    clock = RegexClock(budget_ns=10)
+    with pytest.raises(RegexBudgetExceeded) as caught:
+        clock.record(11, None)
+    assert caught.value.rule_id is None
+
+
+def test_budget_overrun_names_the_costliest_rule_even_when_last_call_is_unattributed() -> None:
+    clock = RegexClock(budget_ns=10)
+    clock.record(6, UUID(int=3))
+    with pytest.raises(RegexBudgetExceeded) as caught:
+        clock.record(6, None)
+    assert caught.value.rule_id == UUID(int=3)
+
+
+def test_missing_private_engine_class_is_patterns_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Bare:
+        error = rule_regex.re2.error
+        Options = rule_regex.re2.Options  # no _Regexp, as after a binding upgrade
+
+    monkeypatch.setattr(rule_regex, "re2", Bare)
+    for compile_ in (compile_pattern, rule_regex.compile_stored_pattern):
+        with pytest.raises(RuleValidationError) as caught:
+            compile_("PAYMENT")
+        assert str(caught.value) == rule_regex.PATTERNS_UNAVAILABLE
+
+
+# Patterns that run the most probe families while staying inside the family cap, and ones
+# that hit the cap. Save time is bounded either way, and a cap hit rejects.
+_WORST_CASES = (
+    r"\d\D\w\W\s\S.[0][1][2][3][4][5][6][7][8]|"
+    + "ABCDEFGHIJKLMNOPQRSTUVWXYZ9!%&',/:;<=>@_~`"[:60],
+    "(?:0123456789ABCDEFGHIJKLMNOPRSTUVW)?\\w*Q\\w{20}#",
+    "".join(f"[{c}]" for c in "ABCDEFGHIJKLMNOP") + "QRSTUVWXYZ" * 5,
+    "(" * 30 + "A|B" + ")" * 30 + "[AB]*",
+)
+
+
+@pytest.mark.parametrize("pattern", _WORST_CASES)
+def test_save_time_is_bounded_and_a_cap_hit_rejects(pattern: str) -> None:
+    assert len(pattern) <= rule_regex.MAX_PATTERN_LENGTH
+    started = perf_counter()
+    try:
+        compile_pattern(pattern)
+    except RuleValidationError as error:
+        assert str(error) in (
+            rule_regex.PATTERN_TOO_COMPLEX,
+            rule_regex.PATTERN_TOO_SLOW,
+            "This pattern has too many character classes.",
+        )
+    assert perf_counter() - started < 1.5
+
+
+def test_probe_family_cap_rejects_and_never_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rule_regex, "MAX_PROBE_FAMILIES", 3)
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern("PAYMENT")
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+
+
+def test_group_alphabets_are_probed_and_negated_classes_use_non_ascii_samples() -> None:
+    atoms, _, _, groups = rule_regex._scan("(?:X|Y)*X(?:X|Y|Z){20}W")
+    assert atoms == ()
+    assert set(groups) == {"XY", "XYZ"}
+    (alphabet,) = rule_regex._atom_alphabets(("[^ -~]",))
+    assert "É" in alphabet
+    assert "A" not in alphabet

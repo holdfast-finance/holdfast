@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -31,7 +31,7 @@ from app.domain.category_precedence import can_replace_category
 from app.domain.fingerprint import normalize_description
 from app.domain.merchant import MAX_KEY_LENGTH, MERCHANT_KEY_VERSION, merchant_key
 from app.domain.money import ZERO
-from app.domain.rule_regex import CompiledPattern, compile_pattern
+from app.domain.rule_regex import CompiledPattern, compile_pattern, compile_stored_pattern
 from app.domain.rule_regex import RuleValidationError as RuleValidationError
 
 AccountScope = Literal["any", "joint", "own"]
@@ -71,14 +71,21 @@ class MerchantKeyVersionMismatch(RuleValidationError):
 
 @dataclass(frozen=True, slots=True)
 class DescriptionCondition:
-    """Match normalized descriptions. Regex mode goes through ``compile_pattern``."""
+    """Match normalized descriptions.
+
+    Regex mode goes through ``compile_pattern`` (with the save-time cost probe) on the
+    create/save path. The loader passes ``stored=True`` for rows that already passed that
+    probe, which uses ``compile_stored_pattern`` so loading is deterministic (ADR 0024).
+    Only ``conditions_from_json(..., stored=True)`` may set it.
+    """
 
     mode: Literal["contains", "starts-with", "exact", "regex"]
     value: str = field(repr=False)
+    stored: InitVar[bool] = False
     _literal: str = field(init=False, repr=False, compare=False)
     _regex: CompiledPattern | None = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, stored: bool) -> None:
         if self.mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
         if not self.value.strip():
@@ -86,7 +93,9 @@ class DescriptionCondition:
         if self.mode != "regex" and len(self.value) > MAX_DESCRIPTION_VALUE_LENGTH:
             raise RuleValidationError("Description text is too long.")
         literal = normalize_description(self.value) if self.mode != "regex" else ""
-        regex = compile_pattern(self.value) if self.mode == "regex" else None
+        regex: CompiledPattern | None = None
+        if self.mode == "regex":
+            regex = compile_stored_pattern(self.value) if stored else compile_pattern(self.value)
         object.__setattr__(self, "_literal", literal)
         object.__setattr__(self, "_regex", regex)
 
@@ -419,8 +428,12 @@ def _day(obj: Mapping[str, object], key: str) -> date | None:
     raise RuleValidationError("Dates must be ISO dates.")
 
 
-def conditions_from_json(obj: Mapping[str, object]) -> RuleConditions:
-    """Strict inverse of ``conditions_to_json``. Unknown keys and wrong types are refused."""
+def conditions_from_json(obj: Mapping[str, object], *, stored: bool = False) -> RuleConditions:
+    """Strict inverse of ``conditions_to_json``. Unknown keys and wrong types are refused.
+
+    ``stored=True`` is for the loader reading saved rows: regexes are recompiled without the
+    cost probe. Anything that creates or edits a rule leaves it False and is probed.
+    """
     if set(obj) - _KEYS:
         raise RuleValidationError("Unknown condition key.")
     version = obj.get("v")
@@ -440,7 +453,7 @@ def conditions_from_json(obj: Mapping[str, object]) -> RuleConditions:
         mode = raw_desc["mode"]
         if mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
-        description = DescriptionCondition(mode, raw_desc["value"])  # type: ignore[arg-type]
+        description = DescriptionCondition(mode, raw_desc["value"], stored)  # type: ignore[arg-type]
 
     key = obj.get("merchant_key")
     key_version = obj.get("merchant_key_version")

@@ -320,3 +320,51 @@ def test_description_value_never_appears_in_repr() -> None:
     assert secret not in repr(cond)
     assert secret not in repr(RuleConditions(description=cond))
     assert secret not in repr(rule(1, conditions=RuleConditions(description=cond)))
+
+
+def test_loader_uses_stored_compile_and_create_path_runs_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.domain import rules
+
+    stored: list[str] = []
+    probed: list[str] = []
+    monkeypatch.setattr(
+        rules, "compile_stored_pattern", lambda p: stored.append(p) or compile_pattern(p)
+    )
+    monkeypatch.setattr(rules, "compile_pattern", lambda p: probed.append(p) or compile_pattern(p))
+    blob = {"v": 1, "description": {"mode": "regex", "value": "^moon"}}
+    conditions_from_json(blob, stored=True)
+    assert (stored, probed) == (["^moon"], [])
+    conditions_from_json(blob)
+    DescriptionCondition("regex", "^moon")
+    assert (stored, probed) == (["^moon"], ["^moon", "^moon"])
+
+
+def test_stored_loading_still_refuses_invalid_patterns() -> None:
+    with pytest.raises(RuleValidationError):
+        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "("}}, stored=True)
+
+
+def test_no_write_path_can_reach_compile_stored_pattern() -> None:
+    import ast
+    import pathlib
+
+    app = pathlib.Path(__file__).resolve().parents[2] / "app"
+    users = {
+        str(path.relative_to(app))
+        for path in app.rglob("*.py")
+        if "compile_stored_pattern" in path.read_text()
+    }
+    # Only the engine module defines it and the pure codec imports it. Services,
+    # routers and API schemas must go through compile_pattern.
+    assert users == {"domain/rule_regex.py", "domain/rules.py"}
+    tree = ast.parse((app / "domain" / "rules.py").read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "compile_stored_pattern"
+    ]
+    assert len(calls) == 1  # the guarded `stored` branch in DescriptionCondition

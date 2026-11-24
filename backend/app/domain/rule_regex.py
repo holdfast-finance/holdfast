@@ -18,12 +18,14 @@ MAX_PATTERN_LENGTH = 128
 MAX_SUBJECT_LENGTH = 256
 PROBE_LIMIT_MICROSECONDS = 10
 MAX_CLASS_ATOMS = 16
+MAX_PROBE_FAMILIES = 160
 REGEX_BUDGET_SECONDS = 10
 INGEST_REGEX_US_PER_ROW = 500
 
 PATTERNS_UNAVAILABLE = "Patterns aren't available on this server."
 PATTERN_INVALID = "This pattern uses unsupported syntax."
 PATTERN_TOO_SLOW = "This pattern is too slow to run on every transaction."
+PATTERN_TOO_COMPLEX = "This pattern is too complex to check. Try a simpler one."
 _PRINTABLE_ASCII = "".join(chr(code) for code in range(32, 127))
 _DESCRIPTION_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789    *#-./"
 # Provide representatives for whitespace and common non-ASCII scripts and categories.
@@ -35,7 +37,7 @@ class RuleValidationError(ValueError):
 
 
 class RegexBudgetExceeded(RuntimeError):
-    def __init__(self, rule_id: UUID) -> None:
+    def __init__(self, rule_id: UUID | None = None) -> None:
         super().__init__("Pattern rules exceeded the time budget.")
         self.rule_id = rule_id
 
@@ -52,8 +54,12 @@ class RegexClock:
         self.elapsed_ns += elapsed_ns
         if rule_id is not None:
             self.by_rule_ns[rule_id] = self.by_rule_ns.get(rule_id, 0) + elapsed_ns
-        if self.budget_ns is not None and self.elapsed_ns > self.budget_ns and self.by_rule_ns:
-            raise RegexBudgetExceeded(max(self.by_rule_ns, key=self.by_rule_ns.__getitem__))
+        if self.budget_ns is not None and self.elapsed_ns > self.budget_ns:
+            # Fail closed: an unattributed overrun still stops the run.
+            worst = (
+                max(self.by_rule_ns, key=self.by_rule_ns.__getitem__) if self.by_rule_ns else None
+            )
+            raise RegexBudgetExceeded(worst)
 
 
 class CompiledPattern(Protocol):
@@ -86,14 +92,17 @@ class _Pattern:
 def _compile_cold(pattern: str) -> _EnginePattern:
     if re2 is None:
         raise RuleValidationError(PATTERNS_UNAVAILABLE)
-    options = re2.Options()
-    options.case_sensitive = False
-    options.never_capture = True
-    options.log_errors = False
-    options.max_mem = 1 << 20
     try:
+        options = re2.Options()
+        options.case_sensitive = False
+        options.never_capture = True
+        options.log_errors = False
+        options.max_mem = 1 << 20
         # The pinned binding's public compile() shares an LRU of warmed DFA objects.
+        # _Regexp is private: if a binding upgrade drops it, patterns are unavailable.
         compiled: _EnginePattern = re2._Regexp(pattern, options)
+    except AttributeError:
+        raise RuleValidationError(PATTERNS_UNAVAILABLE) from None
     except (re2.error, UnicodeError):
         raise RuleValidationError(PATTERN_INVALID) from None
     return compiled
@@ -144,9 +153,17 @@ def _literal_escape(token: str) -> str:
     return controls.get(kind, kind)
 
 
-def _scan(pattern: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Scan syntax after RE2 validates it. Track literal runs across quoted text."""
+def _scan(
+    pattern: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Scan syntax after RE2 validates it. Track literal runs across quoted text.
+
+    Returns class atoms, literal letters, literal runs and group alphabets. A group
+    alphabet is the literal letters inside one parenthesised group, nested ones included.
+    """
     atoms: dict[str, None] = {}
+    groups: dict[str, None] = {}
+    open_groups: list[dict[str, None]] = []
     literals: dict[str, None] = {}
     runs: dict[str, None] = {}
     recent = ""
@@ -177,6 +194,15 @@ def _scan(pattern: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ..
             while pattern[end] not in ":>)":
                 end += 1
             end += 1
+            if pattern[end - 1] != ")":
+                open_groups.append({})
+        elif char == "(":
+            open_groups.append({})
+        elif char == ")":
+            if open_groups:
+                members = "".join(open_groups.pop())
+                if len(members) > 1:
+                    groups[members] = None
         elif char == "{" and (close := pattern.find("}", end)) != -1:
             count = pattern[end:close].split(",", 1)
             if (
@@ -195,25 +221,26 @@ def _scan(pattern: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ..
         if literal:
             for letter in literal.upper():
                 literals[letter] = None
+                for group in open_groups:
+                    group[letter] = None
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
                     runs[recent[-size:]] = None
         else:
             recent = ""
         i = end
-    return tuple(atoms), tuple(literals), tuple(runs)
+    return tuple(atoms), tuple(literals), tuple(runs), tuple(groups)
 
 
 def _atom_alphabets(atoms: tuple[str, ...]) -> Iterator[str]:
     for atom in atoms:
         atom_pattern = _compile_cold(atom)
-        samples = (
-            _PRINTABLE_ASCII
-            if atom.startswith(("[^", r"\P")) or atom in (r"\D", r"\W", r"\S")
-            else _CLASS_SAMPLES + atom
-        )
+        # Negated classes are sampled over the same non-ASCII-aware set as the rest, so a
+        # blow-up built from "not ASCII" is probed over the characters it actually matches.
         yield "".join(
-            dict.fromkeys(char.upper() for char in samples if atom_pattern.fullmatch(char))
+            dict.fromkeys(
+                char.upper() for char in _CLASS_SAMPLES + atom if atom_pattern.fullmatch(char)
+            )
         )
 
 
@@ -230,14 +257,21 @@ def _subjects(rng: Random, alphabet: str, count: int, trigger: str = "") -> tupl
 
 
 def _probe_families(
-    alphabets: tuple[str, ...], literals: tuple[str, ...], runs: tuple[str, ...]
+    alphabets: tuple[str, ...],
+    literals: tuple[str, ...],
+    runs: tuple[str, ...],
+    groups: tuple[str, ...],
 ) -> Iterator[tuple[str, ...]]:
     rng = Random(2404)  # noqa: S311 -- deterministic synthetic probe
     yield _subjects(rng, "ABC", 24)
     yield _subjects(rng, "AB", 8)
     yield _subjects(rng, _DESCRIPTION_ALPHABET, 31)
     yield ("A" * MAX_SUBJECT_LENGTH,)
-    for alphabet in alphabets:
+    for members in groups:
+        yield _subjects(rng, members, 32)
+    if len(groups) > 1:
+        yield _subjects(rng, "".join(dict.fromkeys("".join(groups))), 32)
+    for alphabet in dict.fromkeys(alphabets):
         # An atom can have no representative in the bounded sample, for example
         # a negated class that excludes all printable ASCII.
         alphabet = alphabet or _DESCRIPTION_ALPHABET
@@ -276,14 +310,17 @@ def compile_pattern(pattern: str) -> CompiledPattern:
         raise RuleValidationError(PATTERNS_UNAVAILABLE)
     compiled = compile_stored_pattern(pattern)
     try:
-        atoms, literals, runs = _scan(pattern)
+        atoms, literals, runs, groups = _scan(pattern)
     except (IndexError, ValueError):
         # The scanner only sees patterns RE2 accepted; anything it can't parse is refused.
         raise RuleValidationError(PATTERN_INVALID) from None
     if len(atoms) > MAX_CLASS_ATOMS:
         raise RuleValidationError("This pattern has too many character classes.")
     alphabets = tuple(_atom_alphabets(atoms))
-    for subjects in _probe_families(alphabets, literals, runs):
+    for count, subjects in enumerate(_probe_families(alphabets, literals, runs, groups), 1):
+        if count > MAX_PROBE_FAMILIES:
+            # A cap that is hit rejects. It never accepts what it could not finish probing.
+            raise RuleValidationError(PATTERN_TOO_COMPLEX)
         if _family_mean_ns(pattern, subjects) > PROBE_LIMIT_MICROSECONDS * 1_000:
             raise RuleValidationError(PATTERN_TOO_SLOW)
     return compiled

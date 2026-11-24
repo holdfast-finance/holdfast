@@ -2,7 +2,7 @@
 
 Patterns look for a match in the first 256 characters of a transaction
 description. Holdfast collapses whitespace in the description and matches
-without regard to case by default.
+without regard to case.
 
 Use plain text to find a word, or use RE2 pattern syntax for more control.
 

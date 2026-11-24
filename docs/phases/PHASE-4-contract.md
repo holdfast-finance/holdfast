@@ -129,15 +129,24 @@ def merchant_key(merchant_name: str | None, description_raw: str) -> str | None
 ### 2.2 `app/domain/rule_regex.py` (new in C3c, engine in C3d)
 ```python
 class CompiledPattern(Protocol):
-    def search(self, text: str) -> bool: ...
+    def search(self, text: str, clock: RegexClock | None = None,
+               *, rule_id: UUID | None = None) -> bool: ...
 MAX_PATTERN_LENGTH = 128
 MAX_SUBJECT_LENGTH = 256          # ADR 0024 point 5 (was 1,024; measured, see the ADR)
 PROBE_LIMIT_MICROSECONDS = 10     # ADR 0024 point 4b, per probe family
 MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
 REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
-INGEST_REGEX_MS_PER_ROW = 0.5     # ADR 0024 point 9: ingest, checked every 1,000 rows
-def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationError
+INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
+MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
+def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
+def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- `search(text, clock, rule_id)` times the call into `RegexClock` (integer nanoseconds). Over budget
+  it raises `RegexBudgetExceeded`, and with no `rule_id` it still raises (fail closed).
+- `compile_stored_pattern` is only for rows that already passed the probe: the loader
+  (`conditions_from_json(obj, stored=True)`) uses it so that loading is deterministic (ADR 0024
+  point 4b). Create, edit and preview paths use `compile_pattern`. A test fails if any other module
+  references it.
 - **C3c deletes the C3a `re` validator** (`_REGEX_TOKEN`, `_compile_safe_regex`, the `re`
   import). Until C3d, `compile_pattern` raises `RuleValidationError("Patterns aren't available
   yet.")` for every input.
@@ -162,7 +171,7 @@ def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationEr
     most regex time.
   - Preview, apply and clear stop at `REGEX_BUDGET_SECONDS` and return 503 `rules_too_slow`, with
     nothing written.
-  - Ingest checks every 1,000 rows. Above `INGEST_REGEX_MS_PER_ROW`, it skips `regex` rules for the
+  - Ingest checks every 1,000 rows. Above `INGEST_REGEX_US_PER_ROW`, it skips `regex` rules for the
     rest of that import.
   - Timing decides only whether a run stops, never what a completed run matches. Apply and clear
     recompute and compare the token, so a stopped run can never write a different count.
