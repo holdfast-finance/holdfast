@@ -248,15 +248,16 @@ def _probe_families(
             yield _subjects(rng, alphabet, 32, run)
 
 
-def _family_mean_ns(pattern: str, subjects: tuple[str, ...]) -> float:
-    best = float("inf")
-    for _ in range(3):
+def _family_mean_ns(pattern: str, subjects: tuple[str, ...]) -> int:
+    # Integer nanoseconds: the best of three cold runs, averaged per subject.
+    def one_run() -> int:
         search = _compile_cold(pattern).search
         started = perf_counter_ns()
         for subject in subjects:
             search(subject)
-        best = min(best, perf_counter_ns() - started)
-    return best / len(subjects)
+        return perf_counter_ns() - started
+
+    return min(one_run() for _ in range(3)) // len(subjects)
 
 
 def compile_stored_pattern(pattern: str) -> CompiledPattern:
