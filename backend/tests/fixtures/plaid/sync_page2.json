@@ -1,0 +1,26 @@
+{
+  "accounts": [],
+  "added": [
+    {
+      "account_id": "acct-chk", "transaction_id": "tx-posted-1", "amount": 7.25,
+      "date": "2026-11-06", "authorized_date": "2026-11-05", "pending": false,
+      "pending_transaction_id": "tx-pending-1", "name": "SYNTH CAFE", "merchant_name": "Synth Cafe",
+      "personal_finance_category": {"primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_COFFEE"}
+    }
+  ],
+  "modified": [
+    {
+      "account_id": "acct-card", "transaction_id": "tx-purchase", "amount": 20.49,
+      "date": "2026-11-03", "authorized_date": null, "pending": false,
+      "pending_transaction_id": null, "name": "SYNTH STREAMING", "merchant_name": "Synth Streaming",
+      "personal_finance_category": {"primary": "ENTERTAINMENT", "detailed": "ENTERTAINMENT_TV_AND_MOVIES"}
+    }
+  ],
+  "removed": [
+    {"account_id": "acct-chk", "transaction_id": "tx-pending-1"}
+  ],
+  "next_cursor": "cursor-2",
+  "has_more": false,
+  "transactions_update_status": "HISTORICAL_UPDATE_COMPLETE",
+  "request_id": "req2"
+}

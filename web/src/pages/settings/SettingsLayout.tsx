@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 const TABS = [
   { to: 'household', label: 'Household' },
   { to: 'security', label: 'Security' },
+  { to: 'connections', label: 'Connections' },
 ] as const
 
 export function SettingsLayout() {
