@@ -13,8 +13,10 @@ files, as Claude's can. This amends ADR 0019's "Claude agents only" for these li
 writes the ADR amendment. Workers that Keel launches headless still start through
 `scripts/fc-delegate.sh` (ADR 0036). In every session:
 
-- Nobody opens the private data directory unless a story's brief needs it. Fixtures stay
-  synthetic.
+- Nobody opens the private data directory unless a brief from **Keel or the owner** needs it. An
+  acting lead can't grant that: it's an `escalate`. Fixtures stay synthetic.
+- Every seat pushes with the repo hooks (`.githooks/pre-push` scans the pushed range) and never
+  uses `--no-verify`.
 - Anvil and Helm (live) both build full-stack: each works on its own branch off `origin/main`,
   commits with its own trailer, pushes and opens a PR. Neither merges, tags or releases.
 - **Keel owns design:** architecture, phase contracts, API shape, UI/UX, brand and every
@@ -156,7 +158,7 @@ The point of three vendors is that each one catches what the other two miss. Use
 3. **Build:** each lead `claim`s the stories Keel briefed to it and works in its own worktree off
    `origin/main` with its own subagents. Anvil and Helm open their own PRs from their live sessions. For a
    headless Codex or Grok job, FIRSTCHAIR rules 1–6 still apply (Keel applies the diff and commits;
-   a headless Grok write job still needs Keel's explicit brief). A claim on a protected path (`.github/`, `.claude/`, `CLAUDE.md`,
+   headless Grok stays read-only and the wrapper refuses `--allow-grok-write`). A claim on a protected path (`.github/`, `.claude/`, `CLAUDE.md`,
    `backend/app/security/`, migrations or RLS, `agent/guardrails.py`, crypto paths) is void unless
    Keel's brief assigned it.
 4. **Cross-review:** Keel requests a second opinion from a different vendor on each PR (Helm on
@@ -195,6 +197,6 @@ Phase 10c (self-custody wallet) ships behind `FEATURE_CRYPTO_SPEND=false` and do
 
 ## What stays fixed no matter who leads
 
-CLAUDE.md hard rules 1–14, the security rules in `.claude/rules/security.md`, ADR 0019 (real data
-never leaves the machine, never reaches another vendor's CLI), ADR 0036 (confinement for
-firstchair workers), trunk-based PRs, Keel-only merges, and never force-pushing `main`.
+CLAUDE.md hard rules 1–14, the security rules in `.claude/rules/security.md`, ADR 0019 as amended
+by ADR 0039 (real data never leaves the machine; live sessions may reach it but don't open it
+without a brief from Keel or the owner), ADR 0036 (confinement for headless workers), trunk-based PRs, Keel-only merges, and never force-pushing `main`.
