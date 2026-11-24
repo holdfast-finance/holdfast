@@ -15,6 +15,8 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# In a linked worktree `root` is only that worktree; the main checkout is another tree to refuse.
+main_root=$(cd "$root" && cd "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd -P) || main_root=$root
 die() { echo "instance: $*" >&2; exit 2; }
 
 dir_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
@@ -37,9 +39,16 @@ check() {
   [ -d "$d" ] || die "$d does not exist; run 'make instance-init' first"
   local real
   real=$(cd "$d" && pwd -P)
-  case "$real/" in "$root"/*) die "$real is inside the repository; real data stays outside it (ADR 0019)" ;; esac
+  case "$real/" in
+    "$root"/* | "$main_root"/*) die "$real is inside the repository; real data stays outside it (ADR 0019)" ;;
+  esac
   [ "$(dir_owner "$d")" = "$(id -u)" ] || die "$d is not owned by you"
   [ "$(dir_mode "$d")" = "700" ] || die "$d is mode $(dir_mode "$d"), not 700; run: chmod 700 '$d'"
+  local sub
+  for sub in postgres redis documents caddy_data caddy_config; do
+    [ ! -L "$d/$sub" ] || die "$d/$sub is a symlink; it must be a real directory inside the instance directory"
+    [ -d "$d/$sub" ] || die "$d/$sub is missing or not a directory; run 'make instance-init'"
+  done
   [ -f "$d/instance.env" ] || die "$d/instance.env is missing; run 'make instance-init'"
   [ "$(dir_mode "$d/instance.env")" = "600" ] || die "$d/instance.env must be mode 600"
 }

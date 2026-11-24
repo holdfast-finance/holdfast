@@ -255,6 +255,11 @@ class GuardVolumesTest(unittest.TestCase):
 
     def test_more_ways_to_delete_are_blocked(self) -> None:
         for cmd in (
+            "docker compose -p holdfast down -v",
+            "docker compose --project-name holdfast down --volumes",
+            "docker compose --project-name=holdfast down -v",
+            "COMPOSE_PROJECT_NAME=holdfast docker compose down -v",
+            "docker compose -p holdfast -f docker-compose.yml down --remove-orphans -v",
             "docker-compose -p holdfast-instance down -v",
             "docker compose -p holdfast-instance down --volumes",
             "docker compose --project-name holdfast-instance down -v --remove-orphans",
@@ -274,6 +279,7 @@ class GuardVolumesTest(unittest.TestCase):
         for cmd in (
             "docker compose -p holdfast-instance down",
             "docker compose -p holdfast-sandbox down -v",
+            "docker compose -p holdfast down",
             "docker rm -f x",
             "docker compose rm -f db",
             "rsync -a src/ dst/",

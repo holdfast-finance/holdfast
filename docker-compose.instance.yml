@@ -14,7 +14,8 @@
 # - Its own project name (-p holdfast-instance) and its own env file, passed with --env-file, so
 #   the checkout's .env (dev keys) is never read here. The dev override is NOT layered, so db and
 #   redis publish nothing. Only caddy publishes, on loopback, on its own port (rule 12).
-# - This is the only project that may carry PLAID_ENV=production. The sandbox project refuses it.
+# - This is the only project that may carry PLAID_ENV=production: HOLDFAST_INSTANCE=true is what
+#   lets Settings accept it (app/config.py); the dev stack and the sandbox refuse it.
 
 services:
   db:
@@ -34,6 +35,7 @@ services:
   api:
     environment:
       APP_ENV: prod
+      HOLDFAST_INSTANCE: "true"
     volumes:
       - type: bind
         source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/documents
@@ -43,6 +45,7 @@ services:
   worker:
     environment:
       APP_ENV: prod
+      HOLDFAST_INSTANCE: "true"
     volumes:
       - type: bind
         source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/documents
@@ -52,10 +55,12 @@ services:
   migrate:
     environment:
       APP_ENV: prod
+      HOLDFAST_INSTANCE: "true"
 
   rotate-keys:
     environment:
       APP_ENV: prod
+      HOLDFAST_INSTANCE: "true"
 
   caddy:
     # Loopback and a port of its own, so it can sit beside the dev stack on 443. A tailnet

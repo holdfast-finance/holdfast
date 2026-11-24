@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # Set only by docker-compose.sandbox.yml (the throwaway `holdfast-sandbox` project, H2). A
     # sandbox instance must never hold real data, so it refuses PLAID_ENV=production at startup.
     holdfast_sandbox: bool = False
+    # Set only by docker-compose.instance.yml (the real-data `holdfast-instance` project). It is the
+    # only place PLAID_ENV=production may run (PHASE-2 contract D13).
+    holdfast_instance: bool = False
 
     # Plaid
     plaid_env: Literal["sandbox", "production"] = "sandbox"
@@ -149,6 +152,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "HOLDFAST_SANDBOX is set: this instance is throwaway and refuses "
                 "PLAID_ENV=production (real Items belong in holdfast-instance)"
+            )
+        if self.plaid_env == "production" and not self.holdfast_instance:
+            raise ValueError(
+                "PLAID_ENV=production is allowed only in holdfast-instance "
+                "(HOLDFAST_INSTANCE=true, set by docker-compose.instance.yml)"
             )
         return self
 

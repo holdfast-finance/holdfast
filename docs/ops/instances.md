@@ -5,7 +5,7 @@ Three compose projects can run on one machine. They never share a volume, an env
 | Project | Purpose | State | Env file | Published port |
 |---|---|---|---|---|
 | `holdfast` (dev, `make up`) | development, hot reload | named volumes, `./data/documents` | `./.env` | `127.0.0.1:443`, db `5432`, redis `56379` (dev override) |
-| `holdfast-instance` | **real data**, the only place `PLAID_ENV=production` exists | bind mounts under `$HOLDFAST_INSTANCE_DIR` | `$HOLDFAST_INSTANCE_DIR/instance.env` | caddy `127.0.0.1:9443` only |
+| `holdfast-instance` | **real data**, the only place `PLAID_ENV=production` exists (Settings refuses it unless `HOLDFAST_INSTANCE=true`, set by the instance compose file) | bind mounts under `$HOLDFAST_INSTANCE_DIR` | `$HOLDFAST_INSTANCE_DIR/instance.env` | caddy `127.0.0.1:9443` only |
 | `holdfast-sandbox` | throwaway, synthetic keys | named volumes of its own | `./.env.sandbox` (git-ignored) | caddy `127.0.0.1:9444` only |
 
 Ports are changed with `HOLDFAST_INSTANCE_PORT` and `HOLDFAST_SANDBOX_PORT`. Neither project layers the
@@ -35,12 +35,25 @@ make instance-init     # creates the directory (0700), subdirectories, instance.
 make instance-up       # checks the directory, builds, starts db and redis, migrates, starts the rest
 ```
 
+Run the instance targets under a clean environment. Docker Compose lets a variable exported in
+your shell (`PLAID_ENV`, `FERNET_KEY`, `POSTGRES_*`) override `--env-file`, so a stray export could
+change what the real-data stack runs with. `env -i` drops all of them:
+
+```bash
+env -i PATH="$PATH" HOME="$HOME" HOLDFAST_INSTANCE_DIR=/path/you/chose make instance-up
+```
+
+(`DOCKER_HOST` is also dropped; add `DOCKER_HOST="$DOCKER_HOST"` if you use a rootless socket.)
+The project names are fixed in the Makefile and `dev.ps1`, so `SANDBOX_PROJECT=...` cannot aim
+`sandbox-destroy` at another stack; both sandbox targets also refuse any other project.
+
 Windows hosts: `./scripts/dev.ps1 instance-init` and `instance-up` (pwsh 7). The check itself is
 `scripts/instance.sh`, a bash script, so use WSL or macOS/Linux for the instance host.
 
 `instance-up` (and `-down`, `-migrate`, `-ps`, `-logs`) refuses to run unless the directory:
 exists and is absolute, is not a symlink, is owned by you, is **mode 0700**, is outside the
-repository, and holds a mode-0600 `instance.env`. It runs before anything touches Docker.
+repository (the main checkout included), has real (non-symlink) `postgres`, `redis`, `documents`,
+`caddy_data` and `caddy_config` subdirectories, and holds a mode-0600 `instance.env`. It runs before anything touches Docker.
 
 Then open `https://localhost:9443`, enrol a passkey or TOTP, and follow PHASE-2 contract section 12 to
 add the production Plaid keys to `instance.env`:

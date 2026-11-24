@@ -33,8 +33,9 @@ $BackendUid = '10001'  # backend image user; it owns ./data/documents
 $BackendImage = 'holdfast-backend:local'
 # H2: holdfast-instance (real data, bind mounts in $env:HOLDFAST_INSTANCE_DIR) and holdfast-sandbox
 # (throwaway). Same files and project names as the Makefile; scripts/instance.sh does the checks.
-$InstanceProject = if ($env:INSTANCE_PROJECT) { $env:INSTANCE_PROJECT } else { 'holdfast-instance' }
-$SandboxProject = if ($env:SANDBOX_PROJECT) { $env:SANDBOX_PROJECT } else { 'holdfast-sandbox' }
+# The project names are fixed, with no env fallback: an override could aim `down -v` at the dev stack.
+$InstanceProject = 'holdfast-instance'
+$SandboxProject = 'holdfast-sandbox'
 $ComposeInstance = @('compose', '-p', $InstanceProject, '--env-file', "$env:HOLDFAST_INSTANCE_DIR/instance.env", '-f', 'docker-compose.yml', '-f', 'docker-compose.instance.yml')
 $ComposeSandbox = @('compose', '-p', $SandboxProject, '--env-file', '.env.sandbox', '-f', 'docker-compose.yml', '-f', 'docker-compose.sandbox.yml')
 $Python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
@@ -247,9 +248,13 @@ switch ($Target) {
         docker @ComposeSandbox run --rm migrate
         docker @ComposeSandbox up -d --build
     }
-    'sandbox-down' { docker @ComposeSandbox down --remove-orphans }
+    'sandbox-down' {
+        if ($SandboxProject -ne 'holdfast-sandbox') { throw 'refusing: project is not holdfast-sandbox' }
+        docker @ComposeSandbox down --remove-orphans
+    }
     'sandbox-migrate' { Invoke-Instance 'sandbox-env'; docker @ComposeSandbox run --rm migrate }
     'sandbox-destroy' {
+        if ($SandboxProject -ne 'holdfast-sandbox') { throw 'refusing: project is not holdfast-sandbox' }
         docker @ComposeSandbox down -v --remove-orphans
         Remove-Item -Force .env.sandbox -ErrorAction SilentlyContinue
     }

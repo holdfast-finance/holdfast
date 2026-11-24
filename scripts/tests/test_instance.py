@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "instance.sh"
 BASH = shutil.which("bash") or "/bin/bash"
+SUBDIRS = ("postgres", "redis", "documents", "caddy_data", "caddy_config")
 
 
 class InstanceCheckTest(unittest.TestCase):
@@ -24,6 +25,8 @@ class InstanceCheckTest(unittest.TestCase):
         self.dir = self.tmp / "inst"
         self.dir.mkdir(mode=0o700)
         self.dir.chmod(0o700)
+        for sub in SUBDIRS:
+            (self.dir / sub).mkdir(mode=0o700)
         env_file = self.dir / "instance.env"
         env_file.write_text("FERNET_KEY=synthetic\n")
         env_file.chmod(0o600)
@@ -80,6 +83,46 @@ class InstanceCheckTest(unittest.TestCase):
         result = self.check(str(inside))
         self.assertEqual(result.returncode, 2)
         self.assertIn("inside the repository", result.stderr)
+
+    def test_directory_under_the_main_checkout_refuses(self) -> None:
+        # From a linked worktree the script's own root is the worktree, so the main checkout must
+        # be refused too. A throwaway repo plus a linked worktree reproduces that.
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git is not installed")
+        main = self.tmp / "main"
+        (main / "scripts").mkdir(parents=True)
+        shutil.copy(SCRIPT, main / "scripts" / "instance.sh")
+        genv = {"PATH": "/usr/bin:/bin", "HOME": str(self.tmp), "GIT_CONFIG_GLOBAL": "/dev/null"}
+        for args in (
+            ["init", "-q"],
+            ["add", "."],
+            ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+            ["worktree", "add", "-q", str(self.tmp / "wt"), "-b", "wt"],
+        ):
+            subprocess.run([git, "-C", str(main), *args], env=genv, check=True, capture_output=True)
+        inside = main / "private"  # in the main checkout, outside the linked worktree
+        inside.mkdir(mode=0o700)
+        for sub in SUBDIRS:
+            (inside / sub).mkdir(mode=0o700)
+        (inside / "instance.env").write_text("x=1\n")
+        (inside / "instance.env").chmod(0o600)
+        result = subprocess.run(
+            [BASH, str(self.tmp / "wt" / "scripts" / "instance.sh"), "check"],
+            env={**genv, "HOLDFAST_INSTANCE_DIR": str(inside)},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("inside the repository", result.stderr)
+
+    def test_a_symlinked_subdirectory_refuses(self) -> None:
+        other = self.tmp / "elsewhere"
+        other.mkdir()
+        shutil.rmtree(self.dir / "documents")
+        os.symlink(other, self.dir / "documents")
+        result = self.check(str(self.dir))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("documents is a symlink", result.stderr)
 
     def test_env_file_verb_prints_the_path_after_the_check(self) -> None:
         result = self.check(str(self.dir), "env-file")
@@ -148,6 +191,36 @@ class InstanceCheckTest(unittest.TestCase):
         self.assertIn("not 700", result.stderr)
         self.assertNotIn("docker compose", result.stdout.replace("scripts/instance.sh check", ""))
         self.dir.chmod(0o700)
+
+
+class FixedProjectNamesTest(unittest.TestCase):
+    """The project names cannot be overridden, so sandbox-destroy never aims at the dev stack."""
+
+    def dry_run(self, target: str, *overrides: str) -> str:
+        make = shutil.which("make")
+        if make is None:
+            self.skipTest("make is not installed")
+        result = subprocess.run(
+            [make, "-n", "-C", str(ROOT), target, *overrides],
+            env={"PATH": "/usr/bin:/bin", "SANDBOX_PROJECT": "holdfast", "INSTANCE_PROJECT": "holdfast"},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_overrides_never_reach_the_rendered_command(self) -> None:
+        for target in ("sandbox-destroy", "sandbox-down", "instance-ps"):
+            with self.subTest(target=target):
+                out = self.dry_run(
+                    target, "SANDBOX_PROJECT=holdfast", "INSTANCE_PROJECT=holdfast",
+                    "HOLDFAST_INSTANCE_DIR=/nonexistent",
+                )
+                self.assertNotRegex(out, r"-p holdfast( |$)")
+                self.assertIn("holdfast-sandbox" if "sandbox" in target else "holdfast-instance", out)
+
+    def test_destroy_and_down_carry_the_exact_project_guard(self) -> None:
+        for target in ("sandbox-destroy", "sandbox-down"):
+            self.assertIn('"holdfast-sandbox" = holdfast-sandbox', self.dry_run(target))
 
 
 if __name__ == "__main__":

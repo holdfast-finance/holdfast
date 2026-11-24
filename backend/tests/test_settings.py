@@ -142,5 +142,12 @@ def test_sandbox_instance_refuses_production_plaid(clean_env: pytest.MonkeyPatch
     with pytest.raises(ValidationError, match="refuses PLAID_ENV=production"):
         make_settings(holdfast_sandbox=True, plaid_env="production")
     assert make_settings(holdfast_sandbox=True, plaid_env="sandbox").holdfast_sandbox is True
-    # The flag is off by default, so the real instance and the dev stack can use production.
-    assert make_settings(plaid_env="production").plaid_env == "production"
+
+
+def test_production_plaid_only_in_the_instance(clean_env: pytest.MonkeyPatch) -> None:
+    # H2 D13: the dev stack (no flag) refuses production; holdfast-instance sets the flag.
+    with pytest.raises(ValidationError, match="only in holdfast-instance"):
+        make_settings(plaid_env="production")
+    assert make_settings(plaid_env="sandbox").plaid_env == "sandbox"
+    s = make_settings(holdfast_instance=True, plaid_env="production")
+    assert s.plaid_env == "production"

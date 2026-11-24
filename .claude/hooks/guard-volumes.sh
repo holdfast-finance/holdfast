@@ -17,7 +17,8 @@
 #   1. `docker|podman|docker-compose volume rm|remove|prune`, which delete volumes by name or in
 #      bulk. The sandbox is torn down with `make sandbox-destroy`, which is allowed.
 #   2. `system prune ... --volumes`, `system reset`, `docker rm -v|--volumes` (removes a
-#      container's anonymous volumes), and `... -p holdfast-instance ... down -v|--volumes`.
+#      container's anonymous volumes), and `down -v|--volumes` with `-p holdfast` (the dev stack)
+#      or `holdfast-instance`.
 #   3. A destructive verb (rm, rmdir, unlink, shred, truncate, mv, `find -delete`,
 #      `rsync --delete`, `git clean`) in a command that also names the instance. A verb counts
 #      by its basename, so `/bin/rm` is `rm`.
@@ -114,9 +115,13 @@ grep -Eq "$lead$engines( .*)? system +reset( |\$)" <<<"$flat" &&
   block "system reset wipes the container engine's storage, volumes included"
 grep -Eq "$lead$engines( .*)? rm( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat" &&
   block "docker rm -v removes a container's anonymous volumes"
-if grep -Eq 'holdfast-instance' <<<"$flat" &&
-  grep -Eq "(^| )down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat"; then
-  block "down -v on the holdfast-instance project (the real-data stack is stopped with 'make instance-down')"
+if grep -Eq "(^| )down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat"; then
+  # The live dev stack is the compose project `holdfast`; the real-data stack is `holdfast-instance`.
+  # Only `holdfast-sandbox` may be brought down with -v (make sandbox-destroy).
+  grep -Eq 'holdfast-instance' <<<"$flat" &&
+    block "down -v on the holdfast-instance project (the real-data stack is stopped with 'make instance-down')"
+  grep -Eq "((^| )(-p|--project-name)[ =]+|COMPOSE_PROJECT_NAME=)holdfast( |\$)" <<<"$flat" &&
+    block "down -v on the holdfast project (the dev stack's named volumes; only 'make sandbox-destroy' deletes volumes)"
 fi
 
 # What names the instance. Regexes (ERE), so metacharacters in the real path are escaped.

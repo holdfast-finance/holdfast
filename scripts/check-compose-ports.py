@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,6 +38,20 @@ DATA_TARGETS = {
     "caddy": ("/data", "/config"),
 }
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _repo_roots() -> list[Path]:
+    """This tree plus the main checkout when run from a linked worktree."""
+    roots = [REPO_ROOT]
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        roots.append(Path(common).resolve().parent)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return roots
 
 
 def loopback_problems(services: dict[str, dict]) -> list[str]:
@@ -58,7 +73,7 @@ def instance_problems(services: dict[str, dict], instance_dir: str | None) -> li
     root = Path(instance_dir).resolve() if instance_dir else None
     if root is None or not root.is_absolute():
         problems.append("HOLDFAST_INSTANCE_DIR must be set to an absolute path")
-    elif root == REPO_ROOT or REPO_ROOT in root.parents:
+    elif any(root == r or r in root.parents for r in _repo_roots()):
         problems.append(f"{root} is inside the repository (ADR 0019)")
     for name, targets in DATA_TARGETS.items():
         mounts = {v.get("target"): v for v in services.get(name, {}).get("volumes") or []}

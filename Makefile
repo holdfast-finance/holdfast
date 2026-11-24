@@ -10,8 +10,10 @@ COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.pro
 # mounts in $(HOLDFAST_INSTANCE_DIR), a 0700 directory outside the repo, its own instance.env);
 # holdfast-sandbox is throwaway (fresh synthetic keys in .env.sandbox, PLAID_ENV forced to
 # sandbox). Neither layers the dev override, so neither publishes db or redis. See docs/ops/instances.md.
-INSTANCE_PROJECT ?= holdfast-instance
-SANDBOX_PROJECT  ?= holdfast-sandbox
+# The names are fixed: `override` stops even `make X SANDBOX_PROJECT=holdfast`, which would turn
+# sandbox-destroy into `down -v` on the dev stack.
+override INSTANCE_PROJECT := holdfast-instance
+override SANDBOX_PROJECT  := holdfast-sandbox
 COMPOSE_INSTANCE := docker compose -p $(INSTANCE_PROJECT) --env-file "$(HOLDFAST_INSTANCE_DIR)/instance.env" -f docker-compose.yml -f docker-compose.instance.yml
 COMPOSE_SANDBOX  := docker compose -p $(SANDBOX_PROJECT) --env-file .env.sandbox -f docker-compose.yml -f docker-compose.sandbox.yml
 
@@ -88,6 +90,7 @@ sandbox-up: ## Start holdfast-sandbox with fresh synthetic keys (.env.sandbox); 
 	$(COMPOSE_SANDBOX) up -d --build
 
 sandbox-down: ## Stop holdfast-sandbox (keeps its volumes and .env.sandbox)
+	@[ "$(SANDBOX_PROJECT)" = holdfast-sandbox ] || { echo "refusing: project is not holdfast-sandbox" >&2; exit 2; }
 	$(COMPOSE_SANDBOX) down --remove-orphans
 
 sandbox-migrate: ## alembic upgrade head on holdfast-sandbox
@@ -95,6 +98,7 @@ sandbox-migrate: ## alembic upgrade head on holdfast-sandbox
 	$(COMPOSE_SANDBOX) run --rm migrate
 
 sandbox-destroy: ## Delete holdfast-sandbox: containers, volumes and .env.sandbox
+	@[ "$(SANDBOX_PROJECT)" = holdfast-sandbox ] || { echo "refusing: project is not holdfast-sandbox" >&2; exit 2; }
 	$(COMPOSE_SANDBOX) down -v --remove-orphans
 	@rm -f .env.sandbox
 
