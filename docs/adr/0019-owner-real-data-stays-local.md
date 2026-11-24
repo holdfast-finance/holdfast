@@ -1,6 +1,6 @@
 # 0019. Agents may read the instance owner's real statements locally; real data never leaves the machine
 
-- Status: Accepted
+- Status: Accepted (amended by 0039)
 - Date: 2026-11-20
 - Deciders: Owner; Keel
 

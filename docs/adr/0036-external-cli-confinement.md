@@ -1,6 +1,6 @@
 # 0036. Other vendors' coding CLIs run only through the confined firstchair wrapper
 
-- Status: Accepted
+- Status: Accepted (amended by 0039)
 - Date: 2026-11-21
 - Deciders: Keel; Bulwark (reviewed the control in PR #64 and PR #72)
 - Supersedes: ADR 0012 "Coding agents from other vendors" as proposed in PR #8. That ADR was
