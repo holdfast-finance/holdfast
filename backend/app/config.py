@@ -156,7 +156,8 @@ class Settings(BaseSettings):
             )
         if self.plaid_env == "production" and not self.holdfast_real_data:
             raise ValueError(
-                "PLAID_ENV=production needs a real-data deployment: use infra/docker-compose.prod.yml "
+                "PLAID_ENV=production needs a real-data deployment: use "
+                "infra/docker-compose.prod.yml "
                 "or the holdfast-instance project (docs/setup/plaid.md)"
             )
         return self
