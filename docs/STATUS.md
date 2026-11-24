@@ -19,6 +19,9 @@ Single source of truth for phase progress. Updated by the `phase-kickoff` and `p
 | 8.5 | Mobile PWA + private access | NOT STARTED | | |
 | 9 | Hardening + public site | NOT STARTED | | |
 | 10c | Bitcoin self-custody wallet | NOT STARTED | | |
+| 11a | Investments: track | NOT STARTED | | [Phase 11 plan](phases/PHASE-11-investments.md) |
+| 11b | Investments: connectors | NOT STARTED | | [Phase 11 plan](phases/PHASE-11-investments.md) |
+| 11c | Investments: tax | NOT STARTED | | [Phase 11 plan](phases/PHASE-11-investments.md) |
 
 Statuses: NOT STARTED · IN PROGRESS · PASS · PASS-WITH-BLOCKED · FAIL
 

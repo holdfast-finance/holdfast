@@ -96,6 +96,30 @@ PDF statement profiles · Phase 6 credit · tax engine, corpus, oracles, SC plug
 ## Q2 outline (2027-02-19 →)
 Phase 6 credit → 7 tax engine + 10b → 8 Advisor (provider abstraction, MCP, findings) → 8.5 private access on the owner's host → 9 hardening, deploy, backups, docs site → 10c BTC wallet (QR + file signing) → OSS milestone (PLAN 17.6 step 2).
 
+## Phase 11: Investments
+
+[Phase plan](../phases/PHASE-11-investments.md). 11a is preemptible after Phase 3 and supplies K2 with the shared lot engine and price history before 10a. Phase 5 PASS remains the Q1 finish line.
+
+### 11a Track
+- **V1** Brokerage schema and household RLS — M — Lattice/opus — one Alembic head and runtime-role RLS tests — Phase 3 PASS, F4, schema ADR
+- **V2** Shared lot engine, transfer matching and price contract — M — Ledger/sonnet — brokerage and wallet fixtures pass the same engine tests — V1, schema and pricing ADRs
+- **V3** Positions and activity CSV — M — Tide/sonnet — reconciliation and same-day replays pass — V2, I1, I2, P2, strategy ADR
+- **V4** Investment OFX/QFX and overlap handling — M — Tide/sonnet — FITID and file/feed replay leave one effective row — V3, I4
+- **V5** Realized G/L CSV evidence — M — Tide/sonnet — broker basis and adjustments survive import — V3
+- **V6** Manual corporate-action corrections — M — Ledger/sonnet — a split preserves basis and incomplete terms go to review — V2
+- **V7** P6 extension for Plaid Investments lots, prices and delayed history — M — Tide/sonnet — delayed pages replay without duplicates — V2, V4, P1–P7, Plaid amendment
+- **V8** Investments read API and page v1 — M — Prism/sonnet — 375px demo covers freshness, missing prices and restricted accounts — V5–V7, F3, copy ADR
+- **V9** 11a acceptance — S — Sounding/sonnet — plan checks pass on Sandbox and synthetic fixtures — V1–V8
+
+### 11b Connectors
+- **VB1** One eligible direct read-only broker connector — M — Tide/sonnet — read-only credentials and endpoint tests pass — V9, connector ADRs, eligible broker
+- **VB2** Optional SnapTrade Personal connector — M — Tide/sonnet — disclosure, replay and endpoint tests pass — VB1 or explicit skip, SnapTrade ADR, verified terms, owner decision
+
+### 11c Tax
+- **VT1** Realized gains and disposals behind `FEATURE_TAX` — M — Tally/opus — fixture sales reconcile to lots and flag-off tests pass — V9, Phase 7 tax foundation, 10b export contract, copy ADR
+- **VT2** Household wash-sale estimate — M — Tally/opus — cross-account fixture follows verified config and surfaces coverage gaps — VT1
+- **VT3** 1099-B reconciliation and shared export — M — Tally/opus — mismatches cite source rows and replay is idempotent — VT1, VT2, Phase 7 document verification
+
 ## Owner queue (non-blocking by design)
 1. **Move the production Plaid keys out of the dev `.env`** (keep only sandbox keys there). Until then agents build Phase 2 fixture-first and never run against live Plaid.
 2. Plaid Trial signup; afterwards one redacted real-Item sync dump so Sync Health can leave `beta`.
