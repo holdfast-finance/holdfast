@@ -9,15 +9,19 @@ services:
   api:
     environment:
       APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
   worker:
     environment:
       APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
   migrate:
     environment:
       APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
   rotate-keys:
     environment:
       APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
 
   caddy:
     image: holdfast-caddy:local
