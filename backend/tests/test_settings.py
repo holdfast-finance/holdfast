@@ -135,3 +135,19 @@ def test_redis_url_with_its_own_password_wins(clean_env: pytest.MonkeyPatch) -> 
 
 def test_redis_dsn_without_a_password_is_the_plain_url(clean_env: pytest.MonkeyPatch) -> None:
     assert make_settings().redis_dsn == "redis://redis:6379/0"
+
+
+def test_sandbox_instance_refuses_production_plaid(clean_env: pytest.MonkeyPatch) -> None:
+    # H2: holdfast-sandbox is throwaway, so it can never be pointed at real Plaid Items.
+    with pytest.raises(ValidationError, match="refuses PLAID_ENV=production"):
+        make_settings(holdfast_sandbox=True, plaid_env="production")
+    assert make_settings(holdfast_sandbox=True, plaid_env="sandbox").holdfast_sandbox is True
+
+
+def test_production_plaid_only_in_the_instance(clean_env: pytest.MonkeyPatch) -> None:
+    # H2 D13: the dev stack (no flag) refuses production; prod and holdfast-instance set the flag.
+    with pytest.raises(ValidationError, match="needs a real-data deployment"):
+        make_settings(plaid_env="production")
+    assert make_settings(plaid_env="sandbox").plaid_env == "sandbox"
+    s = make_settings(holdfast_real_data=True, plaid_env="production")
+    assert s.plaid_env == "production"

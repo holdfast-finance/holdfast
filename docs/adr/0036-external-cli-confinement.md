@@ -1,6 +1,6 @@
 # 0036. Other vendors' coding CLIs run only through the confined firstchair wrapper
 
-- Status: Accepted
+- Status: Accepted (amended by 0039)
 - Date: 2026-11-21
 - Deciders: Keel; Bulwark (reviewed the control in PR #64 and PR #72)
 - Supersedes: ADR 0012 "Coding agents from other vendors" as proposed in PR #8. That ADR was
@@ -49,6 +49,9 @@ because a denylist there had already missed entries.
    through `scripts/fc-delegate.sh`, which wraps `firstchair delegate run`. Running the raw CLIs,
    running `firstchair delegate run` directly, and running PR #8's `external-agent-launch.sh` are
    all out.
+   *(Amended by 0039: this point now covers headless workers. Live sessions the owner opens and
+   controls may run unconfined. Headless Grok write workers stay refused, and the wrapper enforces
+   that.)*
 2. **What the wrapper does** (as of PR #72). It adds `--confine`, then a `--hide` for each of
    these that exists:
    - the private data directory (`HOLDFAST_PRIVATE_DIR`, default

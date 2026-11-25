@@ -1,0 +1,80 @@
+# holdfast-instance: the real-data project (H2, PHASE-2 contract D13). Layered on the base file:
+#
+#   HOLDFAST_INSTANCE_DIR=<dir> docker compose -p holdfast-instance \
+#     --env-file "$HOLDFAST_INSTANCE_DIR/instance.env" \
+#     -f docker-compose.yml -f docker-compose.instance.yml up -d --build
+#
+# (`make instance-up` / `./scripts/dev.ps1 instance-up`, which check the directory first.)
+#
+# - Every byte of state lives on a bind mount under HOLDFAST_INSTANCE_DIR, a mode-0700 directory
+#   outside the repo (ADR 0019). There is no named volume to prune: `docker compose down -v` in
+#   any checkout, `docker volume prune` and `docker system prune --volumes` cannot reach it.
+#   `create_host_path: false` means Docker never invents a missing directory (root-owned, wrong
+#   mode); scripts/instance.sh creates and checks them.
+# - Its own project name (-p holdfast-instance) and its own env file, passed with --env-file, so
+#   the checkout's .env (dev keys) is never read here. The dev override is NOT layered, so db and
+#   redis publish nothing. Only caddy publishes, on loopback, on its own port (rule 12).
+# - PLAID_ENV=production is for real-data deployments only (this project or
+#   infra/docker-compose.prod.yml): HOLDFAST_REAL_DATA=true is what lets Settings accept it
+#   (app/config.py); the dev stack and the sandbox refuse it.
+
+services:
+  db:
+    volumes:
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/postgres
+        target: /var/lib/postgresql/data
+        bind: {create_host_path: false}
+
+  redis:
+    volumes:
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/redis
+        target: /data
+        bind: {create_host_path: false}
+
+  api:
+    environment:
+      APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
+    volumes:
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/documents
+        target: /data/documents
+        bind: {create_host_path: false}
+
+  worker:
+    environment:
+      APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
+    volumes:
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/documents
+        target: /data/documents
+        bind: {create_host_path: false}
+
+  migrate:
+    environment:
+      APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
+
+  rotate-keys:
+    environment:
+      APP_ENV: prod
+      HOLDFAST_REAL_DATA: "true"
+
+  caddy:
+    # Loopback and a port of its own, so it can sit beside the dev stack on 443. A tailnet
+    # front-end for the phone is a separate decision (PA-D1), not this file.
+    ports: !override
+      - "127.0.0.1:${HOLDFAST_INSTANCE_PORT:-9443}:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/caddy_data
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOLDFAST_INSTANCE_DIR:?set HOLDFAST_INSTANCE_DIR}/caddy_config
+        target: /config
+        bind: {create_host_path: false}
