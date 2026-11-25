@@ -14,8 +14,9 @@
 # - Its own project name (-p holdfast-instance) and its own env file, passed with --env-file, so
 #   the checkout's .env (dev keys) is never read here. The dev override is NOT layered, so db and
 #   redis publish nothing. Only caddy publishes, on loopback, on its own port (rule 12).
-# - This is the only project that may carry PLAID_ENV=production: HOLDFAST_REAL_DATA=true is what
-#   lets Settings accept it (app/config.py); the dev stack and the sandbox refuse it.
+# - PLAID_ENV=production is for real-data deployments only (this project or
+#   infra/docker-compose.prod.yml): HOLDFAST_REAL_DATA=true is what lets Settings accept it
+#   (app/config.py); the dev stack and the sandbox refuse it.
 
 services:
   db:

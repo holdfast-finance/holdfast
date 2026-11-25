@@ -34,12 +34,6 @@ require_dir_var() {
 
 check() {
   require_dir_var
-  # Compose lets an exported variable beat --env-file, so a stray export would change what the
-  # real-data stack runs with. Run under `env -i` (docs/ops/instances.md).
-  local v
-  for v in $(compgen -e | grep -E '^(FERNET_KEY|POSTGRES_.*|PLAID_.*|REDIS_PASSWORD|SESSION_SECRET)$' || true); do
-    die "$v is exported in this shell and would override instance.env; run under: env -i PATH=\"\$PATH\" HOME=\"\$HOME\" HOLDFAST_INSTANCE_DIR=... make ..."
-  done
   local d=$HOLDFAST_INSTANCE_DIR
   [ ! -L "$d" ] || die "$d is a symlink; point HOLDFAST_INSTANCE_DIR at the real directory"
   [ -d "$d" ] || die "$d does not exist; run 'make instance-init' first"

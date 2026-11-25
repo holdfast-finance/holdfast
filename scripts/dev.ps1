@@ -36,6 +36,11 @@ $BackendImage = 'holdfast-backend:local'
 # The project names are fixed, with no env fallback: an override could aim `down -v` at the dev stack.
 $InstanceProject = 'holdfast-instance'
 $SandboxProject = 'holdfast-sandbox'
+# env -i: no exported shell variable can override instance.env on the real-data stack.
+$InstanceEnv = @('-i', "PATH=$env:PATH", "HOME=$env:HOME", "HOLDFAST_INSTANCE_DIR=$env:HOLDFAST_INSTANCE_DIR")
+foreach ($v in 'DOCKER_HOST', 'DOCKER_CONFIG', 'HOLDFAST_INSTANCE_PORT', 'BACKEND_IMAGE') {
+    if (Get-Item "Env:$v" -ErrorAction SilentlyContinue) { $InstanceEnv += "$v=$((Get-Item "Env:$v").Value)" }
+}
 $ComposeInstance = @('compose', '-p', $InstanceProject, '--env-file', "$env:HOLDFAST_INSTANCE_DIR/instance.env", '-f', 'docker-compose.yml', '-f', 'docker-compose.instance.yml')
 $ComposeSandbox = @('compose', '-p', $SandboxProject, '--env-file', '.env.sandbox', '-f', 'docker-compose.yml', '-f', 'docker-compose.sandbox.yml')
 $Python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
@@ -228,19 +233,19 @@ switch ($Target) {
     }
     'instance-up' {
         Invoke-Instance 'check'
-        docker @ComposeInstance build api
-        docker @ComposeInstance up -d --build db redis
-        docker @ComposeInstance run --rm migrate
-        docker @ComposeInstance up -d --build
+        env @InstanceEnv docker @ComposeInstance build api
+        env @InstanceEnv docker @ComposeInstance up -d --build db redis
+        env @InstanceEnv docker @ComposeInstance run --rm migrate
+        env @InstanceEnv docker @ComposeInstance up -d --build
     }
-    'instance-down' { Invoke-Instance 'check'; docker @ComposeInstance down --remove-orphans }
-    'instance-migrate' { Invoke-Instance 'check'; docker @ComposeInstance run --rm migrate }
-    'instance-ps' { Invoke-Instance 'check'; docker @ComposeInstance ps }
+    'instance-down' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance down --remove-orphans }
+    'instance-migrate' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance run --rm migrate }
+    'instance-ps' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance ps }
     'instance-logs' {
         Invoke-Instance 'check'
         $logArgs = @('logs', '-f', '--tail=200')
         if ($Service) { $logArgs += $Service }
-        docker @ComposeInstance @logArgs
+        env @InstanceEnv docker @ComposeInstance @logArgs
     }
     'sandbox-up' {
         Invoke-Instance 'sandbox-env'

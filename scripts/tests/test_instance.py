@@ -115,17 +115,6 @@ class InstanceCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("inside the repository", result.stderr)
 
-    def test_exported_secrets_that_would_override_the_env_file_refuse(self) -> None:
-        for var in ("PLAID_ENV", "FERNET_KEY", "POSTGRES_PASSWORD"):
-            with self.subTest(var=var):
-                result = subprocess.run(
-                    [BASH, str(SCRIPT), "check"],
-                    env={"PATH": "/usr/bin:/bin", "HOLDFAST_INSTANCE_DIR": str(self.dir), var: "x"},
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(result.returncode, 2)
-                self.assertIn(f"{var} is exported", result.stderr)
-
     def test_a_symlinked_subdirectory_refuses(self) -> None:
         other = self.tmp / "elsewhere"
         other.mkdir()
@@ -232,6 +221,23 @@ class FixedProjectNamesTest(unittest.TestCase):
     def test_destroy_and_down_carry_the_exact_project_guard(self) -> None:
         for target in ("sandbox-destroy", "sandbox-down"):
             self.assertIn('"holdfast-sandbox" = holdfast-sandbox', self.dry_run(target))
+
+
+class InstanceEnvIsolationTest(unittest.TestCase):
+    def test_instance_targets_run_compose_under_env_i(self) -> None:
+        make = shutil.which("make")
+        if make is None:
+            self.skipTest("make is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = subprocess.run(
+                [make, "-n", "-C", str(ROOT), "instance-ps",
+                 f"HOLDFAST_INSTANCE_DIR={tmp}"],
+                env={"PATH": "/usr/bin:/bin", "PLAID_ENV": "production"},
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stdout, r'env -i PATH="\$PATH" HOME="\$HOME" HOLDFAST_INSTANCE_DIR=')
+        self.assertIn("env -i", [ln for ln in out.stdout.splitlines() if "compose" in ln][0])
 
 
 class RealDataFlagTest(unittest.TestCase):

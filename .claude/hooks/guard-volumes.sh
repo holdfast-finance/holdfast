@@ -115,20 +115,27 @@ grep -Eq "$lead$engines( .*)? system +reset( |\$)" <<<"$flat" &&
   block "system reset wipes the container engine's storage, volumes included"
 grep -Eq "$lead$engines( .*)? rm( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <<<"$flat" &&
   block "docker rm -v removes a container's anonymous volumes"
-# An allowlist: a compose `down` that removes volumes (-v, -vf, --volumes, --volumes=true, -v=true)
-# is blocked unless the command names a project with -p / --project-name (spaced, `=` or attached,
-# as in `-pname`) whose value is neither `holdfast` (the live dev stack) nor `holdfast-instance`
-# (real data). With no explicit project, the name comes from the directory or COMPOSE_PROJECT_NAME,
-# and in this repo that is `holdfast`, so it is blocked too. `make sandbox-destroy` passes because
-# the hook only sees `make`, and `-p holdfast-sandbox down -v` is allowed.
-if grep -Eq "$lead$engines( .*)? down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)(=[^ ]*)?( |\$)" <<<"$flat"; then
-  proj="$(grep -oE '(^| )(-p|--project-name)[ =]*[^ -][^ ]*' <<<"$flat" | tail -n 1 |
+# An allowlist, checked per command segment: a compose `down` that removes volumes (-v, -vf,
+# --volumes, --volumes=true, -v=true) is blocked unless the SAME segment names a project with
+# -p / --project-name (spaced, `=` or attached, as in `-pname`) whose value is a plain name that is
+# neither `holdfast` (the live dev stack) nor `holdfast-instance` (real data). The command is split
+# on ; & | ( ) backtick and `$(` first, so a `mkdir -p x`, `cp -p` or a `-p` in another command
+# never counts, and a value like `holdfast;` is cut at the separator. A value that is not
+# [a-z0-9][a-z0-9_-]* counts as absent. With no project the name comes from the directory or
+# COMPOSE_PROJECT_NAME, which is `holdfast` here, so that is blocked too. `make sandbox-destroy`
+# passes because the hook only sees `make`; `-p holdfast-sandbox down -v` is allowed. The engine
+# is matched as the word `compose`/`docker-compose`, so `$(echo docker) compose down -v` is caught.
+segments="$(sed -E 's/[;&|()`]/\n/g' <<<"$flat")"
+while IFS= read -r seg; do
+  grep -Eq "(^| )(compose|docker-compose|podman-compose)( .*)? down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)(=[^ ]*)?( |\$)" <<<"$seg" || continue
+  proj="$(grep -oE '(^| )(-p|--project-name)[ =]*[^ -][^ ]*' <<<"$seg" | tail -n 1 |
     sed -E 's/^ *(-p|--project-name)[ =]*//')"
+  grep -Eq '^[a-z0-9][a-z0-9_-]*$' <<<"$proj" || proj=""
   case "$proj" in
     "" | holdfast | holdfast-instance)
       block "down -v removes volumes; without an explicit -p <project> that is not holdfast or holdfast-instance it can hit the dev stack or real data (only 'make sandbox-destroy' deletes volumes)" ;;
   esac
-fi
+done <<<"$segments"
 
 # What names the instance. Regexes (ERE), so metacharacters in the real path are escaped.
 esc() { sed 's/[][\.*^$+?(){}|/]/\\&/g' <<<"${1%/}"; }

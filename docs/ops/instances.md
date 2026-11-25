@@ -5,7 +5,7 @@ Three compose projects can run on one machine. They never share a volume, an env
 | Project | Purpose | State | Env file | Published port |
 |---|---|---|---|---|
 | `holdfast` (dev, `make up`) | development, hot reload | named volumes, `./data/documents` | `./.env` | `127.0.0.1:443`, db `5432`, redis `56379` (dev override) |
-| `holdfast-instance` | **real data**, the only place `PLAID_ENV=production` exists (Settings refuses it unless `HOLDFAST_REAL_DATA=true`, set by the instance and prod compose files) | bind mounts under `$HOLDFAST_INSTANCE_DIR` | `$HOLDFAST_INSTANCE_DIR/instance.env` | caddy `127.0.0.1:9443` only |
+| `holdfast-instance` | **real data**; `PLAID_ENV=production` is for real-data deployments (`holdfast-instance` or `infra/docker-compose.prod.yml`) (Settings refuses it unless `HOLDFAST_REAL_DATA=true`, set by the instance and prod compose files) | bind mounts under `$HOLDFAST_INSTANCE_DIR` | `$HOLDFAST_INSTANCE_DIR/instance.env` | caddy `127.0.0.1:9443` only |
 | `holdfast-sandbox` | throwaway, synthetic keys | named volumes of its own | `./.env.sandbox` (git-ignored) | caddy `127.0.0.1:9444` only |
 
 Ports are changed with `HOLDFAST_INSTANCE_PORT` and `HOLDFAST_SANDBOX_PORT`. Neither project layers the
