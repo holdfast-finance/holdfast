@@ -47,6 +47,7 @@ from app.schemas.ledger import (
     TransactionPage,
     TransactionSummary,
 )
+from app.services.accounts import can_change_owner, can_edit_account, owner_kind
 from app.services.context import RequestContext
 from app.services.errors import ApiError
 from app.services.ledger_service import (
@@ -179,6 +180,96 @@ def _api_error(exc: Exception) -> ApiError:
     return ApiError("server_error", "Something went wrong on our side.")
 
 
+def _owner_fields(account: Account, principal: Principal) -> dict[str, Any]:
+    person_id = principal.person_id
+    return {
+        "owner": owner_kind(account.owner_person_id, person_id),
+        "owner_person_id": account.owner_person_id,
+        "can_edit": can_edit_account(account.owner_person_id, person_id),
+        "can_change_owner": can_change_owner(
+            account.owner_person_id, person_id, is_owner=principal.is_owner
+        ),
+    }
+
+
+def _account_rows() -> Select[Any]:
+    """Accounts this reader can see, with live counts and the newest balance."""
+    live = (
+        select(
+            Transaction.account_id.label("account_id"),
+            func.count().label("n"),
+            func.min(Transaction.posted_date).label("first"),
+            func.max(Transaction.posted_date).label("last"),
+        )
+        .where(Transaction.superseded_by_id.is_(None))
+        .group_by(Transaction.account_id)
+        .subquery()
+    )
+    newest = (
+        select(BalanceSnapshot.account_id, BalanceSnapshot.current, BalanceSnapshot.as_of_date)
+        .ext(distinct_on(BalanceSnapshot.account_id))
+        .order_by(BalanceSnapshot.account_id, BalanceSnapshot.as_of_date.desc())
+        .subquery()
+    )
+    return (
+        select(
+            Account,
+            Institution.name,
+            func.coalesce(live.c.n, 0),
+            live.c.first,
+            live.c.last,
+            newest.c.current,
+            newest.c.as_of_date,
+        )
+        .outerjoin(BankConnection, BankConnection.id == Account.bank_connection_id)
+        .outerjoin(Institution, Institution.id == BankConnection.institution_id)
+        .outerjoin(live, live.c.account_id == Account.id)
+        .outerjoin(newest, newest.c.account_id == Account.id)
+    )
+
+
+def _account_out(
+    principal: Principal,
+    account: Account,
+    institution_name: str | None,
+    count: Any,
+    first: date | None,
+    last: date | None,
+    balance: Any,
+    as_of: date | None,
+) -> AccountOut:
+    return AccountOut.model_validate(
+        {
+            "id": account.id,
+            "name": account.name,
+            "type": account.type,
+            "source": account.source,
+            "institution_name": institution_name,
+            "mask": account.mask,
+            "currency": account.currency,
+            "visibility": account.visibility,
+            **_owner_fields(account, principal),
+            "is_hidden": account.is_hidden,
+            "transaction_count": count,
+            "earliest_posted_date": first,
+            "latest_posted_date": last,
+            "latest_balance": balance,
+            "latest_balance_as_of": as_of if balance is not None else None,
+        }
+    )
+
+
+async def load_account_out(
+    session: AsyncSession, principal: Principal, account_id: uuid.UUID
+) -> AccountOut | None:
+    """One account, under the session's RLS. None when this reader cannot see it."""
+    stmt = _account_rows().where(Account.id == account_id)
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return _account_out(principal, *row)
+
+
 class LedgerService:
     def __init__(self, ctx: RequestContext, principal: Principal) -> None:
         self.ctx = ctx
@@ -190,64 +281,10 @@ class LedgerService:
         )
 
     async def accounts(self) -> AccountList:
-        live = (
-            select(
-                Transaction.account_id.label("account_id"),
-                func.count().label("n"),
-                func.min(Transaction.posted_date).label("first"),
-                func.max(Transaction.posted_date).label("last"),
-            )
-            .where(Transaction.superseded_by_id.is_(None))
-            .group_by(Transaction.account_id)
-            .subquery()
-        )
-        newest = (
-            select(BalanceSnapshot.account_id, BalanceSnapshot.current, BalanceSnapshot.as_of_date)
-            .ext(distinct_on(BalanceSnapshot.account_id))
-            .order_by(BalanceSnapshot.account_id, BalanceSnapshot.as_of_date.desc())
-            .subquery()
-        )
-        stmt = (
-            select(
-                Account,
-                Institution.name,
-                func.coalesce(live.c.n, 0),
-                live.c.first,
-                live.c.last,
-                newest.c.current,
-                newest.c.as_of_date,
-            )
-            .outerjoin(BankConnection, BankConnection.id == Account.bank_connection_id)
-            .outerjoin(Institution, Institution.id == BankConnection.institution_id)
-            .outerjoin(live, live.c.account_id == Account.id)
-            .outerjoin(newest, newest.c.account_id == Account.id)
-            .order_by(Account.name, Account.id)
-        )
+        stmt = _account_rows().order_by(Account.name, Account.id)
         async with self._session() as s:
             rows = (await s.execute(stmt)).all()
-        return AccountList(
-            items=[
-                AccountOut.model_validate(
-                    {
-                        "id": a.id,
-                        "name": a.name,
-                        "type": a.type,
-                        "source": a.source,
-                        "institution_name": inst,
-                        "mask": a.mask,
-                        "currency": a.currency,
-                        "visibility": a.visibility,
-                        "is_hidden": a.is_hidden,
-                        "transaction_count": n,
-                        "earliest_posted_date": first,
-                        "latest_posted_date": last,
-                        "latest_balance": balance,
-                        "latest_balance_as_of": as_of if balance is not None else None,
-                    }
-                )
-                for a, inst, n, first, last, balance, as_of in rows
-            ]
-        )
+        return AccountList(items=[_account_out(self.principal, *row) for row in rows])
 
     def _base(self, *cols: Any) -> Select[Any]:
         return (

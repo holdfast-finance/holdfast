@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from app.schemas.accounts import OwnerKind
 from app.schemas.common import DecimalStr, Model, MoneyStr
 
 AccountVisibility = Literal["private", "shared", "summary_only"]
@@ -28,6 +29,13 @@ class AccountOut(Model):
     mask: str | None  # at most the last four digits, never a full number
     currency: str
     visibility: AccountVisibility
+    # How this reader relates to the owner. Null owner_person_id is "joint".
+    owner: OwnerKind
+    owner_person_id: uuid.UUID | None
+    # Writable: joint, or this person owns it. Never derived from visibility.
+    can_edit: bool
+    # True when a change this reader sends would be accepted (claim needs the owner role).
+    can_change_owner: bool
     is_hidden: bool
     # Live rows only (superseded rows excluded), so these match what the transaction list shows.
     transaction_count: int
