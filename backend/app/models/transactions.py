@@ -68,20 +68,49 @@ class Category(Base):
 
 
 class Rule(Base):
-    """``match``: {merchant_regex, desc_regex, account_id, amount_min/max}.
-    ``set``: {category_id, tax_tag, is_transfer, rename}."""
+    """A versioned category rule authored by a household member."""
 
     __tablename__ = "rule"
-    __table_args__ = (check_in("created_by", CREATED_BY),)
+    __table_args__ = (
+        check_in("created_by", CREATED_BY),
+        check_in("account_scope", ("any", "joint", "own")),
+        child_fk("author_person_id", "person"),
+        child_fk("category_id", "category"),
+        CheckConstraint("char_length(name) BETWEEN 1 AND 80", name="name"),
+        CheckConstraint("priority BETWEEN 1 AND 10000", name="priority"),
+        CheckConstraint(
+            "jsonb_typeof(conditions) = 'object' AND conditions->>'v' IS NOT DISTINCT FROM '1'"
+            " AND (NOT conditions ? 'amount_equals' OR "
+            "jsonb_typeof(conditions->'amount_equals') = 'string')"
+            " AND (NOT conditions ? 'amount_min' OR "
+            "jsonb_typeof(conditions->'amount_min') = 'string')"
+            " AND (NOT conditions ? 'amount_max' OR "
+            "jsonb_typeof(conditions->'amount_max') = 'string')",
+            name="conditions",
+        ),
+        parent_key(),
+        Index(
+            "ix_rule_household_id_priority_created_at_id",
+            "household_id",
+            "priority",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[UUIDPK]
     household_id: Mapped[HouseholdId]
+    author_person_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    name: Mapped[str]
+    enabled: Mapped[bool] = mapped_column(server_default=text("true"))
     priority: Mapped[int] = mapped_column(server_default=text("100"))
-    match: Mapped[dict[str, Any]]
-    set_: Mapped[dict[str, Any]] = mapped_column("set")
+    conditions: Mapped[dict[str, Any]]
+    category_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    account_scope: Mapped[str] = mapped_column(server_default=text("'own'"))
     created_by: Mapped[str] = mapped_column(server_default=text("'user'"))
-    hit_count: Mapped[int] = mapped_column(server_default=text("0"))
+    last_applied_at: Mapped[datetime | None]
     created_at: Mapped[CreatedAt]
+    updated_at: Mapped[CreatedAt]
 
 
 class Transaction(Base):
@@ -129,6 +158,11 @@ class Transaction(Base):
         check_in("category_source", CATEGORY_SOURCES, nullable=True),
         child_fk("account_id", "account"),
         child_fk("category_id", "category", ondelete="SET NULL"),
+        child_fk("category_rule_id", "rule", ondelete="SET NULL"),
+        CheckConstraint(
+            "category_rule_id IS NULL OR category_source IS NOT DISTINCT FROM 'rule'",
+            name="category_rule_source",
+        ),
         child_fk("receipt_document_id", "document", ondelete="SET NULL"),
         # NO ACTION: an import run can't be deleted while it still has rows (undo deletes them
         # first, under RLS). Household and account deletes still cascade both.
@@ -173,6 +207,11 @@ class Transaction(Base):
             text("id DESC"),
             postgresql_where=text("superseded_by_id IS NULL"),
         ),
+        Index(
+            "ix_transaction_category_rule_id",
+            "category_rule_id",
+            postgresql_where=text("category_rule_id IS NOT NULL"),
+        ),
         Index("ix_transaction_category_id_posted_date", "category_id", "posted_date"),
         Index("ix_transaction_merchant_name", "merchant_name"),
         Index(
@@ -201,6 +240,7 @@ class Transaction(Base):
     plaid_pfc_detailed: Mapped[str | None]
     category_id: Mapped[uuid.UUID | None]
     category_source: Mapped[str | None]
+    category_rule_id: Mapped[uuid.UUID | None]
     is_pending: Mapped[bool] = mapped_column(server_default=text("false"))
     is_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     transfer_group_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
