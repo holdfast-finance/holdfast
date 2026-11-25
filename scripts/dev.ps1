@@ -38,7 +38,7 @@ $InstanceProject = 'holdfast-instance'
 $SandboxProject = 'holdfast-sandbox'
 # env -i: no exported shell variable can override instance.env on the real-data stack.
 $InstanceEnv = @('-i', "PATH=$env:PATH", "HOME=$env:HOME", "HOLDFAST_INSTANCE_DIR=$env:HOLDFAST_INSTANCE_DIR")
-foreach ($v in 'DOCKER_HOST', 'DOCKER_CONFIG', 'HOLDFAST_INSTANCE_PORT', 'BACKEND_IMAGE') {
+foreach ($v in 'DOCKER_HOST', 'DOCKER_CONFIG', 'HOLDFAST_INSTANCE_PORT') {
     if (Get-Item "Env:$v" -ErrorAction SilentlyContinue) { $InstanceEnv += "$v=$((Get-Item "Env:$v").Value)" }
 }
 $ComposeInstance = @('compose', '-p', $InstanceProject, '--env-file', "$env:HOLDFAST_INSTANCE_DIR/instance.env", '-f', 'docker-compose.yml', '-f', 'docker-compose.instance.yml')

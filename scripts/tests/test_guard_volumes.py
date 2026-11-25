@@ -256,6 +256,11 @@ class GuardVolumesTest(unittest.TestCase):
     def test_more_ways_to_delete_are_blocked(self) -> None:
         for cmd in (
             "docker compose down -v",
+            "mkdir -p backups\ndocker compose down -v",
+            "docker compose -p holdfast-sandbox ps\ndocker compose down -v",
+            "docker compose -p holdfast-sandbox ps\r\ndocker compose down -v",
+            "sudo -p prompt docker compose down -v",
+            "ssh -p 22 host docker compose down -v",
             "mkdir -p backups && docker compose down -v",
             "docker compose down -v && mkdir -p backups",
             "cp -p a b; docker compose down -v",

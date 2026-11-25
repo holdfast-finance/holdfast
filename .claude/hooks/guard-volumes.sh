@@ -125,9 +125,14 @@ grep -Eq "$lead$engines( .*)? rm( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)( |\$)" <
 # COMPOSE_PROJECT_NAME, which is `holdfast` here, so that is blocked too. `make sandbox-destroy`
 # passes because the hook only sees `make`; `-p holdfast-sandbox down -v` is allowed. The engine
 # is matched as the word `compose`/`docker-compose`, so `$(echo docker) compose down -v` is caught.
-segments="$(sed -E 's/[;&|()`]/\n/g' <<<"$flat")"
+# `flat` has its newlines turned into spaces, so build the segments from a copy that keeps them
+# (\r becomes a newline too) and treat a newline as a separator.
+nl="$(printf '%s' "$cmd" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n//g' | tr -d "'\"\\\\" | tr '\r\t' '\n ')"
+segments="$(sed -E 's/[;&|()`]/\n/g' <<<"$nl")"
 while IFS= read -r seg; do
   grep -Eq "(^| )(compose|docker-compose|podman-compose)( .*)? down( .*)? (-[a-zA-Z]*v[a-zA-Z]*|--volumes)(=[^ ]*)?( |\$)" <<<"$seg" || continue
+  # Only text after the compose word counts: `sudo -p prompt docker compose down -v` has no project.
+  seg="$(sed -E 's/^.*(^| )(compose|docker-compose|podman-compose)( |$)//' <<<"$seg")"
   proj="$(grep -oE '(^| )(-p|--project-name)[ =]*[^ -][^ ]*' <<<"$seg" | tail -n 1 |
     sed -E 's/^ *(-p|--project-name)[ =]*//')"
   grep -Eq '^[a-z0-9][a-z0-9_-]*$' <<<"$proj" || proj=""

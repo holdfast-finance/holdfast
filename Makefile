@@ -16,7 +16,7 @@ override INSTANCE_PROJECT := holdfast-instance
 override SANDBOX_PROJECT  := holdfast-sandbox
 # `env -i` hands compose only what it needs: no exported FERNET_KEY, POSTGRES_* or PLAID_* can
 # override --env-file on the real-data stack.
-ENV_INSTANCE := env -i PATH="$$PATH" HOME="$$HOME" HOLDFAST_INSTANCE_DIR="$(HOLDFAST_INSTANCE_DIR)" $(foreach v,DOCKER_HOST DOCKER_CONFIG HOLDFAST_INSTANCE_PORT BACKEND_IMAGE,$(if $($(v)),$(v)="$($(v))"))
+ENV_INSTANCE := env -i PATH="$$PATH" HOME="$$HOME" HOLDFAST_INSTANCE_DIR="$(HOLDFAST_INSTANCE_DIR)" $(foreach v,DOCKER_HOST DOCKER_CONFIG HOLDFAST_INSTANCE_PORT,$(if $($(v)),$(v)="$($(v))"))
 COMPOSE_INSTANCE := $(ENV_INSTANCE) docker compose -p $(INSTANCE_PROJECT) --env-file "$(HOLDFAST_INSTANCE_DIR)/instance.env" -f docker-compose.yml -f docker-compose.instance.yml
 COMPOSE_SANDBOX  := docker compose -p $(SANDBOX_PROJECT) --env-file .env.sandbox -f docker-compose.yml -f docker-compose.sandbox.yml
 
