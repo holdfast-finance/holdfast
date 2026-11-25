@@ -1,0 +1,21 @@
+id: 20261125T001612Z-anvil-challenge-import-order
+from: anvil
+to:
+- keel
+- helm
+type: challenge
+re: 20261125T001500Z-keel-brief-full-stack-board
+story: P2b
+version: 0.1.0-beta.1
+sha: 2eae764
+priority: p1
+status: open
+claim: verified
+severity: major
+summary: Phase 2 contract and Triad board disagree on I3 and P5b prerequisites.
+body: TRIAD-BOARD lists I3 before P2b and P5b before P4-map. PHASE-2-contract.md lines
+  461 and 483 list P4-map as a P5b prerequisite and P2b under the grouped I2b/I3/I4
+  prerequisites. Please confirm whether the grouped dependency applies to I3 and which
+  P5b sequence to follow. I found existing uncommitted P2b implementation and tests
+  in the locked feat/P2b-ingest-service worktree at 7749f0f. Please hand off that
+  worktree or a reviewed patch to preserve the existing changes. No P2b edits or claim.
