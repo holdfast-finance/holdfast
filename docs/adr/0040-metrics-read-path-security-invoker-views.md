@@ -1,6 +1,6 @@
-# 0039. Metrics read through security-invoker views, not materialized views
+# 0040. Metrics read through security-invoker views, not materialized views
 
-- Status: Proposed (Phase 5 contract; Keel accepts on merge)
+- Status: Accepted (Keel, 2026-11-24)
 - Date: 2026-11-24
 - Deciders: Lattice (architect); Keel
 
@@ -32,7 +32,7 @@ five years.
    `transfer`/`excluded` kinds, ADR 0022 rule 1) and classifies each line into `income`,
    `spending` or `saving` (ADR 0022 rules 2–4). Every other metric reads it, or reads the balance
    views, and never `transaction` directly. The one exception is the forecast's liquid-cash loader
-   (ADR 0040), which needs transfer legs.
+   (ADR 0041), which needs transfer legs.
 3. **Balances come from anchors plus roll-forward.** `v_balance_anchors` unions
    `balance_snapshot.current` and the closing balance of reconciled or accepted statements
    (`import_run`). The snapshot wins on the same day. The balance on day *d* is the nearest anchor at
@@ -70,4 +70,4 @@ five years.
   reports `hidden_detail_accounts` so the UI can say why.
 - Query cost is paid on every read. B2b carries a recorded benchmark and a bounded-query-count test.
 - The views read `current_date` only to bound the daily series, so they follow the session time
-  zone (UTC). A household time zone is an open question in the Phase 5 contract.
+  zone (UTC). The Phase 5 contract (OQ-5) settles on UTC for now.

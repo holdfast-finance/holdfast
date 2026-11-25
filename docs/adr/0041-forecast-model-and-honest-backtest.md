@@ -1,6 +1,6 @@
-# 0040. Forecast f1: recurring schedule plus residual level, empirical-quantile bands, honest backtest
+# 0041. Forecast f1: recurring schedule plus residual level, empirical-quantile bands, honest backtest
 
-- Status: Proposed (Phase 5 contract; Keel accepts on merge)
+- Status: Accepted (Keel, 2026-11-24)
 - Date: 2026-11-24
 - Deciders: Lattice (architect); Keel
 
@@ -14,7 +14,7 @@ WAPE, P10–P90 coverage and a seasonal-naive baseline instead. ROADMAP B3 adopt
 Two traps:
 - **Leakage.** Recurring series are detected on the full history. A backtest that uses today's
   series at a past origin knows the future.
-- **Transfers.** Metrics drop transfers (ADR 0039). But a paired payment from checking to a
+- **Transfers.** Metrics drop transfers (ADR 0040). But a paired payment from checking to a
   mortgage or brokerage account still lowers the cash a household can spend.
 
 ## Decision
@@ -53,7 +53,7 @@ Two traps:
 - **ETS (statsmodels) with model bands:** a heavy dependency, floats inside, and fragile intervals
   on short weekly series. The empirical errors are honest by construction.
 - **Forecasting each account:** card payments would have to be modelled as flows between
-  accounts. Deferred. Per account is an open question in the contract.
+  accounts. Deferred (Phase 5 contract OQ-9).
 - **Storing forecasts:** they'd be stale between runs, and they'd add per-person tables. The
   computation is cheap once the recurring series exist.
 - **Backtesting with today's series:** cheaper, but it leaks the future. Rejected, because the
@@ -64,7 +64,7 @@ Two traps:
   never on every sync.
 - Paired recurring payments to non-liquid accounts (mortgage, brokerage) aren't scheduled.
   Recurring detection ignores transfers (ADR 0028), so they land in the residual and widen the
-  bands. Listed as an open question.
+  bands. Accepted for f1 (Phase 5 contract OQ-10).
 - The model version (`f1`) is stored with every backtest, so a later model's numbers aren't mixed
   with older ones.
 - What-if (PLAN 8.7) is cut from Q1. It would add hypothetical occurrences to the same schedule.

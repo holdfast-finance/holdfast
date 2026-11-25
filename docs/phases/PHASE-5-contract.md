@@ -4,17 +4,18 @@ Sources (Section 20 wins where they conflict):
 - PLAN 5, 8.5–8.8, 11, 11.1 and 13 (Phase 5), and Section 20 (20.2 differentiator 5, 20.3)
 - ROADMAP E5 (B1–B6) and the round-table rulings (`docs/planning/roundtable/04`, `05`, `08` C2)
 - ADRs 0007, 0008, 0011, 0016, 0022, 0026–0029
-- the Phase 5 ADRs, written with this contract (status Proposed until it merges):
-  - **0039**: metrics read through security-invoker views, not materialized views
-  - **0040**: forecast f1 and the honest backtest
-  - **0041**: alerts are evaluated per person, email only, with minimal content
+- the Phase 5 ADRs, written with this contract (Accepted by Keel, 2026-11-24):
+  - **0040**: metrics read through security-invoker views, not materialized views
+  - **0041**: forecast f1 and the honest backtest
+  - **0042**: alerts are evaluated per person, email only, with minimal content
 
 This file is binding for every Phase 5 story. A builder who must deviate says so in the PR body
 and asks Lattice for an amendment. The amendment lands here before the code merges. Anything
-marked **OQ-n** is an open question for Keel (section 11). Each one has a stated default, so no
-story is blocked on it.
+marked **OQ-n** points to a Keel decision in section 11.
 
 **Revision 1** (2026-11-24): first draft, unblocking B1, B2 and B4.
+**Revision 2** (2026-11-24): ADRs renumbered to 0040–0042, because 0039 is the live vendor
+sessions ADR. Keel's rulings on OQ-1 to OQ-16 are recorded in section 11, and all are decided.
 
 **Status of what Phase 5 builds on, at `origin/main` `2eae764`:**
 - Merged: the `budget` and `budget_line` tables (Phase 1, no writer); `balance_snapshot`,
@@ -90,20 +91,20 @@ A non-gating real-data report is optional. If Keel runs one, it goes on the owne
 
 | # | Question | Decision | Record |
 |---|---|---|---|
-| D1 | Matviews | **None.** Plain `v_*` views `WITH (security_invoker = true)`, computed when read. No view-refresh job. A rollup *table* is the specified fallback if the benchmark fails (B2r, not scheduled) | ADR 0039 |
-| D2 | Where the money rules live | `v_ledger_lines` only: `COALESCE(split, parent)`, superseded rows out, `is_transfer` and `transfer`/`excluded` kinds out, and the classification into `income`/`spending`/`saving` | ADR 0039, 0022 |
+| D1 | Matviews | **None.** Plain `v_*` views `WITH (security_invoker = true)`, computed when read. No view-refresh job. A rollup *table* is the specified fallback if the benchmark fails (B2r, not scheduled) | ADR 0040 |
+| D2 | Where the money rules live | `v_ledger_lines` only: `COALESCE(split, parent)`, superseded rows out, `is_transfer` and `transfer`/`excluded` kinds out, and the classification into `income`/`spending`/`saving` | ADR 0040, 0022 |
 | D3 | Pending rows | Counted in actuals (budgets, cash flow), and exposed as `is_pending`. Excluded from balances' roll-forward and from forecast and backtest flows | here |
 | D4 | Hidden accounts (`is_hidden`) | Excluded from every Phase 5 metric (OQ-3) | here |
-| D5 | Balances | Anchors (`balance_snapshot.current`, plus closing balances of reconciled or accepted statements) plus roll-forward of live posted rows | ADR 0039 |
+| D5 | Balances | Anchors (`balance_snapshot.current`, plus closing balances of reconciled or accepted statements) plus roll-forward of live posted rows | ADR 0040 |
 | D6 | Budget periods | `monthly` = calendar month, `annual` = calendar year, `biweekly` = 14-day blocks anchored at `budget.start_date`. Period math is in `app/domain/budgets.py` | here |
 | D7 | Rollover | Envelope only (CHECK). Both signs carry: an overspent envelope starts the next period short (OQ-4). Linear: `available(P) = Σ_{k≤P} planned_k − Σ_{k<P} actual_k` | here |
 | D8 | Planned amounts over time | `budget_line_amount(effective_from, amount)` versions. Past periods are immutable, so rollover never rewrites history | here |
 | D9 | Zero-based | Not a DB constraint. Status reports `to_assign = Σ income planned − Σ spending planned − Σ saving planned`. `0` is balanced | here |
 | D10 | Budgets per household | Any number of budgets, **at most one active** (partial unique). Any member edits. Each reader sees actuals from the rows they can see (OQ-2) | here |
-| D11 | Forecast target | Liquid position (`depository` + `credit`) per currency, total only (OQ-9). Computed on request. Only the backtest is stored | ADR 0040 |
-| D12 | Forecast bands | Empirical quantiles of the rolling-origin cumulative residual error. No ETS | ADR 0040 |
-| D13 | Alerts | Evaluated per person in that person's session. In-app always, email opt-in. **No ntfy** (needs an ADR, OQ-7) | ADR 0041 |
-| D14 | Email content | `minimal` by default (count plus link). `full` needs a fresh re-auth | ADR 0041 |
+| D11 | Forecast target | Liquid position (`depository` + `credit`) per currency, total only (OQ-9). Computed on request. Only the backtest is stored | ADR 0041 |
+| D12 | Forecast bands | Empirical quantiles of the rolling-origin cumulative residual error. No ETS | ADR 0041 |
+| D13 | Alerts | Evaluated per person in that person's session. In-app always, email opt-in. **No ntfy** (OQ-7: no ADR now) | ADR 0042 |
+| D14 | Email content | `minimal` by default (count plus link). `full` needs a fresh re-auth | ADR 0042 |
 | D15 | Time zone | `as_of` = the UTC date, and cron runs in UTC (OQ-5) | here |
 | D16 | PWA | `vite-plugin-pwa` `generateSW`, precaching the app shell only. `runtimeCaching` is empty. `navigateFallbackDenylist` covers `/api`. Disabled in dev (MSW owns the dev SW) | here |
 | D17 | Cut from Phase 5 (ROADMAP "Cut from Q1") | What-if, irregular-income mode (OQ-6), retirement Monte Carlo, debt payoff timeline, z-score outliers, `v_budget_status` and `v_recurring` for the agent (Phase 8), credit alerts (Phase 6), agent findings on the Dashboard | ROADMAP |
@@ -126,7 +127,7 @@ A non-gating real-data report is optional. If Keel runs one, it goes on the owne
 3. **Transfers are out of every income, spending and saving metric.** That covers both
    `transaction.is_transfer` and categories of kind `transfer` or `excluded` (ADR 0022 rule 1).
    - Balances include transfers, because money really moved.
-   - The forecast drops only liquid-to-liquid legs (ADR 0040).
+   - The forecast drops only liquid-to-liquid legs (ADR 0041).
 4. **Superseded rows never count** (`superseded_by_id IS NULL` everywhere).
 5. **Never sum across currencies.**
    - Every view groups by `currency` (taken from the account).
@@ -179,8 +180,8 @@ The shared order continues the Phase 2 and Phase 4 orders (PHASE-2 §4, PHASE-4 
   - the holder numbers the migration from `main`'s head at build time
   - the slug is fixed
   - the Phase 4 skip rule applies
-- M5 and M6 depend on no Phase 4 table. If C5b slips by more than one window, Keel may let M5 and
-  M6 take the token ahead of M4 under the skip rule (OQ-16).
+- M5 and M6 depend on no Phase 4 table. If C5b slips, M5 and M6 may land before M4 (OQ-16).
+  Keel assigns the token, and Alembic stays one linear head.
 - M8 uses the M1 helper, so C3b must have merged before it.
 - Conventions (Phase 1 contract and PHASE-4 §3.0) hold:
   - UUID PKs, `timestamptz`, text + CHECK enums
@@ -339,7 +340,7 @@ public.app_household_wide()`.
 | `household_id` | uuid NOT NULL | standard |
 | `email_enabled` | boolean NOT NULL DEFAULT false | |
 | `email_detail` | text NOT NULL DEFAULT 'minimal' | CHECK IN ('minimal','full') |
-| `last_evaluated_at` | timestamptz NULL | watermark for transaction-level kinds (ADR 0041 point 5) |
+| `last_evaluated_at` | timestamptz NULL | watermark for transaction-level kinds (ADR 0042 point 5) |
 | `updated_at` | timestamptz | |
 
 The policy is the same as `alert_rule`.
@@ -558,7 +559,7 @@ def change_over(series: Sequence[tuple[date, Decimal]], as_of: date, days: int) 
     # value(as_of) − value(as_of − days); None if either day is missing.
 ```
 
-### 4.3 `app/domain/forecast.py` (B3a; ADR 0040)
+### 4.3 `app/domain/forecast.py` (B3a; ADR 0041)
 ```python
 MODEL_VERSION = "f1"
 LEVEL_WEEKS = 13
@@ -651,7 +652,7 @@ Property tests:
 - quantiles are invariant to input order
 - no future data is used: changing data after the origin changes nothing
 
-### 4.4 `app/domain/alerts.py` (B4a; ADR 0041)
+### 4.4 `app/domain/alerts.py` (B4a; ADR 0042)
 ```python
 AlertKind = Literal["large_transaction", "new_merchant", "duplicate_charge",
                     "recurring_price_increase", "budget_threshold", "budget_pace",
@@ -788,7 +789,7 @@ Triggers:
 |---|---|---|
 | `services/budgets.py` (B1b) | `budget_status(session, budget_id, day, as_of) -> BudgetStatus`; `budget_history(session, budget_id, periods, as_of)`; `default_currency(session)` | `budget`, `budget_line`, `budget_line_amount` (create, set line, archive line, patch) |
 | `services/metrics.py` (B2b) | `metrics_summary(session, currency, months, as_of)`; `net_worth_series(session, currency, start, end, step)`; `category_spend(session, currency, month)`; `hidden_detail_accounts(session) -> int` (`count(*) FROM account WHERE NOT app_account_details_visible(id)`) | none |
-| `services/forecast.py` (B3b) | `forecast_for(session, currency, horizon_days, as_of)`; `liquid_daily_flows(session, currency, start, end)` (the ADR 0040 point 2 loader); `latest_backtest(session, currency)` | `forecast_backtest` (job only) |
+| `services/forecast.py` (B3b) | `forecast_for(session, currency, horizon_days, as_of)`; `liquid_daily_flows(session, currency, start, end)` (the ADR 0041 point 2 loader); `latest_backtest(session, currency)` | `forecast_backtest` (job only) |
 | `services/alerts.py` (B4b) | `evaluate_person(session, person_id, as_of, now, job_run_id)`; `list_alerts`, `mark_read`, `settings`, `set_rule`, `set_email` | `alert_*` |
 | `services/views.py` (B1b) | typed `select()` helpers over the `v_*` views | none |
 
@@ -948,11 +949,11 @@ web. Sounding on acceptance.
 | ID | Scope | Kind · Owner | Reviewers | Migration token | Depends | Acceptance evidence |
 |---|---|---|---|---|---|---|
 | **B1a** | `app/domain/budgets.py` (§4.1) | pure · Helm (Grok team), Ledger lane | Ledger | — | — | Property tests (linear rollover, tiling periods, order independence, biweekly anchor); a pace table at the mid-period boundary; `to_assign` cases; float lint clean |
-| **B1b** | M5: `budget`/`budget_line` changes, `budget_line_amount`, `budget_guard`, `v_ledger_lines`; models; `services/views.py`; `services/budgets.py` (core plus writes, audit) | db · Helm (Grok team), Ledger lane | Ledger, Bulwark | **M5** | B1a; M4 merged (or the skip rule, OQ-16) | §3.6 tests; the `v_ledger_lines` fixture (§3.6 M5); an empty-table guard test; a service test: the status of a split, a transfer, a refund, a pending row, and a hidden account; a summary_only reader sees no actuals from that account; two currencies refused in one budget |
+| **B1b** | M5: `budget`/`budget_line` changes, `budget_line_amount`, `budget_guard`, `v_ledger_lines`; models; `services/views.py`; `services/budgets.py` (core plus writes, audit) | db · Helm (Grok team), Ledger lane | Ledger, Bulwark | **M5** | B1a; the token from Keel (M4 first unless C5b slips, OQ-16) | §3.6 tests; the `v_ledger_lines` fixture (§3.6 M5); an empty-table guard test; a service test: the status of a split, a transfer, a refund, a pending row, and a hidden account; a summary_only reader sees no actuals from that account; two currencies refused in one budget |
 | **B1c** | `/budgets` routes and schemas (§6.1), `make api-types` | db · Helm (Grok team), Ledger lane | Ledger, Bulwark | — | B1b | API tests across private/shared/summary_only/joint; 409 on a second active budget; 422 on a transfer-kind line; money as strings in the OpenAPI test; the `schema.d.ts` diff |
 | **B2a** | `app/domain/metrics.py` (§4.2) | pure · Helm (Grok team), Ledger lane | Ledger | — | — | Property tests: savings rate None at zero income; debt utilization only over cards with a limit; weighted APR skips unknowns; currency mismatch raises |
 | **B2b** | M6 views; `AGENT_VIEW_WHITELIST`; the view lint; `services/metrics.py`; `/metrics` routes (§6.2); a benchmark | db · Helm (Grok team), Ledger lane | Ledger, **Bulwark** | **M6** | B1b (`v_ledger_lines`), B2a | The view RLS matrix (§0.4); the view lint; the §3.6 M6 fixture; property tests (§0.5); bounded queries (a fixed query count per endpoint); a recorded benchmark at 100k rows, 20 accounts and 5 years: `GET /metrics/summary` p95. **If p95 is over 1 s, B2r is scheduled** |
-| B2r | *Conditional fallback (ADR 0039 point 6):* the `ledger_daily_rollup` table plus the `metrics.rollup` job. Not scheduled unless B2b's benchmark fails | db · Helm, Ledger lane | Ledger, Bulwark | after M8 | B2b | Lattice amends this contract first |
+| B2r | *Conditional fallback (ADR 0040 point 6):* the `ledger_daily_rollup` table plus the `metrics.rollup` job. Not scheduled unless B2b's benchmark fails | db · Helm, Ledger lane | Ledger, Bulwark | after M8 | B2b | Lattice amends this contract first |
 | **B3a** | `app/domain/forecast.py` (§4.3) | pure · **Ledger (opus)** | Ledger (separate run) | — | — | Property tests (§4.3); an exact recurring-only world; a leakage test; Hyndman–Fan quantile vectors |
 | **B3b** | M7; the `ForecastBacktest` model; `services/forecast.py` (the liquid-flows loader, `forecast_for`); the `forecast.backtest` job; `/forecast` routes (§6.3); an `up_to` parameter on C5b's recurring loader | db · **Ledger (opus)** | Ledger (separate run), **Bulwark** | **M7** | B3a, C5b, C4c (`transfer_link`), B2b (`v_account_balance_daily`) | The RLS matrix for `forecast_backtest`; card payments cancel; a mortgage payment counts; a backtest on the B6 world beats the baseline (§0.2) in a test; a pool timeout kills the child and fails the attempt |
 | **B4a** | `app/domain/alerts.py` (§4.4) | pure · Helm (Grok team), Ledger lane | Ledger, Bulwark | — | B1a, B3a (types) | One test per kind; `due` honours one-shot and cooldown; dedupe keys match the CHECK regex; `email_body` minimal carries no digits other than the count and none of the fact values |
@@ -1002,7 +1003,7 @@ Shared file orders:
   - No `household_wide` anywhere.
   - The benchmark is recorded, not gating.
 - **B3b:**
-  - The loader reads `transaction` directly (ADR 0040 point 2). A test fails if it uses
+  - The loader reads `transaction` directly (ADR 0041 point 2). A test fails if it uses
     `v_ledger_lines`.
   - Detection per origin uses only rows on or before that origin.
   - The pool and timeout behaviour is ADR 0029 point 3.
@@ -1020,6 +1021,8 @@ Shared file orders:
   - Step-up on `detail=full` only. Enabling minimal email doesn't need re-auth.
   - The test email carries no data.
   - Audit `alert.email_updated {fields}`.
+- **B5a and B5c (OQ-15):** the PR records the new dependency's licence (it must be
+  AGPL-compatible), maintenance state and bundle cost, and `pnpm audit` passes.
 - **B5a:** see §8.1. `web/Caddyfile` serves `/sw.js` and `/manifest.webmanifest` with
   `Cache-Control: no-cache`. No change to `infra/caddy/` (a protected path).
 - **All web slices:**
@@ -1072,7 +1075,8 @@ The nav already has `overview` (Dashboard), `budgets` and `forecast` (`web/src/a
 nav entries. Alerts live on the Dashboard and in Settings.
 
 ### 8.1 PWA shell (B5a)
-- `vite-plugin-pwa` (MIT; Prism records the licence and maintenance check in the PR) in
+- `vite-plugin-pwa` (MIT; the licence, maintenance and bundle-cost record and `pnpm audit`
+  per OQ-15) in
   `generateSW` mode. Options live in `web/src/pwa/config.ts` (exported, so they can be tested):
   - `registerType: 'prompt'`, `injectRegister: false` (`register.ts` registers in production
     only), `devOptions.enabled: false`
@@ -1176,9 +1180,9 @@ Agent findings wait for Phase 8.
 
 | Source | Item | Where it's answered |
 |---|---|---|
-| Roundtable 04 Risks | Matview refresh cost on every sync | D1, ADR 0039 (plain views plus benchmark; B2r fallback) |
-| Roundtable 04 §4–5 | MAPE undefined near zero; ETS bands fragile | WAPE + coverage + baseline + floored MAPE (ADR 0040) |
-| Roundtable 04 §5 | ntfy needs an ADR | D13, OQ-7 |
+| Roundtable 04 Risks | Matview refresh cost on every sync | D1, ADR 0040 (plain views plus benchmark; B2r fallback) |
+| Roundtable 04 §4–5 | MAPE undefined near zero; ETS bands fragile | WAPE + coverage + baseline + floored MAPE (ADR 0041) |
+| Roundtable 04 §5 | ntfy needs an ADR | D13, OQ-7 (not in Phase 5) |
 | Roundtable 05 Risks | The SW must not cache real data | §8.1 config test plus `pwa.e2e.ts` |
 | Gadfly C2 | Ship the manifest and SW with the Phase 5 Dashboard | B5a |
 | PHASE-4 §10 | Recurring price-increase alerts are Phase 5 B4 | §5.1 |
@@ -1196,7 +1200,7 @@ Agent findings wait for Phase 8.
 - recurring transfers to non-liquid accounts as scheduled items (OQ-10)
 - `v_budget_status`, `v_recurring`, `v_holdings_latest`, `v_contributions_ytd` and `v_tax_items`
   for the agent (Phase 8; `v_tax_items` with Phase 7)
-- ntfy or any push channel (needs an ADR)
+- ntfy or any push channel (OQ-7; needs its own ADR)
 - credit alerts (Phase 6)
 - per-person budgets (OQ-2)
 - a household time-zone setting (OQ-5)
@@ -1205,57 +1209,60 @@ Agent findings wait for Phase 8.
 
 ---
 
-## 11. Open questions for Keel (each has a default; none blocks a story)
+## 11. Decisions on the open questions (Keel, 2026-11-24)
 
-1. **OQ-1, the meaning of `summary_only` for metrics.** Should a summary-only viewer see aggregate
-   cash flow or spend totals for those accounts, without the rows? **Default: no.** Balances only,
-   as ADR 0008 has it today, with `hidden_detail_accounts` surfaced in the UI. Showing totals would
-   need a definer aggregate path and a Bulwark review.
-2. **OQ-2, budgets per household or per person.** **Default:** household budgets, at most one
-   active, any member edits, and actuals from what each reader can see. Per-person budgets would
-   add `budget.person_id` and a restrictive policy.
-3. **OQ-3, hidden accounts in metrics.** **Default: excluded everywhere.** Confirm, or define
-   "hidden from lists, still counted".
-4. **OQ-4, the sign of envelope rollover.** **Default: both signs carry** (an overspend reduces the
-   next period). That keeps rollover linear and SQL-expressible for the Phase 8 view. The
-   alternative is YNAB's reset-to-zero on overspend.
-5. **OQ-5, household time zone.** **Default:** `as_of` = the UTC date, and the nightly cron at 07:15
-   UTC. Near midnight local time, budgets can be a day early or late. A setting would go in
-   household settings (hard rule 13), not in code.
-6. **OQ-6, irregular-income mode.** PLAN 20.3 puts it in Phase 5, but the ROADMAP cut list moves it
-   to Q2. **Default:** not in Phase 5 acceptance. Confirm the ROADMAP ruling stands.
-7. **OQ-7, ntfy.** It needs an ADR (hard rule 9) before any code: a self-hosted container in
-   compose or a public server, topic secrecy, and payload content (it should match ADR 0041's
-   minimal default). **Default:** not in Phase 5. Do you want Lattice to draft the ADR as a stretch
-   item?
-8. **OQ-8, how Helm builds.** `docs/process/FIRSTCHAIR.md` rule 3 says "Codex writes, Grok reads",
-   and that a Grok write worker is refused. The brief assigns B1, B2 and B4 to "Helm (Grok team),
-   Ledger lane". **Please confirm Helm's write path:** which seat writes, who applies the diff, and
-   that confinement still holds. If Grok can't write here, the default is Anvil (Codex) for the
-   pure slices and Ledger (sonnet) for the db slices.
-9. **OQ-9, forecasting each account.** PLAN 8.7 asks for bands per account and in total.
-   **Default:** total liquid position per currency only (ADR 0040). Per account needs flows between
-   accounts modelled.
-10. **OQ-10, paired payments to non-liquid accounts** (mortgage, brokerage). The forecast counts
-    them as outflows, but they aren't scheduled, because recurring detection ignores transfers
-    (ADR 0028), so they widen the bands. **Default:** accept for f1. The B6 world plants one, so
-    the effect is measured. An extension would detect series on transfer legs whose partner isn't
-    liquid.
-11. **OQ-11, deferred metrics.** Debt payoff timeline, z-score outliers, retirement projection.
-    **Default:** deferred (ROADMAP E5.8 and the cut list). Debt in Phase 5 is owed, utilization and
-    weighted APR.
-12. **OQ-12, savings rate and payroll contributions.** Payroll-deducted 401(k) contributions never
-    pass through a cash account, so the rate is on take-home pay. **Default:** state that in the UI
-    tooltip. Adding them needs paystub or `investment_txn` contribution data (Phase 7 or 11).
-13. **OQ-13, `ALERT_EMAIL`.** ADR 0041 sends to each person's login email. **Default:** leave
-    `ALERT_EMAIL` unused, with an `.env.example` comment. The alternative is to keep it as the
-    recipient for household-level kinds only (relink, statement review).
-14. **OQ-14, "Lighthouse installable".** Lighthouse 12 removed the PWA category. **Default:**
-    acceptance uses CDP `Page.getInstallabilityErrors` in Playwright (§0.6). Confirm the ROADMAP B5
-    wording can change to match.
-15. **OQ-15, new web dependencies.** `vite-plugin-pwa` (with Workbox) and `recharts`, both MIT. They
-    are build or runtime libraries, not external services, so no hard rule 9 ADR. Prism records the
-    maintenance and licence check in each PR. Confirm no ADR is wanted.
-16. **OQ-16, M5/M6 ahead of M4.** M5 and M6 need no Phase 4 table. **Default:** if C5b's PR has no
-    verdicts one window after M3 merges, M5 and M6 may take the token under the existing skip rule,
-    and Keel notes it in SPRINTS.
+Keel ruled on every question. The defaults in Revision 1 stand except where a ruling below says
+otherwise. Every **OQ-n** cited elsewhere in this file refers to the decision here.
+
+1. **OQ-1, the meaning of `summary_only` for metrics. Decided: balances only.** A summary-only
+   viewer sees the account's balance anchors and nothing derived from its transactions: no cash
+   flow, spend or budget totals. That matches ADR 0008. `hidden_detail_accounts` is shown in the
+   UI. Showing totals later would need a definer aggregate path and a Bulwark review.
+2. **OQ-2, budgets per household or per person. Decided: per household.** At most one budget is
+   active, any member may edit it, and each reader sees actuals from the rows they can see.
+   Per-person budgets (`budget.person_id` plus a restrictive policy) are out of Phase 5.
+3. **OQ-3, hidden accounts in metrics. Decided: excluded everywhere.** `is_hidden` accounts are
+   left out of every Phase 5 view and metric.
+4. **OQ-4, the sign of envelope rollover. Decided: both signs carry.** An overspend reduces the
+   next period's envelope. Rollover stays linear, so the Phase 8 view can express it in SQL.
+5. **OQ-5, household time zone. Decided: UTC.** `as_of` is the UTC date, and the nightly cron runs
+   at 07:15 UTC. A household time-zone setting, when it comes, goes in household settings (hard
+   rule 13), not in code.
+6. **OQ-6, irregular-income mode. Decided: not in Phase 5.** The ROADMAP cut list stands (Q2),
+   whatever PLAN 20.3 says.
+7. **OQ-7, ntfy. Decided: no ntfy ADR now.** Phase 5 delivers alerts in-app and by email only.
+   `NTFY_*` stays unused. Any push channel needs its own ADR first (hard rule 9).
+8. **OQ-8, how Helm builds. Decided by ADR 0039** (`docs/adr/0039-live-vendor-sessions.md`).
+   - Helm (Grok) runs as a live session the owner controls, and builds B1, B2 and B4 on its own
+     branch per story.
+   - Headless Grok workers stay read-only (FIRSTCHAIR rule 3 is unchanged).
+   - B1, B2 and B4 stay Helm's.
+   - Every gate in §7 still applies to Helm's PRs: Ledger, Bulwark and SHA-bound sign-offs. Only
+     Keel merges.
+9. **OQ-9, forecasting each account. Decided: total only.** The forecast covers the total liquid
+   position per currency (ADR 0041). A forecast per account is out of Phase 5.
+10. **OQ-10, paired payments to non-liquid accounts. Decided: accepted for f1.** The forecast counts
+    them as outflows, but doesn't schedule them, so they widen the bands. The B6 world plants one,
+    so the effect is measured.
+11. **OQ-11, deferred metrics. Decided: deferred.** Debt payoff timeline, z-score outliers and
+    retirement projection are out of Phase 5. Debt in Phase 5 means owed, utilization and weighted
+    APR.
+12. **OQ-12, savings rate and payroll contributions. Decided: take-home pay.** The rate is on
+    take-home pay, and a UI tooltip says so. Payroll contributions need paystub or `investment_txn`
+    data (Phase 7 or 11).
+13. **OQ-13, `ALERT_EMAIL`. Decided: unused.** Alerts go to each person's login email (ADR 0042).
+    `.env.example` carries a comment saying `ALERT_EMAIL` isn't used.
+14. **OQ-14, "Lighthouse installable". Decided: CDP installability.** Acceptance uses
+    `Page.getInstallabilityErrors` in Playwright (§0.6), because Lighthouse 12 dropped its PWA
+    audit. The ROADMAP B5 wording follows.
+15. **OQ-15, new web dependencies. Decided: no ADR.** npm libraries aren't external services. The
+    story that adds `vite-plugin-pwa` (B5a) or `recharts` (B5c) records three things in its PR:
+    - the licence, which must be AGPL-compatible
+    - its maintenance state
+    - its bundle cost
+
+    `pnpm audit` must pass.
+16. **OQ-16, M5/M6 ahead of M4. Decided: yes.** If C5b slips, M5 and M6 may land before M4,
+    provided they share no tables with it (they don't: §3.1 and §3.2 touch no Phase 4 table).
+    Keel assigns the token. Alembic stays one linear head: whichever migration lands second sets
+    `down_revision` to the head on `main` at build time.

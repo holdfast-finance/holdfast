@@ -1,6 +1,6 @@
-# 0041. Alerts are evaluated per person, delivered in-app and by email, with minimal email content by default
+# 0042. Alerts are evaluated per person, delivered in-app and by email, with minimal email content by default
 
-- Status: Proposed (Phase 5 contract; Keel accepts on merge)
+- Status: Accepted (Keel, 2026-11-24)
 - Date: 2026-11-24
 - Deciders: Lattice (architect); Keel
 
@@ -46,7 +46,7 @@ PLAN 8.8 lists alert kinds and delivers them "by email and push (ntfy)". Three f
   relay without the person choosing it.
 - **ntfy now, using the `NTFY_*` settings already in config:** hard rule 9.
 - **`ALERT_EMAIL` as the single recipient:** that gives one inbox for two people with private
-  accounts. The variable stays in config but unused, pending a decision in the Phase 5 contract.
+  accounts. The variable stays in config but unused (Phase 5 contract OQ-13).
 
 ## Consequences
 - Each person's rules and preferences are separate rows. Defaults live in
