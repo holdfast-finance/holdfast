@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, mask_long_digit_runs
-from app.models import Account, Document, ImportRun, Transaction
+from app.models import Account, Document, ImportRun, SyncRun, Transaction
 from app.services.ingest import IngestService
 from app.services.ledger_service import LedgerWriter, NewTransaction
 from app.services.statement_accounts import (
@@ -597,9 +597,23 @@ async def _import_block(
     run.status = "succeeded"
     run.finished_at = datetime.now(UTC)
     await s.flush()
-    if inserted and acct.source in ("plaid", "simplefin") and (household_wide or user_id):
-        # Statement rows landed on an adopted account: pair them with connector rows (ADR 0035 4).
-        await IngestService(s, household_id, user_id=user_id).match_accounts({acct.id})
+    if (
+        inserted
+        and not flagged
+        and acct.bank_connection_id is not None
+        and acct.source in ("plaid", "simplefin")
+        and (household_wide or user_id)
+    ):
+        history_complete = acct.adopted_at is not None or bool(
+            await s.scalar(
+                select(SyncRun.history_complete)
+                .where(SyncRun.bank_connection_id == acct.bank_connection_id)
+                .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+                .limit(1)
+            )
+        )
+        if history_complete:
+            await IngestService(s, household_id, user_id=user_id).match_accounts({acct.id})
     return BlockResult(
         run.id,
         acct.id,

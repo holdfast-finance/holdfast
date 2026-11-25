@@ -13,7 +13,7 @@ first) can have its connector twin dated 1 to 3 days outside coverage, because t
 prints the transaction date and the connector's posting date lags. The pure matcher drops covered
 imports, so on its own that pair would stay as a live duplicate. Ingest therefore hands the
 matcher the covered import rows within ``OVERLAP_WINDOW_DAYS`` of an interval edge, as
-candidates. The connector row beside it was never covered, so nothing is skipped twice.
+candidates only when a connector twin has the exact amount and authorization date.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,8 +48,10 @@ from app.models import (
     BankConnection,
     Category,
     ConnectorAccountLink,
+    ImportRun,
     SyncRun,
     Transaction,
+    TransactionSplit,
 )
 from app.security.client_ip import IPAddress
 from app.services.ledger_service import (
@@ -78,6 +80,7 @@ class IngestCounts:
     balances_skipped_manual: int = 0
     superseded: int = 0
     held: int = 0
+    held_pending_user_metadata: int = 0
     supersede_conflicts: int = 0
     matching_deferred: bool = False
     ledger: dict[str, int] = field(default_factory=dict)  # LedgerWriter.counts for the unit
@@ -121,7 +124,11 @@ class IngestService:
         if conn is None:
             raise LedgerRuleError("connection not found")
 
-        mapped = await self._resolve_accounts(connection_id, batch, counts)  # ext id -> account
+        await self._s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"holdfast:ingest:{connection_id}"},
+        )
+        mapped, currencies = await self._resolve_accounts(conn, batch, counts)
         await self._balances(connection_id, batch, mapped, counts)
         coverage = await self._coverage(set(mapped.values()))
         slugs = await self._category_ids()
@@ -137,10 +144,15 @@ class IngestService:
                 deferred_removals.append(removal)
             else:
                 await self._remove_txn(removal, mapped, counts)
+        held_pending: set[tuple[str, str]] = set()
         for txn in transactions:
-            await self._apply_txn(txn, mapped, coverage, slugs, conn.provider, counts)
+            await self._apply_txn(
+                txn, mapped, currencies, coverage, slugs, conn.provider, counts, held_pending
+            )
         for removal in deferred_removals:
-            await self._remove_txn(removal, mapped, counts)
+            if removal not in held_pending:
+                await self._remove_txn(removal, mapped, counts)
+        counts.held_pending_user_metadata = len(held_pending)
 
         if batch.history_complete:
             await self.match_accounts(set(mapped.values()), counts, coverage)
@@ -155,8 +167,9 @@ class IngestService:
     # ---------------------------------------------------------------- accounts
 
     async def _resolve_accounts(
-        self, connection_id: uuid.UUID, batch: SyncBatch, counts: IngestCounts
-    ) -> dict[str, uuid.UUID]:
+        self, conn: BankConnection, batch: SyncBatch, counts: IngestCounts
+    ) -> tuple[dict[str, uuid.UUID], dict[uuid.UUID, str]]:
+        connection_id = conn.id
         links = {
             link.external_account_id: link
             for link in (
@@ -177,6 +190,20 @@ class IngestService:
             *(ext for ext, _ in batch.removed),
         ):
             reported.setdefault(ext, None)
+        account_ids = {link.account_id for link in links.values() if link.account_id is not None}
+        currencies = dict(
+            (
+                await self._s.execute(
+                    select(Account.id, Account.currency).where(
+                        Account.id.in_(account_ids),
+                        Account.bank_connection_id == connection_id,
+                        Account.source == conn.provider,
+                    )
+                )
+            )
+            .tuples()
+            .all()
+        )
         mapped: dict[str, uuid.UUID] = {}
         for ext, acct in reported.items():
             if acct is not None and acct.currency is None:
@@ -199,17 +226,14 @@ class IngestService:
                 continue
             if link.state != "mapped" or link.account_id is None:
                 continue  # ignored, or still waiting for the owner
-            if acct is not None and acct.currency is not None:
-                currency = (
-                    await self._s.execute(
-                        select(Account.currency).where(Account.id == link.account_id)
-                    )
-                ).scalar_one_or_none()
-                if currency != acct.currency:
-                    counts.skipped_currency += 1  # never mix currencies in one account
-                    continue
+            currency = currencies.get(link.account_id)
+            if currency is None:
+                continue  # not writable by this connection; rows count as unmapped
+            if acct is not None and currency != acct.currency:
+                counts.skipped_currency += 1
+                continue
             mapped[ext] = link.account_id
-        return mapped
+        return mapped, currencies
 
     # ---------------------------------------------------------------- balances
 
@@ -303,24 +327,29 @@ class IngestService:
         self,
         txn: ConnectorTxn,
         mapped: dict[str, uuid.UUID],
+        currencies: dict[uuid.UUID, str],
         coverage: dict[uuid.UUID, list[CoverageInterval]],
         slugs: dict[str, uuid.UUID],
         provider: str,
         counts: IngestCounts,
+        held_pending: set[tuple[str, str]],
     ) -> None:
         account_id = mapped.get(txn.external_account_id)
         if account_id is None:
             counts.skipped_unmapped += 1
             return
-        # SEAM (P5a, ConnectorTxn.currency): once rows carry a currency, a row whose currency
-        # differs from the account's is skipped and counted in ``skipped_currency`` here.
+        if txn.currency is not None and txn.currency != currencies[account_id]:
+            counts.skipped_currency += 1
+            return
         if is_covered(txn.posted_date, coverage.get(account_id, ()), is_pending=txn.is_pending):
             counts.skipped_covered += 1
             # The statement owns this day, so the pending row it replaces has no posted twin.
-            if txn.pending_external_id and await self._writer.remove_external(
-                account_id, txn.pending_external_id
-            ):
-                counts.removed += 1
+            if txn.pending_external_id:
+                removal = (txn.external_account_id, txn.pending_external_id)
+                if await self._pending_has_user_metadata(account_id, txn.pending_external_id):
+                    held_pending.add(removal)
+                else:
+                    await self._remove_txn(removal, mapped, counts)
             return
         slug = pfc_category_slug(txn.pfc_primary, txn.pfc_detailed)
         category_id = slugs.get(slug) if slug else None
@@ -345,7 +374,8 @@ class IngestService:
             existing = await self._ids(account_id, txn.external_id, txn.pending_external_id)
             if existing["pending"] and not existing["posted"]:
                 try:
-                    await self._writer.post_pending(txn.pending_external_id, new)
+                    async with self._s.begin_nested():
+                        await self._writer.post_pending(txn.pending_external_id, new)
                     counts.pending_posted += 1
                     return
                 except TransactionNotFoundError:
@@ -357,6 +387,36 @@ class IngestService:
             counts.modified += 1
         else:
             counts.unchanged += 1
+
+    async def _pending_has_user_metadata(self, account_id: uuid.UUID, external_id: str) -> bool:
+        row = await self._s.scalar(
+            select(Transaction)
+            .where(
+                Transaction.account_id == account_id,
+                Transaction.external_id == external_id,
+                Transaction.is_pending.is_(True),
+            )
+            .with_for_update()
+        )
+        if row is None:
+            return False
+        if (
+            row.notes is not None
+            or row.category_source == "user"
+            or row.is_tax_relevant
+            or row.tax_tag is not None
+            or row.receipt_document_id is not None
+        ):
+            return True
+        return bool(
+            await self._s.scalar(
+                select(
+                    select(TransactionSplit.id)
+                    .where(TransactionSplit.transaction_id == row.id)
+                    .exists()
+                )
+            )
+        )
 
     async def _ids(
         self, account_id: uuid.UUID, posted_ext: str, pending_ext: str
@@ -383,7 +443,7 @@ class IngestService:
     ) -> IngestCounts:
         """Run the ADR 0035 matcher over whole accounts and supersede the non-held pairs.
 
-        Also called by statement import after a block insert (the other direction).
+        Blocks that need review are excluded until accepted.
         """
         counts = counts if counts is not None else IngestCounts()
         coverage = coverage if coverage is not None else await self._coverage(account_ids)
@@ -418,23 +478,22 @@ class IngestService:
             return [], []
         env, adopted_at = env_row
         rows = (
-            (
-                await self._s.execute(
-                    select(Transaction)
-                    .where(Transaction.account_id == account_id)
-                    .order_by(Transaction.posted_date, Transaction.id)  # id: final tiebreak
-                )
+            await self._s.execute(
+                select(Transaction, ImportRun.reconcile_status)
+                .outerjoin(ImportRun, Transaction.import_run_id == ImportRun.id)
+                .where(Transaction.account_id == account_id)
+                .order_by(Transaction.posted_date, Transaction.id)
             )
-            .scalars()
-            .all()
-        )
-        winners = {r.superseded_by_id for r in rows if r.superseded_by_id is not None}
+        ).all()
+        winners = {r.superseded_by_id for r, _ in rows if r.superseded_by_id is not None}
         edge = timedelta(days=OVERLAP_WINDOW_DAYS)
         imports: list[ImportCandidate] = []
         connectors: list[ConnectorCandidate] = []
-        for r in rows:
+        for r, reconcile_status in rows:
             in_supersession = r.superseded_by_id is not None or r.id in winners
             if r.source == "import" and r.import_fingerprint is not None:
+                if reconcile_status == "needs_review":
+                    continue
                 after = adopted_at is not None and r.created_at >= adopted_at
                 # Coverage edge: a covered statement row near an interval boundary can have its
                 # connector twin just outside it. Offer it to the matcher (module docstring).
@@ -453,7 +512,8 @@ class IngestService:
                         description_raw=r.description_raw,
                         is_pending=r.is_pending,
                         in_supersession=in_supersession,
-                        arrived_after_adoption=after or near_edge,
+                        arrived_after_adoption=after,
+                        coverage_edge=near_edge,
                     )
                 )
             elif r.source in ("plaid", "simplefin") and r.external_id is not None:
@@ -486,6 +546,6 @@ class IngestService:
                 rows_removed=SyncRun.rows_removed + counts.removed,
                 rows_superseded=SyncRun.rows_superseded + counts.superseded,
                 rows_skipped_covered=SyncRun.rows_skipped_covered + counts.skipped_covered,
-                rows_held=SyncRun.rows_held + counts.held,
+                rows_held=SyncRun.rows_held + counts.held + counts.held_pending_user_metadata,
             )
         )
