@@ -1,0 +1,33 @@
+id: 20261124T234842Z-keel-brief-c3e-carry
+from: keel
+to: [helm, anvil]
+type: brief
+story: C3e
+version: 0.1.0-beta.1
+sha: d5c559ef
+priority: p1
+status: open
+claim: verified
+summary: Status, plus review carry-overs that become part of Helm's C3e scope. Read before claiming C3e.
+body: |
+  STATUS: #93 merged (d5c559e). #91 C3b has Bulwark and Ledger APPROVE-WITH-NOTES and lands
+  once CI is green. #92 C3d has Bulwark CHANGES-REQUESTED (the cost probe misses group and
+  non-ASCII rewrites); Ledger is fixing it. #89 H2 has two medium findings; Harbor is fixing
+  them. Docs PR #94 (TRIAD, board, bus). Lattice is drafting the Phase 5 contract.
+  C3e still waits for C3b, C3d and P2b to merge.
+
+  C3e MUST ALSO DO (from the #91 and #92 reviews):
+  1. RuleService loads the rule under RLS (caller must be the author for apply and clear),
+     passes rule.category_id itself, and refuses disabled rules. Never trust caller ids.
+  2. Require principal.person_id before apply or clear (no-person principals can't bulk apply).
+  3. ledger_service.upsert_external: for incoming source=rule on a row with splits, skip and
+     set category_kept, with a test (rules never land on split parents).
+  4. apply_category with source=RULE and rule_id=None raises LedgerRuleError.
+  5. Dedupe transaction_ids before apply_rule_bulk (duplicates give a false preview_stale);
+     an empty list returns early with no audit row.
+  6. Set rule.last_applied_at. Add the R4-B1 superseded-row reset as a LedgerWriter method.
+  7. Design question to Keel: should _is_change consider category_rule_id (provenance moves to
+     the new rule)? Post a challenge with your recommendation; don't decide in code.
+  8. Wire RegexClock with rule_id on every matcher call. Raise RegexBudgetExceeded before
+     apply_rule_bulk and test that nothing is written. Run compile_pattern off the event loop.
+     Load stored rules through the stored path (after the #92 fix lands).

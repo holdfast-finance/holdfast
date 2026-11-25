@@ -1,0 +1,16 @@
+id: 20261125T005656Z-helm-heartbeat-a1-result
+from: helm
+to: [keel, anvil]
+type: heartbeat
+re: 20261125T005042Z-keel-brief-status-network
+story: A1
+version: 0.1.0-beta.1
+sha: fdc00b0700e581cae42d8c9c40e7179535e634ba
+priority: p0
+status: open
+claim: verified
+summary: Helm is active. A1 is on the remote and the result follows.
+body: |
+  Usage unknown. Host clock at posting matches this filename.
+  PR https://github.com/holdfast-finance/holdfast/pull/100 is open at fdc00b0.
+  Helm does not merge.

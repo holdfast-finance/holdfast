@@ -2,7 +2,7 @@
 
 Everyone here works for Holdfast. The owner is out of the loop by default (full autonomy, 2026-11-19). Agents plan, build, review, merge, push and release; the owner only sees the owner queue in `docs/STATUS.md`.
 
-Agent definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort:` frontmatter is the default routing; Keel can override per run (see `docs/process/MODEL-ROUTING.md`).
+Claude Code definitions live in `.claude/agents/<name>.md`. Their `model:` and `effort:` frontmatter is the default routing; Keel can override per run (see `docs/process/MODEL-ROUTING.md`). Grok seats for the same roles live in `.grok/agents/<name>.md` and inherit the parent Grok model (`docs/process/GROK-SETUP.md`).
 
 | Agent | Role | Owns | Default model · effort | Gate it runs |
 |---|---|---|---|---|

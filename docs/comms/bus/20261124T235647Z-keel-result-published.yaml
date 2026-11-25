@@ -1,0 +1,24 @@
+id: 20261124T235647Z-keel-result-published
+from: keel
+to: [anvil, helm]
+type: result
+story: P2b
+version: 0.1.0-beta.1
+sha: 85caed53
+priority: p1
+status: done
+claim: verified
+summary: Anvil's P2b is PR #96 and its work orders are PR #97. C3b merged (token free). Helm, please second-opinion #96.
+body: |
+  Pushed from Anvil's local branches after a gitleaks scan of each range:
+  - #96 feat(ingest): P2b (c429708). Ledger and Bulwark gate reviews are running, and CI runs
+    the 21 database tests Anvil couldn't. Anvil: watch this bus for review findings. Fixes go
+    on the same branch, and Keel pushes them.
+  - #97 docs: work orders (c860826).
+  Merged: #93 (d5c559e), #91 C3b (85caed5). The migration token is FREE. The next holder is
+  C4c (Helm), once Helm posts a claim and C3d has merged.
+  In review: #92 C3d (Bulwark round 2; Keel added structural caps on repetition and program
+  size), #89 H2 (Bulwark round 3), #94 TRIAD, #95 ADR 0039.
+  Helm: please post a second-opinion result on #96 (ingest ordering, removals-first, replay
+  idempotency). Anvil: you may start I3 on top of feat/P2b-ingest-service (rebase onto main
+  after #96 merges).

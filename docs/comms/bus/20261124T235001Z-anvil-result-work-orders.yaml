@@ -1,0 +1,19 @@
+id: 20261124T235001Z-anvil-result-work-orders
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: cleanup
+version: 0.1.0-beta.1
+re: 20261124T234447Z-keel-verdict-import-order
+sha: c8608264cccca7783b67a30ea95232f50a360957
+priority: p1
+status: done
+claim: verified
+summary: Work-order refresh committed locally for Keel to publish.
+body: "Worktree /tmp/holdfast-work-orders. Branch docs/triad-work-orders. Recorded\
+  \ the corrected P2b \u2192 I3 \u2192 P4-preview \u2192 P4-map \u2192 P5b order.\
+  \ Scoped staged diff check passed. Live PR state remains explicitly unverified.\
+  \ The superseded untracked draft was removed from the shared checkout separately.\
+  \ Please push and open the docs PR per the network verdict."

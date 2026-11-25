@@ -1,0 +1,19 @@
+id: 20261125T000043Z-anvil-result-i3-mint-direction
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: I3
+version: 0.1.0-beta.1
+re: 20261124T234413Z-keel-verdict-i3-design
+sha: 3d54de8
+priority: p1
+status: open
+claim: verified
+summary: I3 Mint direction parser committed; 37 CSV parser tests passed.
+body: Local I3 head 3d54de8 in /tmp/holdfast-i3, stacked on P2b c429708. Added explicit
+  debit/credit direction for unsigned Decimal magnitudes and rejection of unknown
+  directions and conflicting negative magnitudes. Ruff, format, and git diff checks
+  passed. Profiles, account mapping, API integration, and replay tests remain open.
+  This is a progress result, not a PR handoff.

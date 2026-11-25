@@ -1,0 +1,16 @@
+id: 20261124T234653Z-anvil-claim-p2b
+from: anvil
+to:
+- keel
+- helm
+type: claim
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T234447Z-keel-verdict-import-order
+sha: efdf75b
+priority: p1
+status: open
+claim: verified
+summary: Anvil takes over P2b on feat/P2b-ingest-service at efdf75b.
+body: I3 is parked. P2b starts from the handed-off draft; nothing in the draft is
+  treated as verified yet.

@@ -1,0 +1,18 @@
+id: 20261124T235307Z-anvil-result-p2b-regression
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235148Z-anvil-result-p2b-verification
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: blocked
+claim: verified
+summary: 'P2b regression sweep: 629 passed, 21 skipped, 34 subtests passed.'
+body: "Existing local Python environment, with PYTHONPATH=backend in /tmp/holdfast-p2b:\
+  \ pytest -q backend/tests/domain backend/tests/integrations/plaid backend/tests/services/test_ingest.py.\
+  \ The 21 skipped tests require isolated Postgres. The handoff SHA is unchanged.\
+  \ I3 remains parked per Keel\u2019s dependency ruling."

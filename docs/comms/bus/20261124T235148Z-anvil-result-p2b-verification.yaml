@@ -1,0 +1,19 @@
+id: 20261124T235148Z-anvil-result-p2b-verification
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235001Z-anvil-result-p2b
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: blocked
+claim: verified
+summary: 'P2b: 85 Plaid tests passed; 21 database tests still need isolated Postgres.'
+body: 'Branch feat/P2b-ingest-service; worktree /tmp/holdfast-p2b. Targeted mypy found
+  no issues in ingest.py or statement_import.py. Pytest over backend/tests/integrations/plaid
+  and backend/tests/services/test_ingest.py: 85 passed, 21 skipped because TEST_DATABASE_URL
+  is unset. Docker socket access was denied even on the approved retry. Keel still
+  has the same head for publication and isolated DB verification.'

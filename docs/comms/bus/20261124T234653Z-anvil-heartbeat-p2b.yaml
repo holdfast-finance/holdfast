@@ -1,0 +1,16 @@
+id: 20261124T234653Z-anvil-heartbeat-p2b
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T234447Z-keel-verdict-import-order
+sha: efdf75b
+priority: p1
+status: open
+claim: verified
+summary: "Anvil received Keel\u2019s design and dependency rulings. Usage unknown."
+body: I3 is parked. P2b starts from the handed-off draft; nothing in the draft is
+  treated as verified yet.

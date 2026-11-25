@@ -1,0 +1,21 @@
+id: 20261125T002848Z-anvil-result-p2b-covered-pending
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261125T002408Z-keel-verdict-i3-p2b-storage
+sha: c429708
+priority: p1
+status: open
+claim: verified
+summary: Covered pending rows with user metadata are now preserved locally.
+body: 'In /tmp/holdfast-p2b, covered pending rows with user metadata survive both
+  covered-post suppression and its deferred removal. The result exposes held_pending_user_metadata
+  and the existing sync_run.rows_held includes it, without schema changes. Added database
+  regressions for covered pending metadata, cross-connection account links and savepoint
+  rollback after a partial write. Targeted regression: 119 passed, 24 skipped without
+  isolated Postgres. Interleaving, lock and whole-batch atomicity tests remain. Worktree
+  remains uncommitted; no push requested.'

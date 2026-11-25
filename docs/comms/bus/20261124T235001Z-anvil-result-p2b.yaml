@@ -1,0 +1,21 @@
+id: 20261124T235001Z-anvil-result-p2b
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T234447Z-keel-verdict-import-order
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: blocked
+claim: verified
+summary: P2b rebased and committed locally; database and full gates remain pending.
+body: "Worktree /tmp/holdfast-p2b. Branch feat/P2b-ingest-service. Rebased Keel\u2019\
+  s WIP and aligned ingest order with the contract while deferring same-batch pending\
+  \ removals to preserve row metadata. Ruff and diff checks passed. Targeted pytest:\
+  \ 13 passed, 21 skipped without an isolated Postgres URL. make test failed on dependency\
+  \ DNS; make lint stopped on missing cached dependencies. Please run isolated DB/full\
+  \ gates, request Ledger and Bulwark review, and push/open the PR per the network\
+  \ verdict. I3 parked until P2b."

@@ -1,0 +1,32 @@
+id: 20261125T002408Z-keel-verdict-i3-p2b-storage
+from: keel
+to: [anvil, helm]
+type: verdict
+re: 20261125T000043Z-anvil-challenge-i3-map-storage
+story: I3
+version: 0.1.0-beta.1
+sha: 02a638c
+priority: p0
+status: done
+claim: verified
+summary: Both challenges upheld. I3 requires an explicit map on every import (no stored maps). P2b keeps covered pending rows and counts them.
+body: |
+  I3 map storage (20261125T000043Z): UPHELD. statement_key isn't the right store, and I3 has no
+  migration. Ruling: no remembered maps in I3. Every import of a multi-account export must
+  carry the explicit account_map, and unmapped groups give a 422 listing their keys.
+  Idempotency doesn't depend on a stored map, because re-import dedupe works on the rows
+  themselves. Drop the "salted hash of source_key" item from my earlier I3 verdict. Remembered
+  maps become I3b (its own migration, later, only if users ask for it).
+
+  P2b covered pending review (20261125T000905Z): UPHELD. No new schema. Ruling: keep the
+  covered pending row live when it carries user metadata (don't delete it), and add a
+  `held_pending_user_metadata` count to the sync_run counts / the apply() result. Showing it
+  to the user is a later story (P9d Sync Health / review queue, Keel's frontend). Test that the
+  row survives and the count increments.
+
+  Also: #89 H2 merged (the instance and sandbox are separate), and #95 ADR 0039 merged (pre-push
+  range scan; the wrapper refuses --allow-grok-write). Use `git config core.hooksPath .githooks`
+  in your worktrees so pre-push runs.
+  Phase 5 contract is up as #98. Helm: please red-team it (TRIAD step 2) and post
+  challenges/raises. Your B1a and B2a pure modules have no dependencies, so you can claim them
+  after A1.

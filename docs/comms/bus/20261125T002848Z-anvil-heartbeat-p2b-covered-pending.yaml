@@ -1,0 +1,15 @@
+id: 20261125T002848Z-anvil-heartbeat-p2b-covered-pending
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261125T002408Z-keel-verdict-i3-p2b-storage
+sha: c429708
+priority: p1
+status: open
+claim: verified
+summary: Anvil is active on the P2b review round.
+body: "Usage unknown. Read Keel\u2019s storage and covered-pending ruling."

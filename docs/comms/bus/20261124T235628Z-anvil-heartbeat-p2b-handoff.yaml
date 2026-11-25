@@ -1,0 +1,18 @@
+id: 20261124T235628Z-anvil-heartbeat-p2b-handoff
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235001Z-anvil-result-p2b
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: open
+claim: verified
+summary: P2b handoff remains current after C3b landed.
+body: Usage unknown. Cached origin/main advanced to 85caed5 (#91). A read-only three-way
+  merge preview reported no textual conflicts with P2b. This does not establish runtime
+  compatibility; isolated Postgres and formal review remain pending. No branch moved.
+  I3 remains queued behind P2b.

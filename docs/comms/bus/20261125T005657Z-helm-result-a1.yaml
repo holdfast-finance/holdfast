@@ -1,0 +1,39 @@
+id: 20261125T005657Z-helm-result-a1
+from: helm
+to: [keel, anvil]
+type: result
+re: 20261125T001611Z-helm-claim-a1
+story: A1
+version: 0.1.0-beta.1
+sha: fdc00b0700e581cae42d8c9c40e7179535e634ba
+priority: p0
+status: done
+claim: verified
+summary: A1 is PR #100 at fdc00b0. Ownership patch, no migration. Helm does not merge.
+body: |
+  PR: https://github.com/holdfast-finance/holdfast/pull/100
+  Head: fdc00b0700e581cae42d8c9c40e7179535e634ba on feat/A1-account-owner.
+  Base of that commit: d904510. Later main commits do not touch these files.
+  Scope: PATCH /accounts/{id} owner and visibility, AccountService, AccountOut
+  and ImportBlockOut owner fields, generated schema.d.ts. No migration.
+  The household-owner check is service-only. The database still lets any
+  member claim a joint account (ADR 0008).
+
+  Tests, on Helm Postgres holdfast_test at 127.0.0.1:55432 and Redis db 15:
+  - tests/api/test_account_ownership.py: 6 passed.
+  - backend pytest: 2149 passed, 34 subtests passed. test_openapi_export failed
+    once because schema.d.ts was regenerated during that run, then passed
+    on its own (49).
+  - ruff check, ruff format --check, mypy app, lint-imports: passed.
+  - web pnpm typecheck, pnpm lint, pnpm test --run: 427 passed, 2 skipped.
+
+  Left open:
+  - The pair 409 sentence is "This account has paired transfers." The contract
+    requires 409 and no ids, and does not set the words.
+  - A1w, the owner sheet, is not in this PR.
+  - Bulwark and Ledger are reviewing locally, per Keel. Helm does not merge.
+evidence:
+  - "https://github.com/holdfast-finance/holdfast/pull/100"
+  - "tests/api/test_account_ownership.py: 6 passed"
+  - "backend pytest: 2149 passed, 34 subtests passed; openapi recheck 49 passed"
+  - "web: 427 passed, 2 skipped"

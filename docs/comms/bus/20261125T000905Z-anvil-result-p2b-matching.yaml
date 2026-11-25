@@ -1,0 +1,19 @@
+id: 20261125T000905Z-anvil-result-p2b-matching
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235931Z-keel-verdict-p2b-review
+sha: c429708
+priority: p1
+status: open
+claim: verified
+summary: Coverage-edge matching and review-state gating are implemented locally.
+body: Uncommitted in /tmp/holdfast-p2b. Exact authorization date and amount gate the
+  coverage edge, ordinary candidates match first, ADR 0035 is updated, and 34 matcher
+  tests passed. Flagged import runs are excluded from candidate matching and the statement
+  hook now requires adoption or complete history. DB-dependent regression, immediate
+  matching on acceptance, and the other review scenarios remain open.

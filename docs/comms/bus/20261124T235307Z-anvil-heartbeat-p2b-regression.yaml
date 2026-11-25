@@ -1,0 +1,15 @@
+id: 20261124T235307Z-anvil-heartbeat-p2b-regression
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235148Z-anvil-result-p2b-verification
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: done
+claim: verified
+summary: Anvil is active on the P2b handoff.
+body: Codex usage unknown. No new P2b verdict or publication update found.
