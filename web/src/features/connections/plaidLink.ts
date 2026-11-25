@@ -69,7 +69,7 @@ export interface LinkCallbacks {
 }
 
 /** Open Link for a token. Rejects if Plaid's script could not be loaded. */
-export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Promise<void> {
+export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Promise<{ destroy: () => void }> {
   const plaid = await loadPlaid()
   let handler: PlaidHandler | null = null
   handler = plaid.create({
@@ -90,4 +90,5 @@ export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Pr
       : {}),
   })
   handler.open()
+  return { destroy: () => { handler.destroy(); } }
 }

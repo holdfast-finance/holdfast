@@ -4,14 +4,15 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { useLogout } from '@/api/auth'
 import { ApiError } from '@/api/client'
+import { queryKeys } from '@/app/queryClient'
 import { abandonErrorMessage, resolveErrorMessage } from '@/features/connections/copy'
 import { OAUTH_STORAGE_KEY } from '@/features/connections/oauthSession'
 import { db, expireReauth, seedHousehold } from '@/mocks/db'
 import { server } from '@/mocks/node'
-import { useLogout } from '@/api/auth'
-import { createTestQueryClient, renderApp } from '@/test/render'
 import { useReauthStore } from '@/stores/reauth'
+import { createTestQueryClient, renderApp } from '@/test/render'
 
 interface LinkConfig {
   token: string
@@ -21,13 +22,20 @@ interface LinkConfig {
   receivedRedirectUri?: string
 }
 let link: LinkConfig | null = null
+let destroyed = 0
 
 beforeEach(() => {
   link = null
+  destroyed = 0
   ;(window as unknown as { Plaid?: unknown }).Plaid = {
     create: (config: LinkConfig) => {
       link = config
-      return { open: () => undefined, destroy: () => undefined }
+      return {
+        open: () => undefined,
+        destroy: () => {
+          destroyed += 1
+        },
+      }
     },
   }
 })
@@ -223,11 +231,14 @@ describe('P9b follow-ups', () => {
     const leaky = new ApiError(500, 'something_new', 'Internal SECRET_X detail.')
     expect(resolveErrorMessage(leaky)).not.toContain('SECRET_X')
     expect(resolveErrorMessage(new ApiError(502, 'plaid_unavailable', 'x'))).toMatch(/reached/)
+    expect(resolveErrorMessage(new ApiError(502, 'plaid_error', 'SECRET_X'))).toBe(
+      'Plaid refused the request. Nothing was changed. Try again later.',
+    )
   })
 
-  it('clears a stale resolve error when the release sheet opens', async () => {
+  it("clears a stale resolve error from the sheet's own resolve when it reopens", async () => {
     seedHousehold({ signedIn: true })
-    seedReserved()
+    seedReserved(true)
     server.use(
       http.post('*/api/connections/plaid/reservations/:id/resolve', () =>
         HttpResponse.json(
@@ -237,10 +248,21 @@ describe('P9b follow-ups', () => {
       ),
     )
     renderApp('/settings/connections')
-    await userEvent.click(await screen.findByRole('button', { name: 'Check with Plaid' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/reached/)
+    await userEvent.click(await screen.findByRole('button', { name: 'I did not finish' }))
+    let dialog = await screen.findByRole('dialog')
+    await userEvent.type(
+      within(dialog).getByLabelText('Confirmation phrase'),
+      'I did not finish this link',
+    )
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Release this slot' }))
+    await userEvent.click(await within(dialog).findByRole('button', { name: 'Check with Plaid' }))
+    expect(await within(dialog).findByText(/reached/)).toBeVisible()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
     await userEvent.click(screen.getByRole('button', { name: 'I did not finish' }))
-    const dialog = await screen.findByRole('dialog')
+    dialog = await screen.findByRole('dialog')
     expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -262,7 +284,7 @@ describe('P9b follow-ups', () => {
     expect(window.sessionStorage.getItem(OAUTH_STORAGE_KEY)).toContain('link-mock-token-0001')
   })
 
-  it('retries the exchange after a step-up when reauth went stale during the bank detour', async () => {
+  it('exchanges without a step-up prompt even when reauth is stale', async () => {
     seedHousehold({ signedIn: true })
     seedReserved()
     window.sessionStorage.setItem(
@@ -278,16 +300,92 @@ describe('P9b follow-ups', () => {
       link?.onSuccess('public-sandbox-mock')
     })
     await waitFor(() => {
-      expect(useReauthStore.getState().pending).not.toBeNull()
-    })
-    expect(db.connections.connections).toHaveLength(0)
-    if (db.session) db.session.reauthAt = Date.now()
-    act(() => {
-      useReauthStore.getState().confirm()
-    })
-    await waitFor(() => {
       expect(router.state.location.pathname).toBe('/settings/connections')
     })
+    expect(useReauthStore.getState().pending).toBeNull()
     expect(db.connections.connections).toHaveLength(1)
+    await waitFor(() => {
+      expect(document.getElementById('page-title')).toHaveFocus()
+    })
+  })
+
+  it('destroys Link and stops re-saving the token once the page unmounts', async () => {
+    seedHousehold({ signedIn: true })
+    seedReserved()
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    const { router } = renderApp('/plaid/oauth-return?oauth_state_id=abc123')
+    await waitFor(() => {
+      expect(link).not.toBeNull()
+    })
+    await act(async () => {
+      await router.navigate('/settings/security')
+    })
+    await waitFor(() => {
+      expect(destroyed).toBeGreaterThan(0)
+    })
+    window.sessionStorage.removeItem(OAUTH_STORAGE_KEY)
+    act(() => {
+      link?.onEvent?.('OPEN_OAUTH')
+    })
+    expect(window.sessionStorage.getItem(OAUTH_STORAGE_KEY)).toBeNull()
+  })
+
+  it('says it is confirming you while a step-up prompt is open', async () => {
+    seedHousehold({ signedIn: true })
+    seedReserved()
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    renderApp('/plaid/oauth-return?oauth_state_id=abc123')
+    expect(await screen.findByText('Opening Plaid Link again…')).toBeVisible()
+    let request: Promise<void> = Promise.resolve()
+    act(() => {
+      request = useReauthStore.getState().request()
+    })
+    expect(await screen.findByText("Confirming it's you…")).toBeVisible()
+    act(() => {
+      useReauthStore.getState().cancel()
+    })
+    await expect(request).rejects.toThrow()
+  })
+})
+
+describe('Session end', () => {
+  it('logout cancels a pending step-up prompt', async () => {
+    seedHousehold({ signedIn: true })
+    const settled = expect(useReauthStore.getState().request()).rejects.toThrow()
+    const { result } = renderHook(() => useLogout(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>
+      ),
+    })
+    await act(async () => {
+      await result.current.mutateAsync()
+    })
+    await settled
+    expect(useReauthStore.getState().pending).toBeNull()
+  })
+
+  it('a 401 clears the OAuth token and cancels a pending step-up prompt', async () => {
+    const client = createTestQueryClient()
+    client.setQueryData(queryKeys.me, { user: { id: 'x' } })
+    window.sessionStorage.setItem(
+      OAUTH_STORAGE_KEY,
+      JSON.stringify({ token: 'link-mock-token-0001', reservationId: RESERVATION }),
+    )
+    const settled = expect(useReauthStore.getState().request()).rejects.toThrow()
+    await client
+      .query({
+        queryKey: ['household', 'gone'],
+        queryFn: () => Promise.reject(new ApiError(401, 'unauthenticated', 'no session')),
+      })
+      .catch(() => undefined)
+    await settled
+    expect(window.sessionStorage.getItem(OAUTH_STORAGE_KEY)).toBeNull()
+    expect(useReauthStore.getState().pending).toBeNull()
   })
 })
