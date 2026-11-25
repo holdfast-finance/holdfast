@@ -47,7 +47,8 @@ CENT = Decimal("0.01")
 def normalize_for_rules(text: str) -> str:
     """NFKC, then the fingerprint normalisation. Rule matching only: fingerprints, merchant
     keys and every stored hash keep ``normalize_description`` unchanged."""
-    return normalize_description(unicodedata.normalize("NFKC", text))
+    # NFKC again after upper(): case mapping can emit characters with compatibility forms.
+    return unicodedata.normalize("NFKC", normalize_description(unicodedata.normalize("NFKC", text)))
 
 
 def _check_amount(amount: Decimal) -> None:

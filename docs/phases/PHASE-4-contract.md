@@ -144,6 +144,14 @@ MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ce
 def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
 def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- Strict grammar (round 6): `_scan` is an allowlist parser (`_parse_escape`, `_parse_bracket`,
+  `_parse_count`). It runs on stored and new patterns, after RE2 compiles them. It accepts literals,
+  escaped metacharacters, `\d \D \w \W \s \S \b \B`, `\xHH`, `\x{H..}`, `\p`, brackets with no nested `[`
+  and no leading `]`, `(?:...)`, `(...)`, `|`, `* + ?` with a lazy `?`, `{n}`, `{n,}`, `{n,m}` (max 1,000),
+  `^ $` and `.`. Everything else (flags, named groups, `\Q..\E`, POSIX classes, bare `]` or `}`)
+  is PATTERN_UNSUPPORTED. A seeded differential test (6,000 random patterns) checks that anything the
+  parser accepts compiles in RE2 and that each bracket atom matches one character.
+  `normalize_for_rules` applies NFKC again after `upper()`.
 - Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
   the same calculator. `MAX_CLASS_POSITIONS = 24`, refused with PATTERN_TOO_COMPLEX. Literals are free,
   and a count on a single literal or a pure-literal group costs nothing against either budget

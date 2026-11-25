@@ -296,3 +296,8 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   exact code points, not case-folded keys.
   The probe gained literal-prefix + dense-trigger families, so variants at 21 positions are
   refused by the probe alone.
+- **Strict allowlist grammar** (round 6). Mirroring RE2's grammar failed: `[[:]` is a class in RE2
+  but the scanner closed it early, hiding everything after it from the flag check and both budgets.
+  `_scan` is now a small parser over an allowlist (see the contract). Anything outside it is
+  refused as unsupported before the budgets or the probe run, so the controls only ever see syntax
+  the parser fully understands. A seeded differential test against RE2 guards the two together.

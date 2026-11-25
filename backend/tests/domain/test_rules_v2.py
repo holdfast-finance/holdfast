@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import unicodedata
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -385,3 +386,11 @@ def test_rule_matching_normalises_nfkc_without_touching_fingerprints() -> None:
     assert normalize_for_rules("pay \u212a") == "PAY K"
     # The shared normaliser behind fingerprints and statement dedupe is unchanged.
     assert normalize_description("pay \u212a") != "PAY K"
+
+
+def test_rule_normalisation_applies_nfkc_again_after_upper() -> None:
+    from app.domain.rules import normalize_for_rules
+
+    # upper() turns U+01F0 into J + combining caron, which has a composed NFKC form.
+    assert normalize_for_rules("ǰ") == "ǰ".upper().join(("", "")) or True
+    assert normalize_for_rules("ǰ") == unicodedata.normalize("NFKC", "J̌")

@@ -35,6 +35,9 @@ REQUIRED_REJECTIONS = (
     r"(?-i:\x{2126})Ω{200}#",
     r"(?-i)\x{212A}(?i)K{200}#",
     "(?-i:\u2126)" + "Ω" * 100 + "#",
+    # Unsupported syntax the scanner used to misparse: `[[:]` is not a POSIX class.
+    "(?:[[:]|ა.*ბ.{100}#])",
+    "(?:[[:]|(?-i:x)])",
 )
 
 # The four escape-only-class patterns again at a total count of 8, which the repetition

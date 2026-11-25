@@ -77,7 +77,6 @@ def test_probe_alone_still_refuses_the_required_patterns(
         (r"(?:\d{9})", False),
         (r"\d{3}-\d{4}", True),
         (r"A\{99\}", True),
-        ("A{,99}", True),
         # Counts on literals do not branch the DFA, so they are free.
         ("A{9}", True),
         ("(?:AB){40}", True),
@@ -162,10 +161,29 @@ def test_case_insensitive_and_truncates_by_character() -> None:
     assert not compiled.search("é" * 255 + "q.")
 
 
-def test_class_with_literal_bracket_and_colon_is_not_a_posix_class() -> None:
-    compiled = compile_pattern("[[:a]")
-    assert compiled.search(":")
-    assert compiled.search("A")
+def test_posix_and_nested_brackets_are_unsupported() -> None:
+    for pattern in (
+        "[[:a]",
+        "[[:alpha:]]",
+        "[[]",
+        "[a[b]",
+        "(?:[[:]|X)",
+        "A{,99}",
+        r"\QAB\E",
+        "(?P<brand>AB|CD)E",
+        "(?#note)A",
+        "A]",
+        "A}",
+        "[]A]",
+        "[a-b-c]",
+        "^*A",
+        "A**",
+        r"\n",
+    ):
+        with pytest.raises(RuleValidationError) as caught:
+            compile_pattern(pattern)
+        # RE2 itself refuses a few of these first, which is as good.
+        assert str(caught.value) in (rule_regex.PATTERN_UNSUPPORTED, rule_regex.PATTERN_INVALID)
 
 
 def test_stored_patterns_are_not_probed_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -320,7 +338,7 @@ def test_range_ends_and_midpoint_are_decoded() -> None:
         "\u10ef",
         "\u10df",
     }
-    assert set(rule_regex._class_endpoints(r"[\101-\103x]")) >= {"A", "C", "B", "x"}
+    assert set(rule_regex._class_endpoints(r"[\x41-\x43x]")) >= {"A", "C", "B", "x"}
 
 
 @pytest.mark.parametrize("pattern", MUST_ACCEPT)
@@ -380,7 +398,7 @@ def test_inline_flags_are_refused_on_every_path(pattern: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "pattern", (r"\(?i\)A", r"[(?i)]A", r"\Q(?i)\EA", "(?:AB|CD)E", "(?P<brand>AB|CD)E")
+    "pattern", (r"\(?i\)A", r"[(?i)]A", "(?:AB|CD)E", "(AB|CD)E", r"\[:alpha:\]A")
 )
 def test_non_flag_groups_and_escaped_text_are_accepted(pattern: str) -> None:
     assert compile_pattern(pattern)
@@ -396,3 +414,104 @@ def test_compatibility_twins_are_normalised_to_one_character() -> None:
 def test_probe_alphabets_keep_exact_code_points() -> None:
     assert {"\u03a9", "\u2126"} <= set(rule_regex._literal_alphabet("\u03a9"))
     assert {"\u03a9", "\u2126"} <= set(rule_regex._atom_alphabet(r"[\x{3a9}\x{2126}]"))
+
+
+_DIFFERENTIAL_PIECES = (
+    "A",
+    "B",
+    "x",
+    "-",
+    ":",
+    "#",
+    "/",
+    " ",
+    "[",
+    "]",
+    "[^",
+    "[:",
+    ":]",
+    "^",
+    "$",
+    "\\",
+    "|",
+    "(",
+    ")",
+    "(?:",
+    "(?",
+    "?",
+    "*",
+    "+",
+    ".",
+    "{",
+    "}",
+    "{2}",
+    "{1,3}",
+    "{3,}",
+    "{,2}",
+    "{0}",
+    r"\d",
+    r"\w",
+    r"\S",
+    r"\b",
+    r"\x41",
+    r"\x{10D0}",
+    r"\x{110000}",
+    r"\p{Greek}",
+    r"\pL",
+    r"\p{Nope}",
+    r"\Q",
+    r"\E",
+    r"\-",
+    r"\]",
+    r"\[",
+    r"\\",
+    "(?i)",
+    "(?-i:",
+    "(?P<n>",
+    "\u03a9",
+    "\u2126",
+    "a-z",
+    "z-a",
+    "[a-z]",
+    "[^a]",
+    "[\\]]",
+    "[-a]",
+    "[a-]",
+)
+
+
+def test_scanner_and_re2_agree_on_random_allowlist_patterns(
+    record_property: Callable[[str, object], None],
+) -> None:
+    """Whatever the strict parser accepts, RE2 compiles, and a bracket atom is one character."""
+    rng = Random(20260124)  # noqa: S311 -- deterministic synthetic generator
+    cases = accepted = brackets = 0
+    while cases < 6000:
+        cases += 1
+        pattern = "".join(rng.choices(_DIFFERENTIAL_PIECES, k=rng.randint(1, 14)))[:128]
+        try:
+            scanned = rule_regex._scan(pattern)
+        except (RuleValidationError, IndexError):
+            continue
+        accepted += 1
+        # The scanner accepted it, so RE2 must too: no syntax is hidden from the controls.
+        engine = rule_regex._compile_cold(pattern)
+        assert engine is not None, pattern
+        for atom in scanned.atoms:
+            if not atom.startswith("["):
+                continue
+            brackets += 1
+            atom_engine = rule_regex._compile_cold(atom)
+            try:
+                samples = rule_regex._atom_alphabet(atom)[:12]
+            except RuleValidationError:
+                continue
+            for first in samples:
+                assert atom_engine.fullmatch(first) is not None
+                for second in samples:
+                    assert atom_engine.fullmatch(first + second) is None, (atom, first, second)
+    record_property("differential_cases", cases)
+    record_property("differential_accepted", accepted)
+    record_property("differential_bracket_atoms", brackets)
+    assert accepted >= 300
+    assert brackets >= 100

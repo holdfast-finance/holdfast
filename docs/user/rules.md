@@ -25,3 +25,15 @@ Patterns must be 1 to 128 characters long. Holdfast refuses patterns that
 match an empty string, limits the number of character classes and checks
 how quickly each new pattern searches sample descriptions. A pattern that
 takes too long can be refused because rules run across many transactions.
+
+## Supported syntax
+
+Holdfast reads patterns with a strict grammar and refuses anything else, before the engine sees it.
+
+- Plain characters, and these escaped: `\. \* \+ \? \( \) \[ \] \{ \} \| \\ \^ \$ \- \/ \#`.
+- `\d \D \w \W \s \S \b \B`, `\xHH`, `\x{H..H}`, `\pL` and `\p{Name}`.
+- Classes `[...]` and `[^...]` with plain characters, ranges such as `a-z` and the escapes above. No nested
+  `[`, so no `[:alpha:]`. Write a literal `]` as `\]`.
+- Groups `(...)` and `(?:...)`, alternation `|`, `*`, `+`, `?` (and a lazy `?` after them),
+  `{n}`, `{n,}` and `{n,m}`, anchors `^` and `$`, and `.`.
+- Not supported: inline flags such as `(?i)`, named groups, `\Q...\E`, octal and control escapes.

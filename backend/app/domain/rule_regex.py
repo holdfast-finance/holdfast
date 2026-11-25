@@ -36,7 +36,9 @@ INGEST_REGEX_US_PER_ROW = 500
 PATTERNS_UNAVAILABLE = "Patterns aren't available on this server."
 PATTERN_INVALID = "This pattern uses unsupported syntax."
 PATTERN_TOO_SLOW = "This pattern is too slow to run on every transaction."
-PATTERN_UNSUPPORTED = "Inline flags aren't supported. Matching is always case-insensitive."
+PATTERN_UNSUPPORTED = (
+    "This pattern uses syntax that isn't supported. Matching is always case-insensitive."
+)
 PATTERN_TOO_COMPLEX = "This pattern is too complex to check. Try a simpler one."
 _PRINTABLE_ASCII = "".join(chr(code) for code in range(32, 127))
 _DESCRIPTION_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789    *#-./"
@@ -124,49 +126,136 @@ def _compile_cold(pattern: str) -> _EnginePattern:
     return compiled
 
 
-def _escape_end(pattern: str, start: int) -> int:
-    kind = pattern[start + 1]
-    end = start + 2
-    if kind in "pPx" and pattern[end : end + 1] == "{":
-        return pattern.index("}", end) + 1
-    if kind in "pP":
-        return end + 1
+_ESCAPABLE = ".*+?()[]{}|\\^$-/#"
+_META = ".*+?()[]{}|\\^$"
+_HEX = frozenset("0123456789abcdefABCDEF")
+MAX_COUNT = 1000  # RE2's own ceiling on a counted repetition
+
+
+def _unsupported() -> RuleValidationError:
+    return RuleValidationError(PATTERN_UNSUPPORTED)
+
+
+def _hex_escape(pattern: str, i: int) -> tuple[int, str]:
+    """Parse ``\\xHH`` or ``\\x{H..H}`` with ``i`` at the ``x``. Return (end, character)."""
+    if pattern[i + 1 : i + 2] == "{":
+        close = pattern.find("}", i + 2)
+        digits = pattern[i + 2 : close] if close != -1 else ""
+        end = close + 1
+        valid = 1 <= len(digits) <= 6
+    else:
+        digits = pattern[i + 1 : i + 3]
+        end = i + 3
+        valid = len(digits) == 2
+    if not valid or not _HEX.issuperset(digits):
+        raise _unsupported()
+    code = int(digits, 16)
+    if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+        raise _unsupported()
+    return end, chr(code)
+
+
+def _parse_escape(pattern: str, i: int, in_class: bool) -> tuple[int, str, str]:
+    """Parse one allowed escape at ``i``. Return (end, kind, value).
+
+    kind is ``atom`` (a class escape, value is its text), ``literal`` (value is the
+    character) or ``zero`` (a ``\\b`` or ``\\B`` boundary). Anything else is unsupported.
+    """
+    if i + 1 >= len(pattern):
+        raise _unsupported()
+    kind = pattern[i + 1]
+    if kind in "dDwWsS":
+        return i + 2, "atom", pattern[i : i + 2]
+    if kind in "bB" and not in_class:
+        return i + 2, "zero", ""
     if kind == "x":
-        return end + 2
-    if kind in "01234567":
-        while end < min(start + 4, len(pattern)) and pattern[end] in "01234567":
-            end += 1
-    return end
-
-
-def _bracket_end(pattern: str, start: int) -> int:
-    end = start + 1
-    if pattern[end] == "^":
-        end += 1
-    if pattern[end] == "]":
-        end += 1
-    while pattern[end] != "]":
-        if pattern[end] == "\\":
-            end = _escape_end(pattern, end)
-        elif (
-            pattern.startswith("[:", end)
-            and (close := pattern.find("]", end + 2)) != -1
-            and pattern[close - 1] == ":"
-        ):
+        end, char = _hex_escape(pattern, i + 1)
+        return end, "literal", char
+    if kind in "pP":
+        if pattern[i + 2 : i + 3] == "{":
+            close = pattern.find("}", i + 3)
+            name = pattern[i + 3 : close] if close != -1 else ""
+            if not name or not name.isascii() or not name.replace("_", "").isalpha():
+                raise _unsupported()
             end = close + 1
         else:
-            end += 1
-    return end + 1
+            if not (pattern[i + 2 : i + 3].isascii() and pattern[i + 2 : i + 3].isalpha()):
+                raise _unsupported()
+            end = i + 3
+        _compile_cold(pattern[i:end])  # RE2 decides whether the property name exists
+        return end, "atom", pattern[i:end]
+    if kind in _ESCAPABLE:
+        return i + 2, "literal", kind
+    raise _unsupported()
 
 
-def _literal_escape(token: str) -> str:
-    kind = token[1]
-    controls = {"a": "\a", "f": "\f", "t": "\t", "n": "\n", "r": "\r", "v": "\v"}
-    if kind == "x":
-        return chr(int(token[2:].strip("{}"), 16))
-    if kind in "01234567":
-        return chr(int(token[1:], 8))
-    return controls.get(kind, kind)
+def _parse_bracket(pattern: str, start: int) -> tuple[int, list[tuple[str, ...]]]:
+    """Parse ``[...]`` or ``[^...]`` at ``start``. Return (end, items).
+
+    Items are ``("c", ch)``, ``("class", text)`` or ``("range", lo, hi)``. No nested ``[``
+    (so no POSIX ``[:alpha:]``), no leading ``]`` and no unescaped ``-`` except first or last.
+    """
+    i = start + 1 + (pattern[start + 1 : start + 2] == "^")
+    items: list[tuple[str, ...]] = []
+    while True:
+        if i >= len(pattern):
+            raise _unsupported()
+        char = pattern[i]
+        if char == "]":
+            if not items:
+                raise _unsupported()
+            return i + 1, items
+        if char == "[":
+            raise _unsupported()
+        token: tuple[str, ...]
+        if char == "\\":
+            end, kind, value = _parse_escape(pattern, i, True)
+            token = ("class", value) if kind == "atom" else ("c", value)
+            i = end
+        else:
+            if char == "-" and items and pattern[i + 1 : i + 2] != "]":
+                raise _unsupported()
+            token = ("c", char)
+            i += 1
+        if (
+            token[0] == "c"
+            and pattern[i : i + 1] == "-"
+            and pattern[i + 1 : i + 2] not in ("]", "")
+        ):
+            high_at = i + 1
+            if pattern[high_at] == "[":
+                raise _unsupported()
+            if pattern[high_at] == "\\":
+                end, kind, value = _parse_escape(pattern, high_at, True)
+                if kind != "literal":
+                    raise _unsupported()
+                high, i = value, end
+            else:
+                high, i = pattern[high_at], high_at + 1
+            if ord(high) < ord(token[1]):
+                raise _unsupported()
+            items.append(("range", token[1], high))
+            continue
+        items.append(token)
+
+
+def _parse_count(pattern: str, start: int) -> tuple[int, int]:
+    """Parse ``{n}``, ``{n,}`` or ``{n,m}``. Return (end, largest count). Anything else is out."""
+    close = pattern.find("}", start + 1)
+    if close == -1:
+        raise _unsupported()
+    parts = pattern[start + 1 : close].split(",")
+    if (
+        len(parts) > 2
+        or not parts[0]
+        or any(part and not (part.isascii() and part.isdigit()) for part in parts)
+    ):
+        raise _unsupported()
+    low = int(parts[0])
+    high = int(parts[1]) if len(parts) == 2 and parts[1] else None
+    if low > MAX_COUNT or (high is not None and (high > MAX_COUNT or high < low)):
+        raise _unsupported()
+    return close + 1, max(low, high or 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,21 +276,14 @@ class _Scan:
     pure_literal: bool
 
 
-def _repeat_count(pattern: str, start: int) -> tuple[int, int] | None:
-    """Parse ``{n}``, ``{n,}`` or ``{n,m}`` at ``start``. Return (end, largest count)."""
-    close = pattern.find("}", start + 1)
-    if close == -1:
-        return None
-    count = pattern[start + 1 : close].split(",", 1)
-    if not (count[0].isascii() and count[0].isdigit()):
-        return None
-    if len(count) == 2 and count[1] and not (count[1].isascii() and count[1].isdigit()):
-        return None
-    return close + 1, max(int(part) for part in count if part)
-
-
 def _scan(pattern: str) -> _Scan:
-    """Scan syntax after RE2 validates it. Track literal runs across quoted text."""
+    """Parse the allowlisted grammar and measure it. Anything outside it is unsupported.
+
+    Allowed: literals, escaped metacharacters, ``\\d \\D \\w \\W \\s \\S \\b \\B``, ``\\xHH``,
+    ``\\x{H..}``, ``\\p{Name}``/``\\pL``, brackets without nesting, ``(?:...)`` and ``(...)``,
+    ``|``, ``* + ?`` (with a lazy ``?``), ``{n}``/``{n,}``/``{n,m}``, ``^ $`` and ``.``.
+    Inline flags, named groups, ``\\Q...\\E``, POSIX classes and bare ``]``/``}`` are refused.
+    """
     atoms: dict[str, None] = {}
     groups: dict[tuple[str, tuple[str, ...]], None] = {}
     # Each open group: literal letters and class atoms inside it.
@@ -214,6 +296,8 @@ def _scan(pattern: str) -> _Scan:
     literals: dict[str, str] = {}
     runs: dict[str, str] = {}
     recent = ""
+    # What the previous after allows next: "elem" takes a quantifier, "quant" takes a lazy ?.
+    prev = "start"
     i = 0
     while i < len(pattern):
         char = pattern[i]
@@ -221,67 +305,77 @@ def _scan(pattern: str) -> _Scan:
         literal = ""
         atom = ""
         closed_rep = closed_pos = 0
+        after = "elem"
         if char == "[":
-            end = _bracket_end(pattern, i)
+            end, _ = _parse_bracket(pattern, i)
             atom = pattern[i:end]
         elif char == ".":
             atom = char
         elif char == "\\":
-            kind = pattern[end]
-            end = _escape_end(pattern, i)
-            if kind in "dDwWsSpPC":
-                atom = pattern[i:end]
-            elif kind == "Q":
-                close = pattern.find(r"\E", end)
-                literal = pattern[end:] if close == -1 else pattern[end:close]
-                end = len(pattern) if close == -1 else close + 2
-            elif kind not in "bBAz":
-                literal = _literal_escape(pattern[i:end])
-        elif pattern.startswith("(?", i):
-            end = i + 2
-            while pattern[end] not in ":>)":
-                end += 1
-            end += 1
-            if pattern[end - 1] != ")":
-                open_groups.append(({}, {}))
-                levels.append([0, 0, 0, 0])
-                has_alternation.append(False)
+            end, kind, value = _parse_escape(pattern, i, False)
+            if kind == "atom":
+                atom = value
+            elif kind == "literal":
+                literal = value
+            else:
+                after = "anchor"
         elif char == "(":
+            if pattern.startswith("(?", i) and not pattern.startswith("(?:", i):
+                raise _unsupported()
+            end = i + (3 if pattern.startswith("(?:", i) else 1)
             open_groups.append(({}, {}))
             levels.append([0, 0, 0, 0])
             has_alternation.append(False)
+            after = "start"
         elif char == "|":
             pure_literal = False
             top = levels[-1]
             levels[-1] = [max(top[:2]), 0, max(top[2:]), 0]
             has_alternation[-1] = True
+            after = "start"
         elif char == ")":
-            if open_groups:
-                letters, members = open_groups.pop()
-                groups[("".join(letters.values()), tuple(members))] = None
-                done = levels.pop()
-                closed_rep, closed_pos = max(done[:2]), max(done[2:])
-                if has_alternation.pop():
-                    closed_pos = max(closed_pos, 1)
-                levels[-1][1] += closed_rep
-                levels[-1][3] += closed_pos
-                for parent in open_groups:
-                    parent[1].update(members)
-                    for key, letter in letters.items():
-                        parent[0][key] = letter
-        elif char == "{" and (parsed := _repeat_count(pattern, i)) is not None:
-            end, count = parsed
+            if not open_groups:
+                raise _unsupported()
+            letters, members = open_groups.pop()
+            groups[("".join(letters.values()), tuple(members))] = None
+            done = levels.pop()
+            closed_rep, closed_pos = max(done[:2]), max(done[2:])
+            if has_alternation.pop():
+                closed_pos = max(closed_pos, 1)
+            levels[-1][1] += closed_rep
+            levels[-1][3] += closed_pos
+            for parent in open_groups:
+                parent[1].update(members)
+                parent[0].update(letters)
+        elif char in "*+?":
             pure_literal = False
+            if prev == "elem":
+                after = "quant"
+            elif prev == "quant" and char == "?":
+                after = "lazy"
+            else:
+                raise _unsupported()
+            closed_rep, closed_pos = last_rep, last_pos
+        elif char == "{":
+            if prev != "elem":
+                raise _unsupported()
+            end, count = _parse_count(pattern, i)
+            pure_literal = False
+            after = "quant"
             if last_pos:
                 # A count on a single literal or a pure-literal group does not branch the DFA.
                 closed_rep = count * max(last_rep, 1)
                 closed_pos = count * last_pos
                 levels[-1][1] += closed_rep - last_rep
                 levels[-1][3] += closed_pos - last_pos
-        elif char not in "^$|()*+?":
+            else:
+                closed_rep, closed_pos = last_rep, last_pos
+        elif char in "^$":
+            after = "anchor"
+        elif char in "]}":
+            raise _unsupported()
+        else:
             literal = char
-        if char in "*+?" and not pattern.startswith("(?", i):
-            pure_literal = False
 
         last_rep, last_pos = closed_rep, closed_pos
         if atom:
@@ -299,9 +393,12 @@ def _scan(pattern: str) -> _Scan:
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
                     runs.setdefault(recent[-size:], recent[-size:])
-        else:
+        elif after not in ("quant", "lazy"):
             recent = ""
+        prev = after
         i = end
+    if open_groups:
+        raise _unsupported()
     return _Scan(
         tuple(atoms),
         tuple(literals.values()),
@@ -320,29 +417,13 @@ def _class_endpoints(atom: str) -> str:
     """
     if not atom.startswith("["):
         return ""
-    body_start = 1 + (atom[1:2] == "^")
-    tokens: list[str | None] = []
-    i = body_start
-    stop = len(atom) - 1
-    while i < stop:
-        if atom[i] == "\\":
-            end = _escape_end(atom, i)
-            tokens.append(None if atom[i + 1] in "dDwWsSpPC" else _literal_escape(atom[i:end]))
-            i = end
-        elif atom.startswith("[:", i) and (close := atom.find(":]", i + 2)) != -1:
-            tokens.append(None)
-            i = close + 2
-        else:
-            tokens.append(atom[i])
-            i += 1
     found: dict[str, None] = {}
-    for position, token in enumerate(tokens):
-        if token is None:
-            continue
-        found[token] = None
-        high = tokens[position + 2] if position + 2 < len(tokens) else None
-        if tokens[position + 1 : position + 2] == ["-"] and high is not None:
-            for code in (ord(token), ord(high), (ord(token) + ord(high)) // 2):
+    for item in _parse_bracket(atom, 0)[1]:
+        if item[0] == "c":
+            found[item[1]] = None
+        elif item[0] == "range":
+            low, high = ord(item[1]), ord(item[2])
+            for code in (low, high, (low + high) // 2):
                 if not 0xD800 <= code <= 0xDFFF:
                     found[chr(code)] = None
     return "".join(found)
@@ -450,44 +531,19 @@ def _family_mean_ns(pattern: str, subjects: tuple[str, ...]) -> int:
     return min(one_run() for _ in range(3)) // len(subjects)
 
 
-def _has_inline_flags(pattern: str) -> bool:
-    """Find ``(?i)``, ``(?-i:...)`` and every other ``(?`` form but ``(?:`` and ``(?P<name>``.
-
-    One case mode is what keeps folding twins (K and the Kelvin sign) from branching the DFA.
-    """
-    i = 0
-    while i < len(pattern):
-        char = pattern[i]
-        if char == "[":
-            i = _bracket_end(pattern, i)
-        elif char == "\\":
-            if pattern[i + 1] == "Q":
-                close = pattern.find(r"\E", i + 2)
-                i = len(pattern) if close == -1 else close + 2
-            else:
-                i = _escape_end(pattern, i)
-        elif pattern.startswith("(?", i):
-            if not pattern.startswith(("(?:", "(?P<"), i):
-                return True
-            i += 3
-        else:
-            i += 1
-    return False
-
-
-def _compile_checked(pattern: str) -> _Pattern:
+def _compile_checked(pattern: str) -> tuple[_Pattern, _Scan]:
     if not 1 <= len(pattern) <= MAX_PATTERN_LENGTH or "\0" in pattern:
         raise RuleValidationError("Patterns must be 1 to 128 characters and contain no NUL.")
     engine = _compile_cold(pattern)
     try:
-        flagged = _has_inline_flags(pattern)
-    except (IndexError, ValueError):
-        raise RuleValidationError(PATTERN_INVALID) from None
-    if flagged:
-        raise RuleValidationError(PATTERN_UNSUPPORTED)
+        # Stored and new patterns both go through the allowlist parser. Only what it fully
+        # understands reaches the budgets, the probe or the matcher.
+        scanned = _scan(pattern)
+    except IndexError:
+        raise _unsupported() from None
     if engine.search("") is not None:
         raise RuleValidationError("Patterns must not match an empty description.")
-    return _Pattern(engine)
+    return _Pattern(engine), scanned
 
 
 def _nfkc(pattern: str) -> str:
@@ -497,7 +553,7 @@ def _nfkc(pattern: str) -> str:
 
 def compile_stored_pattern(pattern: str) -> CompiledPattern:
     """Compile a previously validated stored pattern without a load-dependent cost probe."""
-    return _compile_checked(_nfkc(pattern))
+    return _compile_checked(_nfkc(pattern))[0]
 
 
 def compile_pattern(pattern: str) -> CompiledPattern:
@@ -505,14 +561,9 @@ def compile_pattern(pattern: str) -> CompiledPattern:
     if re2 is None:
         raise RuleValidationError(PATTERNS_UNAVAILABLE)
     pattern = _nfkc(pattern)
-    compiled = _compile_checked(pattern)
+    compiled, scanned = _compile_checked(pattern)
     # Structural limits run first and bound the whole class of blow-ups. The probe below
     # is a second line, not the only one.
-    try:
-        scanned = _scan(pattern)
-    except (IndexError, ValueError):
-        # The scanner only sees patterns RE2 accepted; anything it can't parse is refused.
-        raise RuleValidationError(PATTERN_INVALID) from None
     if scanned.repeat_cost > MAX_REPEAT_BUDGET:
         raise RuleValidationError(PATTERN_TOO_COMPLEX)
     if scanned.class_positions > MAX_CLASS_POSITIONS:
