@@ -22,6 +22,7 @@ from app.config import Settings
 # Every env var from the Phase 0 contract, cleared for tests that check defaults.
 CONTRACT_ENV_VARS = (
     "APP_ENV",
+    "APP_DEPLOYMENT",
     "APP_BASE_URL",
     "APP_HOST",
     "CADDY_BIND",
@@ -35,8 +36,11 @@ CONTRACT_ENV_VARS = (
     "POSTGRES_APP_PASSWORD",
     "POSTGRES_OWNER_PASSWORD",
     "REDIS_URL",
+    "REDIS_PASSWORD",
     "DOCUMENT_STORE",
     "PLAID_ENV",
+    "HOLDFAST_SANDBOX",
+    "HOLDFAST_REAL_DATA",
     "PLAID_CLIENT_ID",
     "PLAID_SECRET_SANDBOX",
     "PLAID_SECRET_PRODUCTION",

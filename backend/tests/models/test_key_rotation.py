@@ -1,0 +1,662 @@
+"""rotate-keys against real Postgres as holdfast_app (ADR 0015). Synthetic data only."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+from cryptography.fernet import Fernet
+from pydantic import SecretStr
+from sqlalchemy import Engine, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.logging import configure_logging
+from app.security import crypto, rotation
+from app.security.secret_token import SecretToken
+from app.services import audit
+from tests.models.conftest import delete_household, set_ctx
+
+pytestmark = pytest.mark.services
+
+
+def legacy(plaintext: str, raw_key: str) -> bytes:
+    return Fernet(raw_key.encode()).encrypt(plaintext.encode())
+
+
+def bound(plaintext: str, raw_key: str, ctx: str | None) -> bytes:
+    assert ctx is not None
+    return crypto.seal(SecretToken(plaintext), ctx, key=SecretStr(raw_key))
+
+
+def sealed(plaintext: str, raw_key: str) -> bytes:
+    return crypto.seal_unbound(SecretToken(plaintext), key=SecretStr(raw_key))
+
+
+def ctx_of(table: str, hid: uuid.UUID, row_key: str) -> str | None:
+    col = {"household_setting": "value_enc", "bank_connection": "access_token_enc"}.get(table)
+    return None if col is None else crypto.make_context(hid, table, col, row_key)
+
+
+@dataclass
+class World:
+    household_id: uuid.UUID
+    user_id: uuid.UUID
+    connection_id: uuid.UUID
+    setting_key: str
+    old: str
+    new: str
+    canaries: dict[str, str]
+
+    def ctx(self, table: str) -> str | None:
+        key = {"household_setting": self.setting_key, "bank_connection": str(self.connection_id)}
+        return ctx_of(table, self.household_id, key.get(table, ""))
+
+    def current(self, blob: bytes, table: str) -> bool:
+        return crypto.is_current(blob, self.ring, bound=table != "app_user")
+
+    def opened(self, blob: bytes, table: str) -> str:
+        return crypto.open_with(blob, self.ring, self.ctx(table)).reveal()
+
+    @property
+    def ring(self) -> crypto.KeyRing:
+        return crypto.load_ring(SecretStr(f"{self.new},{self.old}"))
+
+
+@pytest.fixture
+def world(app_engine: Engine, owner_engine: Engine) -> Iterator[World]:
+    old, new = crypto.generate_key(), crypto.generate_key()
+    canaries = {n: f"{n}-{secrets.token_hex(10)}" for n in ("setting", "token", "totp")}
+    conn_id = uuid.uuid4()
+    with app_engine.begin() as c:
+        hid = c.execute(text("SELECT create_household('Example Rotation')")).scalar_one()
+        set_ctx(c, hid, wide=True)
+        c.execute(
+            text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
+            {
+                "h": hid,
+                "v": bound(
+                    canaries["setting"],
+                    old,
+                    crypto.make_context(hid, "household_setting", "value_enc", "k"),
+                ),
+            },
+        )
+        c.execute(
+            text(
+                "INSERT INTO bank_connection"
+                " (id, household_id, provider, external_id, access_token_enc)"
+                " VALUES (:i,:h,'plaid',:e,:v) RETURNING id"
+            ),
+            {
+                "i": conn_id,
+                "h": hid,
+                "e": f"item-{uuid.uuid4()}",
+                "v": bound(canaries["token"], old, ctx_of("bank_connection", hid, str(conn_id))),
+            },
+        ).scalar_one()
+        user_id = c.execute(
+            text(
+                "INSERT INTO app_user (household_id, email, totp_secret_enc)"
+                " VALUES (:h,:m,:v) RETURNING id"
+            ),
+            {"h": hid, "m": f"{uuid.uuid4()}@example.test", "v": legacy(canaries["totp"], old)},
+        ).scalar_one()
+    yield World(hid, user_id, conn_id, "k", old, new, canaries)
+    with owner_engine.begin() as c:
+        set_ctx(c, hid, wide=True)
+        c.execute(text("DELETE FROM app_user WHERE household_id = :h"), {"h": hid})
+    delete_household(owner_engine, hid)
+
+
+@pytest.fixture
+async def factory(app_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine: AsyncEngine = create_async_engine(app_url)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+def read(app_engine: Engine, w: World, table: str) -> bytes | None:
+    col, where, params = {
+        "household_setting": (
+            "value_enc",
+            "household_id = :h AND key = 'k'",
+            {"h": w.household_id},
+        ),
+        "bank_connection": ("access_token_enc", "id = :i", {"i": w.connection_id}),
+        "app_user": ("totp_secret_enc", "id = :i", {"i": w.user_id}),
+    }[table]
+    with app_engine.begin() as c:
+        set_ctx(c, w.household_id, wide=True)
+        row = c.execute(text(f"SELECT {col} FROM {table} WHERE {where}"), params).scalar_one()  # noqa: S608
+    return None if row is None else bytes(row)
+
+
+def write(app_engine: Engine, w: World, table: str, value: bytes | None) -> None:
+    col, where, params = {
+        "household_setting": (
+            "value_enc",
+            "household_id = :h AND key = 'k'",
+            {"h": w.household_id},
+        ),
+        "bank_connection": ("access_token_enc", "id = :i", {"i": w.connection_id}),
+        "app_user": ("totp_secret_enc", "id = :i", {"i": w.user_id}),
+    }[table]
+    with app_engine.begin() as c:
+        set_ctx(c, w.household_id, wide=True)
+        c.execute(text(f"UPDATE {table} SET {col} = :v WHERE {where}"), {**params, "v": value})  # noqa: S608
+
+
+TABLES = ("household_setting", "bank_connection", "app_user")
+CANARY = {"household_setting": "setting", "bank_connection": "token", "app_user": "totp"}
+
+
+async def run(
+    factory: async_sessionmaker[AsyncSession], w: World, hook: rotation.Hook | None = None
+) -> rotation.Counts:
+    return await rotation.rotate(factory, w.ring, hook=hook, only=[w.household_id])
+
+
+async def test_legacy_rows_rotate_to_the_primary_kid_and_second_run_is_a_no_op(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    counts = await run(factory, world)
+    assert (counts.rotated, counts.failed, counts.conflicted, counts.residual) == (3, 0, 0, 0)
+    assert counts.clean
+    new_kid = crypto.key_id(world.new)
+    for t in TABLES:
+        blob = read(app_engine, world, t)
+        want = "hf1" if t == "app_user" else "hf2"
+        assert blob is not None and blob.startswith(f"{want}.{new_kid}.".encode())
+        assert world.opened(blob, t) == world.canaries[CANARY[t]]
+    before = {t: read(app_engine, world, t) for t in TABLES}
+    again = await run(factory, world)
+    assert (again.rotated, again.already_current, again.failed) == (0, 3, 0)
+    assert {t: read(app_engine, world, t) for t in TABLES} == before
+
+
+async def test_unbound_rows_in_gated_columns_fail_and_are_never_upgraded(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    """A copied TOTP seed (hf1) or a bare Fernet token must not be laundered into a binding."""
+    seed = sealed("copied-totp-seed", world.new)
+    bare = legacy("copied-bare", world.new)
+    write(app_engine, world, "household_setting", seed)
+    write(app_engine, world, "bank_connection", bare)
+    counts = await run(factory, world)
+    assert counts.failed == 2 and counts.residual == 2 and not counts.clean
+    assert read(app_engine, world, "household_setting") == seed
+    assert read(app_engine, world, "bank_connection") == bare
+
+
+async def test_hf2_row_under_a_retired_kid_is_resealed(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    ctx = world.ctx("bank_connection")
+    write(app_engine, world, "bank_connection", bound("old-kid-canary", world.old, ctx))
+    counts = await run(factory, world)
+    assert counts.rotated == 3 and counts.clean
+    blob = read(app_engine, world, "bank_connection")
+    assert blob is not None and world.current(blob, "bank_connection")
+    assert blob.startswith(b"hf2.")
+    assert world.opened(blob, "bank_connection") == "old-kid-canary"
+
+
+async def test_null_totp_is_skipped_and_empty_fails_unchanged(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    write(app_engine, world, "app_user", None)
+    counts = await run(factory, world)
+    assert (counts.skipped_null, counts.rotated, counts.failed) == (1, 2, 0)
+    assert read(app_engine, world, "app_user") is None
+    write(app_engine, world, "app_user", b"")
+    counts = await run(factory, world)
+    assert counts.failed == 1 and not counts.clean
+    assert read(app_engine, world, "app_user") == b""
+
+
+async def test_unknown_kid_and_unknown_version_fail_the_row_and_leave_bytes(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    stranger = crypto.generate_key()
+    foreign = sealed("foreign-canary", stranger)  # kid not in the ring
+    # hf1 under the old kid's name but sealed by another key: no trial decrypt, no legacy path.
+    relabelled = foreign.replace(
+        crypto.key_id(stranger).encode(), crypto.key_id(world.old).encode()
+    )
+    write(app_engine, world, "household_setting", foreign)
+    write(app_engine, world, "bank_connection", relabelled)
+    write(app_engine, world, "app_user", b"hf2.0123456789abcdef.whatever")
+    counts = await run(factory, world)
+    assert (counts.failed, counts.rotated) == (3, 0)
+    assert counts.residual == 3 and not counts.clean
+    assert read(app_engine, world, "household_setting") == foreign
+    assert read(app_engine, world, "bank_connection") == relabelled
+    assert read(app_engine, world, "app_user") == b"hf2.0123456789abcdef.whatever"
+
+
+async def test_legacy_bytes_no_key_can_open_fail_the_row(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    junk = legacy("x", crypto.generate_key())
+    write(app_engine, world, "bank_connection", junk)
+    counts = await run(factory, world)
+    assert counts.failed == 1 and counts.rotated == 2 and not counts.clean
+    assert read(app_engine, world, "bank_connection") == junk
+
+
+def _drift(app_engine_blobs: list[bytes], table_sql: str, params: dict[str, Any]) -> rotation.Hook:
+    """Simulate a lost lock: commit a different value, so the swap's predicate fails."""
+    queue = list(app_engine_blobs)
+
+    async def hook(attempt: int, table: str, s: AsyncSession) -> None:
+        if table != "bank_connection" or not queue:
+            return
+        await s.execute(text(table_sql), {**params, "v": queue.pop(0)})
+        await s.commit()
+
+    return hook
+
+
+async def test_failed_swap_rereads_and_seals_only_the_bytes_it_locked(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    winner = bound("winner-canary", world.old, world.ctx("bank_connection"))
+    hook = _drift(
+        [winner],
+        "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
+        {"i": world.connection_id},
+    )
+    counts = await run(factory, world, hook)
+    assert counts.conflicted == 0 and counts.clean
+    blob = read(app_engine, world, "bank_connection")
+    assert blob is not None and world.current(blob, "bank_connection")
+    assert world.opened(blob, "bank_connection") == "winner-canary"
+    assert world.canaries["token"] != "winner-canary"
+
+
+async def test_failed_swap_against_an_already_current_winner_writes_nothing(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    winner = crypto.seal(
+        SecretToken("winner-canary"), world.ctx("bank_connection"), key=SecretStr(world.new)
+    )
+    hook = _drift(
+        [winner],
+        "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
+        {"i": world.connection_id},
+    )
+    counts = await run(factory, world, hook)
+    assert counts.clean and counts.conflicted == 0
+    assert read(app_engine, world, "bank_connection") == winner
+
+
+async def test_second_failed_swap_is_a_conflict_and_leaves_the_row(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    ctx = world.ctx("bank_connection")
+    first, second = bound("w1", world.old, ctx), bound("w2", world.old, ctx)
+    hook = _drift(
+        [first, second],
+        "UPDATE bank_connection SET access_token_enc = :v WHERE id = :i",
+        {"i": world.connection_id},
+    )
+    counts = await run(factory, world, hook)
+    assert counts.conflicted == 1 and not counts.clean
+    assert read(app_engine, world, "bank_connection") == second  # untouched, never re-sealed
+    assert counts.residual == 1
+
+
+async def test_two_concurrent_rotations_leave_one_envelope_with_the_right_plaintext(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    a, b = await asyncio.gather(run(factory, world), run(factory, world))
+    assert a.rotated + b.rotated == 3
+    assert a.failed + b.failed + a.conflicted + b.conflicted == 0
+    for t in TABLES:
+        blob = read(app_engine, world, t)
+        assert blob is not None and world.current(blob, t)
+        assert world.opened(blob, t) == world.canaries[CANARY[t]]
+
+
+async def test_plaintext_never_reaches_logs_or_stdout(
+    app_engine: Engine,
+    factory: async_sessionmaker[AsyncSession],
+    world: World,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging()
+    caplog.set_level(logging.DEBUG)
+    write(app_engine, world, "app_user", b"hf2.broken")  # exercise the failure path too
+    await run(factory, world)
+    seen = caplog.text + capsys.readouterr().out + capsys.readouterr().err
+    for canary in world.canaries.values():
+        assert canary not in seen
+    assert world.old not in seen and world.new not in seen
+
+
+async def test_cli_run_audits_counts_only_and_signals_unclean(
+    app_engine: Engine,
+    app_url: str,
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.conftest import make_settings
+
+    original = rotation.rotate
+
+    async def only_mine(*a: Any, **kw: Any) -> rotation.Counts:
+        return await original(*a, only=[world.household_id], **kw)
+
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_record(factory: Any, action: str, **kw: Any) -> None:
+        recorded.append({"action": action, **kw})
+
+    settings = make_settings(
+        database_url=SecretStr(app_url), fernet_key=SecretStr(f"{world.new},{world.old}")
+    )
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(rotation, "rotate", only_mine)
+    monkeypatch.setattr(audit, "record", fake_record)
+    assert await rotation._run() == 0
+    assert recorded[0]["action"] == "keys.rotate" and recorded[0]["household_id"] is None
+    assert recorded[0]["outcome"] == "success"
+    assert set(recorded[0]["detail"]) == {
+        "rotated",
+        "already_current",
+        "skipped_null",
+        "failed",
+        "conflicted",
+        "gone",
+        "residual",
+    }
+    assert all(isinstance(v, int) for v in recorded[0]["detail"].values())
+    assert "remove retired keys" in capsys.readouterr().out
+    write(app_engine, world, "app_user", b"junk")
+    assert await rotation._run() == 1
+    assert recorded[1]["outcome"] == "failure"
+
+
+async def test_cli_refuses_a_duplicate_key_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import make_settings
+
+    key = crypto.generate_key()
+    settings = make_settings(fernet_key=SecretStr(f"{key},{key}"))
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    assert await rotation._run() == 2
+
+
+def test_runtime_role_is_still_not_superuser_and_has_no_bypassrls(app_engine: Engine) -> None:
+    with app_engine.connect() as c:
+        row = c.execute(
+            text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        ).one()
+    assert tuple(row) == (False, False)
+
+
+async def test_household_with_no_user_is_rotated_not_skipped(
+    app_engine: Engine,
+    owner_engine: Engine,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """L1: enumeration goes through list_household_ids(), not app_user."""
+    old, new = crypto.generate_key(), crypto.generate_key()
+    ring = crypto.load_ring(SecretStr(f"{new},{old}"))
+    canary = f"orphan-{secrets.token_hex(10)}"
+    with app_engine.begin() as c:
+        hid = c.execute(text("SELECT create_household('Example Userless')")).scalar_one()
+        set_ctx(c, hid, wide=True)
+        c.execute(
+            text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
+            {
+                "h": hid,
+                "v": bound(
+                    canary, old, crypto.make_context(hid, "household_setting", "value_enc", "k")
+                ),
+            },
+        )
+    try:
+        ctx = crypto.make_context(hid, "household_setting", "value_enc", "k")
+        counts = await rotation.rotate(factory, ring, only=[hid])
+        assert (counts.rotated, counts.residual, counts.failed) == (1, 0, 0)
+        with app_engine.begin() as c:
+            set_ctx(c, hid, wide=True)
+            blob = bytes(
+                c.execute(
+                    text("SELECT value_enc FROM household_setting WHERE household_id = :h"),
+                    {"h": hid},
+                ).scalar_one()
+            )
+        assert crypto.is_current(blob, ring, bound=True)
+        assert blob.startswith(b"hf2.")
+        assert crypto.open_with(blob, ring, ctx).reveal() == canary
+    finally:
+        delete_household(owner_engine, hid)
+
+
+async def test_userless_household_with_an_unopenable_row_shows_as_failed_and_residual(
+    app_engine: Engine,
+    owner_engine: Engine,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ring = crypto.load_ring(SecretStr(crypto.generate_key()))
+    with app_engine.begin() as c:
+        hid = c.execute(text("SELECT create_household('Example Userless 2')")).scalar_one()
+        set_ctx(c, hid, wide=True)
+        c.execute(
+            text("INSERT INTO household_setting (household_id, key, value_enc) VALUES (:h,'k',:v)"),
+            {"h": hid, "v": legacy("x", crypto.generate_key())},  # a key not in the ring
+        )
+    try:
+        counts = await rotation.rotate(factory, ring, only=[hid])
+        assert counts.failed == 1 and counts.residual == 1 and not counts.clean
+    finally:
+        delete_household(owner_engine, hid)
+
+
+async def test_rotator_engine_hides_bound_parameters(app_url: str) -> None:
+    """L3: a chained SQLAlchemy error must not carry ciphertext bind values.
+
+    Every engine hides bind parameters now (``app.db.create_engine``), so there is no louder
+    default engine left to compare against.
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.db import create_engine
+    from tests.conftest import make_settings
+
+    settings = make_settings(database_url=SecretStr(app_url))
+    canary = b"hf1.0123456789abcdef.gAAAACIPHERCANARY"
+    engine = create_engine(settings)
+    try:
+        with pytest.raises(SQLAlchemyError) as ei:
+            async with engine.begin() as c:
+                await c.execute(
+                    text("UPDATE no_such_table SET x = :new WHERE x = :old"),
+                    {"new": canary, "old": b"gAAAAOLDCIPHERCANARY"},
+                )
+        assert "CIPHERCANARY" not in str(ei.value)
+        assert "CIPHERCANARY" not in repr(ei.value)
+    finally:
+        await engine.dispose()
+
+
+async def test_cli_audits_a_failure_row_when_rotate_raises(
+    app_url: str,
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.conftest import make_settings
+
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_record(factory: Any, action: str, **kw: Any) -> None:
+        recorded.append({"action": action, **kw})
+
+    async def boom(factory: Any, ring: Any, *, counts: rotation.Counts, **kw: Any) -> Any:
+        counts.rotated = 3
+        raise RuntimeError("db went away: ciphertext-should-not-be-printed")
+
+    settings = make_settings(
+        database_url=SecretStr(app_url), fernet_key=SecretStr(f"{world.new},{world.old}")
+    )
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(rotation, "rotate", boom)
+    monkeypatch.setattr(audit, "record", fake_record)
+    assert await rotation._run() == 1
+    assert recorded[0]["action"] == "keys.rotate" and recorded[0]["outcome"] == "failure"
+    assert recorded[0]["detail"]["rotated"] == 3
+    assert recorded[0]["detail"]["reason"] == "aborted:RuntimeError"
+    out = capsys.readouterr()
+    assert "should-not-be-printed" not in out.out + out.err
+
+
+async def test_cli_audits_a_failure_row_for_a_bad_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import make_settings
+
+    recorded: list[dict[str, Any]] = []
+
+    async def fake_record(factory: Any, action: str, **kw: Any) -> None:
+        recorded.append({"action": action, **kw})
+
+    key = crypto.generate_key()
+    settings = make_settings(fernet_key=SecretStr(f"{key},{key}"))
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit, "record", fake_record)
+    assert await rotation._run() == 2
+    assert recorded[0]["outcome"] == "failure" and recorded[0]["detail"]["reason"] == "bad_ring"
+    assert recorded[0]["detail"]["rotated"] == 0
+
+
+async def test_audit_write_failure_does_not_mask_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import make_settings
+
+    async def broken(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("audit down")
+
+    key = crypto.generate_key()
+    settings = make_settings(fernet_key=SecretStr(f"{key},{key}"))
+    monkeypatch.setattr(rotation, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit, "record", broken)
+    assert await rotation._run() == 2
+
+
+async def test_moved_hf2_rows_are_refused_and_left_unchanged(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    """A blob sealed for another household, row, column or name fails the row, bytes untouched."""
+    other = uuid.uuid4()
+    foreign = {
+        "household_setting": [
+            crypto.make_context(other, "household_setting", "value_enc", "k"),
+            crypto.make_context(world.household_id, "household_setting", "value_enc", "other"),
+            crypto.make_context(world.household_id, "household_setting", "extra", "k"),
+        ],
+        "bank_connection": [
+            crypto.make_context(
+                other, "bank_connection", "access_token_enc", str(world.connection_id)
+            ),
+            crypto.make_context(world.household_id, "bank_connection", "access_token_enc", "x"),
+            crypto.make_context(
+                world.household_id, "household_setting", "value_enc", str(world.connection_id)
+            ),
+        ],
+    }
+    for table, ctxs in foreign.items():
+        for bad in ctxs:
+            blob = crypto.seal(SecretToken("moved-canary"), bad, key=SecretStr(world.new))
+            write(app_engine, world, table, blob)
+            counts = await run(factory, world)
+            assert counts.failed >= 1 and counts.residual >= 1 and not counts.clean
+            assert read(app_engine, world, table) == blob
+            write(app_engine, world, table, bound("fix", world.old, world.ctx(table)))
+            assert (await run(factory, world)).failed == 0
+
+
+async def test_hf2_in_the_totp_column_fails_and_totp_stays_hf1(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    blob = crypto.seal(
+        SecretToken("x"),
+        crypto.make_context(world.household_id, "app_user", "totp_secret_enc", str(world.user_id)),
+        key=SecretStr(world.new),
+    )
+    write(app_engine, world, "app_user", blob)
+    counts = await run(factory, world)
+    assert counts.failed == 1 and read(app_engine, world, "app_user") == blob
+
+
+async def test_live_link_token_is_resealed_and_counted_by_the_residual_scan(
+    app_engine: Engine, factory: async_sessionmaker[AsyncSession], world: World
+) -> None:
+    """``plaid_link_slot.link_token_enc`` is a rotator target (ADR 0015 section 2)."""
+    slot_id = uuid.uuid4()
+    ctx = crypto.make_context(world.household_id, "plaid_link_slot", "link_token_enc", str(slot_id))
+    canary = f"link-sandbox-{secrets.token_hex(8)}"
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        c.execute(
+            text(
+                "INSERT INTO plaid_link_slot (id, household_id, client_fp, env, state,"
+                " link_token_enc, created_by_user_id) VALUES (:i,:h,:f,'sandbox','reserved',:v,:u)"
+            ),
+            {
+                "i": slot_id,
+                "h": world.household_id,
+                "f": "0123456789abcdef",
+                "v": bound(canary, world.old, ctx),
+                "u": world.user_id,
+            },
+        )
+        # A resolved row has no token: NULL is skipped, never an error.
+        c.execute(
+            text(
+                "INSERT INTO plaid_link_slot (household_id, client_fp, env, state, resolved_at,"
+                " created_by_user_id) VALUES (:h,:f,'sandbox','abandoned',now(),:u)"
+            ),
+            {"h": world.household_id, "f": "0123456789abcdef", "u": world.user_id},
+        )
+    counts = await run(factory, world)
+    assert (counts.rotated, counts.failed, counts.residual) == (4, 0, 0)
+    assert counts.skipped_null >= 1
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        blob = bytes(
+            c.execute(
+                text("SELECT link_token_enc FROM plaid_link_slot WHERE id = :i"), {"i": slot_id}
+            ).scalar_one()
+        )
+    assert blob.startswith(f"hf2.{crypto.key_id(world.new)}.".encode())
+    assert crypto.open_with(blob, world.ring, ctx).reveal() == canary
+    # A token sealed for another row fails the row and shows up as residual.
+    other = crypto.make_context(world.household_id, "plaid_link_slot", "link_token_enc", "x")
+    with pytest.raises(crypto.CryptoError):
+        crypto.open_with(blob, world.ring, other)
+    with app_engine.begin() as c:
+        set_ctx(c, world.household_id, wide=True)
+        c.execute(
+            text("UPDATE plaid_link_slot SET link_token_enc = :v WHERE id = :i"),
+            {"v": bound(canary, world.old, other), "i": slot_id},
+        )
+    broken = await run(factory, world)
+    assert broken.failed >= 1 and broken.residual >= 1 and not broken.clean

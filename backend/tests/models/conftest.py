@@ -61,7 +61,13 @@ HOUSEHOLD_TABLES = (
     "agent_message",
     "agent_finding",
     "job_run",
+    "import_run",
+    "sync_run",
 )
+# Connector tables (0011). Household-scoped and RLS-forced like the rest, but not seeded by
+# ``seed_household``: their own suite is ``test_connector_link*.py`` (the slot ledger has no
+# DELETE grant, so the generic DML tests don't apply to it).
+CONNECTOR_TABLES = ("connector_account_link", "plaid_link_slot", "account_coverage")
 IDENTITY_TABLES = ("app_user", "webauthn_credential", "auth_session", "totp_recovery_code")
 REFERENCE_TABLES = ("institution", "security")
 ACCOUNT_DETAIL_TABLES = (
@@ -74,6 +80,7 @@ ACCOUNT_DETAIL_TABLES = (
 CONTRACT_TABLES = (
     "household",
     *HOUSEHOLD_TABLES,
+    *CONNECTOR_TABLES,
     *IDENTITY_TABLES,
     *REFERENCE_TABLES,
     "audit_log",
@@ -248,9 +255,15 @@ def seed_household(engine: Engine, label: str) -> Seed:
             as_of_date=date(2026, 1, 31),
             current=Decimal("1234.56"),
         )
-        cat = _insert(c, "category", **h, name="Groceries", kind="expense")
+        cat = _insert(c, "category", **h, slug="custom.groceries", name="Groceries", kind="expense")
         rule = _insert(
-            c, "rule", **h, match={"merchant_regex": "EXAMPLE MART"}, set={"category_id": str(cat)}
+            c,
+            "rule",
+            **h,
+            author_person_id=p1,
+            category_id=cat,
+            name="Example Mart",
+            conditions={"v": 1, "merchant": {"mode": "contains", "value": "EXAMPLE MART"}},
         )
         doc = _insert(
             c,
@@ -260,8 +273,10 @@ def seed_household(engine: Engine, label: str) -> Seed:
             kind="receipt",
             filename="receipt.pdf",
             sha256=uuid.uuid4().hex * 2,
-            storage_path=f"/data/documents/{uuid.uuid4()}",
+            # Relative to DOCUMENT_STORE. An absolute path fails ck_document_storage_path_relative.
+            storage_path=f"receipts/{uuid.uuid4()}.pdf",
             mime="application/pdf",
+            size_bytes=1024,
         )
         txn = _insert(
             c,
@@ -383,6 +398,8 @@ def seed_household(engine: Engine, label: str) -> Seed:
             payload={"household_id": str(hid)},
             max_attempts=3,
         )
+        import_run = _insert(c, "import_run", **h, document_id=doc, account_id=acct)
+        sync_run = _insert(c, "sync_run", **h, bank_connection_id=conn_id)
 
     rows: dict[str, dict[str, Any]] = {
         "person": {"id": p1},
@@ -413,6 +430,8 @@ def seed_household(engine: Engine, label: str) -> Seed:
         "agent_message": {"id": msg},
         "agent_finding": {"id": finding},
         "job_run": {"id": job_run},
+        "import_run": {"id": import_run},
+        "sync_run": {"id": sync_run},
     }
     assert set(rows) == set(HOUSEHOLD_TABLES)
     return Seed(household_id=hid, person_ids=[p1, p2], rows=rows)

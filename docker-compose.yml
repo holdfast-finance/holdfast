@@ -25,6 +25,7 @@ x-backend-env: &backend-env
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
   APP_ENV: ${APP_ENV:-dev}
+  APP_DEPLOYMENT: ${APP_DEPLOYMENT:-}
   E2E_HOOKS: ${E2E_HOOKS:-false}
   APP_BASE_URL: ${APP_BASE_URL:-}
   APP_HOST: ${APP_HOST:-}
@@ -34,6 +35,8 @@ x-backend-env: &backend-env
   DATABASE_URL: ${DATABASE_URL:?set in .env (run make keys)}
   POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
   REDIS_URL: ${REDIS_URL:-}
+  # Filled into REDIS_URL when the URL carries no password (same pattern as POSTGRES_*_PASSWORD).
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env (run make keys-add-missing)}
   DOCUMENT_STORE: ${DOCUMENT_STORE:-}
   PLAID_ENV: ${PLAID_ENV:-sandbox}
   PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:-}
@@ -120,20 +123,41 @@ services:
     image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe # redis:7-alpine
     # The entrypoint chowns /data and drops to `redis` via su-exec.
     cap_add: [CHOWN, SETGID, SETUID]
-    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    # Always authenticated: the dev override publishes it on loopback, and any local process could
+    # otherwise reset lockouts, drop locks or queue jobs. The password comes from the environment.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env (run make keys-add-missing)}
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --appendonly
+      - "no"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set in .env (run make keys-add-missing)}
     read_only: true
     volumes:
       - redisdata:/data
     networks:
       - backend
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # REDISCLI_AUTH keeps the password out of argv. NOAUTH replies exit 0, so match PONG.
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   api:
     <<: *backend
+    # Upload sizing (ADR 0020). Starlette spools each multipart upload to /tmp; at most 2 are read
+    # at once (PARSE_SLOTS), each up to 21 MiB, so 64m holds both with headroom. tmpfs pages count
+    # against mem_limit. 1536m = ~150 MB idle API + 2 concurrent PDF parses (pdfplumber builds an
+    # object tree per page; budgeted ~500 MB each for a 20 MiB file, an estimate, not a
+    # measurement) + the 64 MB tmpfs, rounded up. Revisit with a measured peak.
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 1536m
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test:
@@ -149,6 +173,33 @@ services:
   worker:
     <<: *backend
     command: ["arq", "app.worker.main.WorkerSettings"]
+
+  # One-off: `make rotate-keys` (dev) / `make rotate-keys-prod`. Runs as holdfast_app (DATABASE_URL), never the owner or admin
+  # role, with the same FERNET_KEY ring as api/worker. Not started by `up` (profile). ADR 0015.
+  rotate-keys:
+    <<: *hardening
+    restart: "no"
+    profiles: [tools]
+    image: holdfast-backend:local
+    build: ./backend
+    command: ["python", "-m", "app.security.rotation"]
+    # Minimal env like `migrate`: the rotator needs the app DB role and the key ring, nothing
+    # else (no session secret, no Plaid or exchange credentials, no Redis).
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      APP_ENV: ${APP_ENV:-dev}
+      DATABASE_URL: ${DATABASE_URL:?set in .env (run make keys)}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
+      FERNET_KEY: ${FERNET_KEY:?set in .env (run make keys)}
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
 
   # One-off: `make migrate` (docker compose run --rm migrate). The only container that gets the
   # owner role's credentials. Not started by `up` (profile).

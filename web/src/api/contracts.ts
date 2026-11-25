@@ -55,6 +55,24 @@ export const ERROR_CODES = {
   lastCredential: 'last_credential',
   /** 409: e.g. an email that already belongs to a user, or deleting a person who has a user account. */
   conflict: 'conflict',
+  /** 409: the item is locked by other work (a sync or import touching it). Retry shortly. */
+  busy: 'busy',
+  /** 409: the Link slot phrase, or the owner's own Item count and duplicate check, is missing or wrong. */
+  confirmRequired: 'confirm_required',
+  /** 409: all 10 Plaid Item slots are used (or Plaid says so). There is never an 11th. */
+  noSlotsLeft: 'no_slots_left',
+  /** 409: PLAID_PRODUCTS holds a product Link may not request. Fixed in `.env`, not in the browser. */
+  productNotAllowed: 'product_not_allowed',
+  /** 409: PLAID_TX_DAYS_REQUESTED is not 730. */
+  daysNotAllowed: 'days_not_allowed',
+  /** 409: Sandbox Link refused because real data is already in this household. */
+  sandboxOnRealData: 'sandbox_on_real_data',
+  /** 409: production Link refused while a Sandbox connection is still present. */
+  sandboxConnectionPresent: 'sandbox_connection_present',
+  /** 409: Plaid refused the request. The message carries Plaid's error code only. */
+  plaidError: 'plaid_error',
+  /** 502: Plaid could not be reached or could not confirm. Safe to retry shortly. */
+  plaidUnavailable: 'plaid_unavailable',
   /** 404: the referenced row does not exist in this household. */
   notFound: 'not_found',
   /** 429: login/assertion rate limit or lockout. `message` says when to retry. */

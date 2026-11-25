@@ -1,22 +1,34 @@
 import { useSyncExternalStore } from 'react'
 
-/** Tailwind's `md` breakpoint. Below it the app uses the mobile shell (PLAN 11.1). */
-export const DESKTOP_QUERY = '(min-width: 768px)'
+/**
+ * Below this the app uses the mobile shell (PLAN 11.1). 1024 keeps iPhone landscape (up to 932)
+ * and iPad portrait on the bottom-nav shell, where the 240px sidebar would starve the page.
+ */
+export const DESKTOP_QUERY = '(min-width: 1024px)'
 
-function subscribe(onChange: () => void): () => void {
-  if (typeof window.matchMedia !== 'function') return () => undefined
-  const query = window.matchMedia(DESKTOP_QUERY)
-  query.addEventListener('change', onChange)
-  return () => {
-    query.removeEventListener('change', onChange)
-  }
-}
+/** Room for the sidebar, the accounts aside and a readable list side by side. */
+export const WIDE_QUERY = '(min-width: 1200px)'
 
-function getSnapshot(): boolean {
-  // Mobile-first: without matchMedia, assume the small screen.
-  return typeof window.matchMedia === 'function' && window.matchMedia(DESKTOP_QUERY).matches
+function useMedia(query: string): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      if (typeof window.matchMedia !== 'function') return () => undefined
+      const list = window.matchMedia(query)
+      list.addEventListener('change', onChange)
+      return () => {
+        list.removeEventListener('change', onChange)
+      }
+    },
+    // Mobile-first: without matchMedia, assume the small screen.
+    () => typeof window.matchMedia === 'function' && window.matchMedia(query).matches,
+    () => false,
+  )
 }
 
 export function useIsDesktop(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot, () => false)
+  return useMedia(DESKTOP_QUERY)
+}
+
+export function useIsWide(): boolean {
+  return useMedia(WIDE_QUERY)
 }

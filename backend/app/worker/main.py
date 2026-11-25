@@ -2,7 +2,8 @@
 
 Registered jobs come from ``app/jobs/handlers/`` (ADR 0016). Each is wrapped by
 ``app.jobs.runner.arq_function``: payload validation, the per-household lock, ``job_run`` state
-and retries all happen there, never in arq's own retry logic.
+and retries all happen there, never in arq's own retry logic. ``sweep_stalled_runs`` runs every
+minute and re-pushes runs arq has lost.
 """
 
 from __future__ import annotations
@@ -15,16 +16,34 @@ from arq.connections import RedisSettings
 from app import __version__
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
+from app.integrations.registry import registry as connector_registry
 from app.jobs import queue
 from app.jobs.registry import discover_jobs
-from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function
+from app.jobs.runner import CTX_KEY, RunnerDeps, arq_function, sweep_stalled_runs
 from app.logging import configure_logging, get_logger
+from app.security import crypto
 
 log = get_logger(__name__)
 
-# Each running job holds two pooled connections at most (the household lock and its session);
-# 5 jobs x 2 stays inside SQLAlchemy's default pool (5 + 10 overflow).
+
+class MaskedRedisSettings(RedisSettings):
+    """RedisSettings whose repr never shows the password (arq logs it at startup)."""
+
+    def __repr__(self) -> str:
+        shown = {k: ("***" if k == "password" and v else v) for k, v in self.__dict__.items()}
+        return f"MaskedRedisSettings({shown})"
+
+    @classmethod
+    def from_dsn(cls, dsn: str) -> MaskedRedisSettings:
+        # arq's from_dsn builds a plain RedisSettings, so rebuild it as this class.
+        return cls(**vars(RedisSettings.from_dsn(dsn)))
+
+
+# Each running job holds three pooled connections at most: the household lock, the handler's
+# session and one side session from JobContext.factory (handlers open one at a time). 5 jobs x 3
+# = 15 = SQLAlchemy's default pool (5 + 10 overflow), so a full worker never waits on the pool.
 MAX_JOBS = 5
+CONNECTIONS_PER_JOB = 3
 
 
 async def heartbeat(ctx: dict[str, Any]) -> None:
@@ -34,6 +53,9 @@ async def heartbeat(ctx: dict[str, Any]) -> None:
 
 async def startup(ctx: dict[str, Any]) -> None:
     configure_logging()
+    connector_registry.freeze()  # no registration after startup
+    if (key := get_settings().fernet_key) is not None:
+        crypto.load_ring(key)  # malformed or duplicate keys fail startup
     engine = create_engine(get_settings())
     ctx[CTX_KEY] = RunnerDeps(engine=engine, factory=create_session_factory(engine))
     log.info("worker.startup", version=__version__, jobs=len(discover_jobs()))
@@ -48,11 +70,16 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 class WorkerSettings:
     functions: ClassVar[list[Any]] = [heartbeat, *map(arq_function, discover_jobs())]
-    cron_jobs: ClassVar[list[Any]] = [cron(heartbeat, minute=None, second=0, run_at_startup=True)]
+    cron_jobs: ClassVar[list[Any]] = [
+        cron(heartbeat, minute=None, second=0, run_at_startup=True),
+        cron(sweep_stalled_runs, minute=None, second=30, run_at_startup=True),
+    ]
     on_startup = startup
     on_shutdown = shutdown
-    redis_settings = RedisSettings.from_dsn(get_settings().redis_url.get_secret_value())
-    job_serializer = staticmethod(queue.dumps)
-    job_deserializer = staticmethod(queue.loads)
+    redis_settings = MaskedRedisSettings.from_dsn(get_settings().redis_dsn)
+    # Plain functions, not staticmethod(): arq builds the Worker from this class's __dict__, so a
+    # wrapper would reach it as-is. tests/test_worker.py pins what arq actually receives.
+    job_serializer = queue.dumps
+    job_deserializer = queue.loads
     max_jobs = MAX_JOBS
     health_check_interval = 60

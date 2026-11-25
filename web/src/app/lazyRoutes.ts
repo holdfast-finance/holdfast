@@ -15,6 +15,12 @@ export const SetupPage = lazy(() =>
 export const InvitePage = lazy(() =>
   import('@/pages/auth/InvitePage').then((m) => ({ default: m.InvitePage })),
 )
+export const TransactionsPage = lazy(() =>
+  import('@/pages/transactions/TransactionsPage').then((m) => ({ default: m.TransactionsPage })),
+)
+export const ImportPage = lazy(() =>
+  import('@/pages/import/ImportPage').then((m) => ({ default: m.ImportPage })),
+)
 export const SettingsLayout = lazy(() =>
   import('@/pages/settings/SettingsLayout').then((m) => ({ default: m.SettingsLayout })),
 )
@@ -23,6 +29,14 @@ export const HouseholdSettings = lazy(() =>
 )
 export const SecuritySettings = lazy(() =>
   import('@/pages/settings/SecuritySettings').then((m) => ({ default: m.SecuritySettings })),
+)
+export const ConnectionsSettings = lazy(() =>
+  import('@/pages/settings/ConnectionsSettings').then((m) => ({
+    default: m.ConnectionsSettings,
+  })),
+)
+export const ConnectionsOAuth = lazy(() =>
+  import('@/pages/settings/ConnectionsOAuth').then((m) => ({ default: m.ConnectionsOAuth })),
 )
 /** Step-up prompt: zod + react-hook-form stay out of the entry chunk until it first opens. */
 export const ReauthDialog = lazy(() =>

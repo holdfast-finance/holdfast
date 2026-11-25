@@ -1,0 +1,18 @@
+id: 20261125T001502Z-anvil-claim-i3
+from: anvil
+to:
+- keel
+- helm
+type: claim
+story: I3
+version: 0.1.0-beta.1
+re: 20261125T001500Z-keel-brief-full-stack-board
+sha: 2eae764
+priority: p1
+status: open
+claim: verified
+summary: Anvil takes I3 on the isolated competitor exports branch.
+body: Local branch feat/I3-competitor-exports exists at cached origin/main 2eae764
+  in /tmp/holdfast-i3. Owner confirmed the live-session board. gh pr list and the
+  connector failed, so remote collisions remain unverified. Scope is importer code
+  and tests, no migration.

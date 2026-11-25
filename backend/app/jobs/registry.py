@@ -4,20 +4,24 @@ Declare a job next to the code it drives, in a module under ``app/jobs/handlers/
 automatically, like routers; no hot file to edit)::
 
     class SyncItem(JobPayload):
-        bank_connection_id: uuid.UUID
+        bank_connection_id: Annotated[uuid.UUID, Ref(BankConnection)]
 
     @job("plaid.sync_item", payload=SyncItem, retry=RetryPolicy(max_attempts=5))
     async def sync_item(ctx: JobContext, payload: SyncItem) -> None:
         ...  # ctx.session is household-wide and commits together with the success mark
 
-    # elsewhere (a service):
+    # elsewhere (a service), with the *authenticated* household and person:
     await jobs.enqueue(factory, pool, sync_item, SyncItem(household_id=h, bank_connection_id=c),
-                       idempotency_key=f"sync:{c}:{hour}")
+                       household_id=h, requested_by=person_id, idempotency_key=f"sync:{c}:{hour}")
 
 Payloads are **IDs only**: every field is a ``uuid.UUID`` and ``household_id`` is always present.
-A payload class with any other field type fails at import. Data the job needs (tokens, amounts,
-dates) is loaded from the database by ID inside the job, so nothing sensitive sits in Redis, in
-arq's logs or in ``job_run``. Validation is strict and runs twice: before enqueue and before run.
+Every other field names the household-scoped table its id points into (``Ref``), so enqueue can
+check the requester could write that row themselves, or just see it for ``Ref(Model,
+access="read")`` (ADR 0016, confused deputy). A payload class with any other
+field type, or an id field without exactly one ``Ref``, fails at import. Data the job needs
+(tokens, amounts, dates) is loaded from the database by ID inside the job, so nothing sensitive
+sits in Redis, in arq's logs or in ``job_run``. Validation is strict: before enqueue, and before
+run on the payload stored in ``job_run`` (never the copy in Redis).
 """
 
 from __future__ import annotations
@@ -28,20 +32,26 @@ import pkgutil
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, ClassVar
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import pydantic_core
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db_context import scoped_session
 from app.models._common import (
     IDEMPOTENCY_KEY_MAX,
     IDEMPOTENCY_KEY_PATTERN,
     JOB_NAME_MAX,
     JOB_NAME_PATTERN,
 )
+
+if TYPE_CHECKING:
+    from app.db import Base
 
 HANDLERS_PACKAGE = "app.jobs.handlers"
 
@@ -57,10 +67,49 @@ class InvalidIdempotencyKey(ValueError):
     pass
 
 
+RefAccess = Literal["read", "write"]
+
+
+@dataclass(frozen=True)
+class Ref:
+    """Payload field metadata: this id is a row of ``model``'s household-scoped table.
+
+    Use as ``Annotated[uuid.UUID, Ref(Account)]``. Before anything is recorded, enqueue looks the
+    id up in the requester's own person-scoped session, so RLS decides whether they may name it.
+
+    ``access`` is what the job does to that row, and the default is ``"write"``: enqueue locks
+    the row (``FOR KEY SHARE``), so Postgres applies the table's UPDATE policy as well as its
+    SELECT policy, and a person can only name rows they could write themselves. The worker runs
+    household-wide, so without this a person could get a job to write a row RLS would refuse
+    them (a confused deputy). Use ``Ref(Model, access="read")`` only when the job never writes
+    that row or anything under it; visibility is then the bar.
+    """
+
+    model: type[Base]
+    access: RefAccess = "write"
+
+    def __post_init__(self) -> None:
+        if self.access not in ("read", "write"):
+            raise TypeError(f"Ref access must be 'read' or 'write', not {self.access!r}")
+        table = getattr(self.model, "__table__", None)
+        columns = getattr(table, "c", ())
+        if "id" not in columns or "household_id" not in columns:
+            raise TypeError(
+                f"Ref({getattr(self.model, '__name__', self.model)!r}): needs an ORM model with "
+                "id and household_id columns (a household-scoped table under RLS)"
+            )
+
+
 class JobPayload(BaseModel):
-    """Base for job payloads: frozen, strict, no extra keys, UUID fields only."""
+    """Base for job payloads: frozen, strict, no extra keys, UUID fields only.
+
+    ``household_id`` is always present. Every other field carries exactly one :class:`Ref`;
+    ``refs`` maps those field names to it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    refs: ClassVar[Mapping[str, Ref]] = MappingProxyType({})
 
     household_id: uuid.UUID
 
@@ -75,6 +124,23 @@ class JobPayload(BaseModel):
                 f"{cls.__name__}: job payloads are IDs only (uuid.UUID fields); "
                 f"not allowed: {', '.join(sorted(bad))}"
             )
+        refs: dict[str, Ref] = {}
+        unreferenced: list[str] = []
+        for name, field in cls.model_fields.items():
+            marks = [m for m in field.metadata if isinstance(m, Ref)]
+            if name == "household_id":
+                if marks:
+                    raise TypeError(f"{cls.__name__}: household_id takes no Ref")
+            elif len(marks) == 1:
+                refs[name] = marks[0]
+            else:
+                unreferenced.append(name)
+        if unreferenced:
+            raise TypeError(
+                f"{cls.__name__}: each id field needs exactly one Ref, as "
+                f"Annotated[uuid.UUID, Ref(Model)]: {', '.join(sorted(unreferenced))}"
+            )
+        cls.refs = MappingProxyType(refs)
 
 
 @dataclass(frozen=True)
@@ -122,6 +188,26 @@ class RetryPolicy:
 
 DEFAULT_RETRY = RetryPolicy()
 DEFAULT_TIMEOUT = timedelta(minutes=5)
+# arq's per-function timeout = spec.timeout + this. It covers the bookkeeping around the handler
+# (pool checkout waits up to 30 s, lock, claim, marks); the runner's own timeout fires first.
+ARQ_TIMEOUT_MARGIN = timedelta(seconds=60)
+
+
+@dataclass(frozen=True)
+class HouseholdSessions:
+    """Opens side sessions in one household only: ``async with ctx.factory() as s: ...``.
+
+    Each session is household-wide in ``household_id`` (like ``JobContext.session``), commits on
+    a clean exit and rolls back on error. There is no way to pass another household, so a
+    handler can't open a session outside its run's household by mistake. (Handlers are trusted
+    server code: this guards against slips, not against code that digs out the engine.)
+    """
+
+    _factory: async_sessionmaker[AsyncSession]
+    household_id: uuid.UUID
+
+    def __call__(self) -> AbstractAsyncContextManager[AsyncSession]:
+        return scoped_session(self._factory, self.household_id, None, household_wide=True)
 
 
 @dataclass(frozen=True)
@@ -133,15 +219,28 @@ class JobContext:
     so writes the handler leaves uncommitted land atomically with the success mark: a crash
     before that commit rolls both back and the retry starts clean. Commit earlier (the context
     survives commits) only for progress that must persist across retries, and keep such steps
-    idempotent. ``factory`` opens independent sessions (for example an audit row that must
-    survive a rollback).
+    idempotent. ``factory()`` opens an independent session in the same household (for example
+    an audit row that must survive a rollback); it can't name another household. Open at most
+    one of those at a time: a run's budget is three pooled connections (lock, ``session``, one
+    side session; ``app.worker.main.MAX_JOBS``).
+
+    ``requested_by`` is the person who enqueued the run (``job_run.requested_by``), whose rights
+    enqueue checked the payload against; ``None`` for a system caller or a worker scheduler. It
+    comes from ``job_run``, never from Redis or the payload. ``session`` stays household-wide
+    either way: a handler that must act with the requester's rights opens
+    ``scoped_session(..., household_id, ctx.requested_by)`` itself, and one that enqueues a
+    follow-up passes ``requested_by=ctx.requested_by`` on.
+
+    The handler runs under ``asyncio.timeout(spec.timeout)``. On expiry it is cancelled, its
+    uncommitted writes roll back and the run is retried or failed like any other error.
     """
 
     run_id: uuid.UUID
     household_id: uuid.UUID
     attempt: int
+    requested_by: uuid.UUID | None
     session: AsyncSession
-    factory: async_sessionmaker[AsyncSession]
+    factory: HouseholdSessions
 
 
 type Handler[P: JobPayload] = Callable[[JobContext, P], Awaitable[None]]
@@ -154,6 +253,17 @@ class JobSpec[P: JobPayload]:
     payload: type[P]
     retry: RetryPolicy
     timeout: timedelta
+
+    @property
+    def arq_timeout(self) -> timedelta:
+        """arq's backstop: by then the runner's own timeout has cancelled the handler."""
+        return self.timeout + ARQ_TIMEOUT_MARGIN
+
+    @property
+    def orphan_after(self) -> timedelta:
+        """A ``running`` row older than this (by ``started_at``) can't be live work: arq's
+        backstop has cancelled it. Only then may a claim take it over (ADR 0016)."""
+        return self.arq_timeout
 
     def validate(self, payload: P | Mapping[str, Any]) -> P:
         """Strictly re-validate ``payload`` (a model or a plain mapping) as this job's schema.

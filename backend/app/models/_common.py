@@ -62,7 +62,8 @@ TAX_TREATMENTS = ("taxable", "traditional", "roth", "hsa")
 ACCOUNT_VISIBILITIES = ("private", "shared", "summary_only")
 TRANSACTION_SOURCES = ("plaid", "simplefin", "import", "manual")
 CATEGORY_SOURCES = ("rule", "plaid", "ml", "user")
-CATEGORY_KINDS = ("income", "expense", "transfer", "savings")
+CATEGORY_KINDS = ("income", "expense", "transfer", "savings", "excluded")
+CATEGORY_ORIGINS = ("system", "user")
 CREATED_BY = ("user", "agent")
 INVESTMENT_TXN_TYPES = ("buy", "sell", "cancel", "cash", "fee", "transfer")
 BUDGET_PERIODS = ("monthly", "biweekly", "annual")
@@ -75,11 +76,46 @@ CONVERSATION_KINDS = ("chat", "monthly_review", "year_end")
 MESSAGE_ROLES = ("system", "user", "assistant", "tool")
 FINDING_STATUSES = ("open", "accepted", "dismissed", "done")
 FINDING_SEVERITIES = ("info", "low", "medium", "high")
-BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected")
+# ``pending_setup``: linked, token sealed, nothing ingested until the owner maps its accounts
+# (ADR 0033). Every scheduled job skips it.
+BANK_CONNECTION_STATUSES = ("active", "needs_relink", "error", "disconnected", "pending_setup")
 LIABILITY_KINDS = ("credit", "student", "mortgage", "auto", "personal", "other")
 FILING_STATUSES = ("single", "mfj", "mfs", "hoh", "qss")
 DOCUMENT_PARSE_STATUSES = ("pending", "parsed", "needs_review", "failed")
 JOB_RUN_STATUSES = ("queued", "running", "retrying", "succeeded", "failed")
+# Import and sync runs (ADR 0017).
+IMPORT_RUN_STATUSES = ("queued", "running", "succeeded", "failed")
+# pending -> reconciled | needs_review; needs_review -> accepted (attributed). Enforced by the
+# ``import_run_guard`` trigger; ``accepted`` is never written on insert.
+RECONCILE_STATUSES = ("pending", "reconciled", "needs_review", "accepted")
+SYNC_RUN_STATUSES = ("running", "succeeded", "failed")
+# Connectors (Phase 2, ADRs 0033 and 0034).
+# What happens to one connector account: waiting for the owner, landing in an account, or never.
+CONNECTOR_LINK_STATES = ("pending", "mapped", "ignored")
+# The Plaid slot ledger. Only ``abandoned`` stops counting against the client's 10 Items.
+PLAID_SLOT_STATES = ("reserved", "linked", "abandoned", "unknown")
+# 16 lowercase hex characters of SHA-256 of a Plaid client id: tells clients apart, reveals none.
+CLIENT_FP_PATTERN = "^[0-9a-f]{16}$"
+# A short machine code (a connector status such as ``con.auth``, a ledger flag such as
+# ``second_public_token``), never a message: no spaces or quotes, so free text can't be stored.
+CODE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+CODE_MAX = 64
+# Statement reconciliation tolerance in currency units: |closing - (opening + sum)| <= 0.01.
+RECONCILE_TOLERANCE_SQL = "0.01"
+# An exception class name (optionally dotted), never a message: no spaces, quotes or colons, so
+# text that might carry a token or account number can't be stored as an "error class".
+ERROR_CLASS_PATTERN = r"^[A-Za-z_][A-Za-z0-9_.]*$"
+ERROR_CLASS_MAX = 200
+# A bank-profile id such as ``first_example_bank.checking`` (``profiles/*.yaml``).
+PROFILE_ID_PATTERN = r"^[a-z0-9][a-z0-9_.-]*$"
+PROFILE_ID_MAX = 100
+# A document's location *relative to* DOCUMENT_STORE: slash-separated segments that each start
+# with a letter or digit. No leading slash, no ``.`` / ``..`` segments, no backslashes, so a stored
+# path can never point outside the store.
+STORAGE_PATH_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+STORAGE_PATH_MAX = 512
+# Lower-case hex SHA-256 (document hashes and import fingerprints).
+SHA256_HEX_PATTERN = "^[0-9a-f]{64}$"
 
 # Job framework (ADR 0016). Shared by the ``job_run`` CHECKs and the Python-side validation, so
 # both reject the same strings. POSIX and Python ``re`` read these identically.
@@ -116,6 +152,28 @@ DOCUMENT_KINDS = (
     "export",
     "other",
 )
+
+
+def is_valid_storage_path(value: str) -> bool:
+    """Python twin of ``ck_document_storage_path_relative``: a path inside DOCUMENT_STORE."""
+    return len(value) <= STORAGE_PATH_MAX and re.fullmatch(STORAGE_PATH_PATTERN, value) is not None
+
+
+def check_error_class(column: str = "error_class") -> CheckConstraint:
+    """The column holds an exception class name or NULL, never a message (hard rule 3)."""
+    return CheckConstraint(
+        f"{column} IS NULL OR (length({column}) <= {ERROR_CLASS_MAX}"
+        f" AND {column} ~ '{ERROR_CLASS_PATTERN}')",
+        name=f"{column}_is_class_name",
+    )
+
+
+def check_code(column: str) -> CheckConstraint:
+    """The column holds a short machine code or NULL (``CODE_PATTERN``), never free text."""
+    return CheckConstraint(
+        f"{column} IS NULL OR (length({column}) <= {CODE_MAX} AND {column} ~ '{CODE_PATTERN}')",
+        name=f"{column}_is_code",
+    )
 
 
 def check_in(column: str, values: tuple[str, ...], *, nullable: bool = False) -> CheckConstraint:

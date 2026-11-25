@@ -36,7 +36,7 @@ the plan is `docs/planning/ROADMAP.md` and the sprint log `docs/planning/SPRINTS
 Commits: Conventional Commits (`feat(plaid): …`, `fix(import): …`, `docs: …`, `chore: …`, `test: …`).
 Explain *why* in the body. **Attribution:** end every commit with
 `Co-Authored-By: <Agent> (Holdfast) <agents@holdfastfinance.app>` and PRs with `— <Agent>, Holdfast`.
-Never credit a model vendor. Remote: `holdfast-finance/holdfast` (private). Never force-push or rewrite `main`.
+Never credit a model vendor. Remote: `holdfast-finance/holdfast` (public). Never force-push or rewrite `main`.
 
 ## Commands
 
@@ -76,7 +76,7 @@ Docker Compose for services.
 6. **Imports are idempotent.** Every statement reconciles (opening + Σ txns = closing ± $0.01) or
    gets flagged `needs_review`. Never silently accept an unreconciled statement.
 7. **Every new module gets tests.** Fixtures are synthetic or sanitized. Real statements, credit
-   reports, tax forms and exports never go in the repo.
+   reports, tax forms and exports never go in the repo: they stay in a private directory outside it (ADR 0019).
 8. **Migrations go through Alembic only.** No manual schema edits. Every table with household data
    carries `household_id` and an RLS policy. The app connects as `holdfast_app` (no superuser, no
    BYPASSRLS), and migrations run as `holdfast_owner` (ADR 0007). Never give the app role DDL.
@@ -120,6 +120,25 @@ Docker Compose for services.
 - **Hooks** (`.claude/hooks/`): `guard-secrets.sh` blocks writes that contain real-looking
   secrets, seed phrases or files under `data/`, `.env` and `secrets/`. `format.sh` formats edited
   Python/TS files once the toolchains exist.
+- **Other vendors' CLIs (Codex as Anvil, Grok as Helm):** live sessions the owner opens and controls
+  may run unconfined and both build on their own branches (ADR 0039, `docs/process/TRIAD.md`). Reach
+  is not use: no session opens the private data directory without a brief from Keel or the owner
+  (`.claude/rules/security.md`). Only Keel merges. Headless jobs Keel launches go only through `firstchair`,
+  never their raw CLIs. The full command and flag reference, and when to use `delegate`, `conduct`
+  and `run`, is `docs/process/FIRSTCHAIR.md`: read it before the first dispatch of a session. The
+  rules that matter most:
+  - Start every Codex or Grok worker, read or write, through `scripts/fc-delegate.sh` (same
+    arguments as `firstchair delegate run`). It adds `--confine` and every required `--hide`
+    (private data directory per ADR 0019, container sockets, session bus, systemd user manager,
+    keyring) and refuses to start if confinement cannot be proven. `conduct` cannot confine, so a
+    score uses only the `claude` and `self` seats here.
+  - Headless: Codex writes, Grok reads. Never pass `--allow-grok-write` (the wrapper refuses it).
+  - Workers never commit, push or merge. Keel applies the diff (`delegate apply --to <worktree>`),
+    runs the suite itself, commits with the agent's trailer, then `delegate finish`.
+  - Their reviews are second opinions and never satisfy `review-gate`.
+  - Pass one `--session <id>` on every call, check `firstchair auth usage --refresh` before a
+    sprint, and use `--rotate-accounts`. `--base <ref>` reviews a PR branch; `--model` and
+    `--effort` work only with an explicit seat, not `auto`.
 - **Plugins:** pyright-lsp, typescript-lsp, security-guidance, frontend-design, pr-review-toolkit,
   commit-commands, claude-md-management, context7 (library docs), playwright (UI checks).
 
@@ -129,4 +148,4 @@ Docker Compose for services.
 - Plaid Transactions gives about 24 months, so older history comes from statement import.
 - No consumer credit-bureau API exists. Use manual AnnualCreditReport.com PDF import only, with no scraping.
 - HWI is winding down (Aug 2026). Never build signing on server-side USB.
-- Never run anything on county-owned hardware or over the county VPN (PLAN Section 0).
+- Never run anything on employer-owned hardware or over an employer VPN (PLAN Section 0).

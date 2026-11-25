@@ -14,6 +14,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -24,6 +25,7 @@ from app.models._common import (
     BANK_CONNECTION_STATUSES,
     BANK_ENVS,
     BANK_PROVIDERS,
+    CLIENT_FP_PATTERN,
     TAX_TREATMENTS,
     UUIDPK,
     CreatedAt,
@@ -53,6 +55,10 @@ class BankConnection(Base):
     """A linked Plaid Item or SimpleFIN connection (replaces PLAN 5 ``plaid_item``).
 
     ``access_token_enc`` is Fernet ciphertext. Never log or return it.
+
+    ``client_fp`` (Plaid only) is the fingerprint of the Plaid client id that created the Item
+    (ADR 0034): Items belong to their client, so a changed client id is detected at use time.
+    ``pending_setup``: linked, but nothing is ingested until the owner maps its accounts.
     """
 
     __tablename__ = "bank_connection"
@@ -60,6 +66,9 @@ class BankConnection(Base):
         check_in("provider", BANK_PROVIDERS),
         check_in("env", BANK_ENVS),
         check_in("status", BANK_CONNECTION_STATUSES),
+        CheckConstraint(
+            f"client_fp IS NULL OR client_fp ~ '{CLIENT_FP_PATTERN}'", name="client_fp_format"
+        ),
         UniqueConstraint("provider", "external_id"),
         parent_key(),
     )
@@ -78,6 +87,7 @@ class BankConnection(Base):
     error_code: Mapped[str | None]
     consent_expires_at: Mapped[datetime | None]
     tx_cursor: Mapped[str | None]
+    client_fp: Mapped[str | None]
     last_synced_at: Mapped[datetime | None]
     last_success_at: Mapped[datetime | None]
     last_error_at: Mapped[datetime | None]
@@ -94,6 +104,13 @@ class Account(Base):
     summary_only account is read-only to the other people in the household.
 
     ``mask`` holds at most four digits. Full account numbers are never stored.
+
+    **Statement key and adoption** (ADR 0033). ``statement_key`` is the statement importer's key
+    (profile, last four digits, block hash), unique per household and fixed once set. Statement
+    import finds its account by this key whatever the account's ``source``, so a statement
+    re-imported after a connector adopted the account lands on the same row. Adoption turns an
+    ``import`` account into a ``plaid`` / ``simplefin`` one in place and stamps ``adopted_at``;
+    the ``account_guard_source`` trigger allows exactly that change and its reverse (un-adopt).
     """
 
     __tablename__ = "account"
@@ -109,6 +126,24 @@ class Account(Base):
         # private account never silently turns joint. Household deletes still cascade.
         child_fk("owner_person_id", "person", ondelete="NO ACTION"),
         UniqueConstraint("bank_connection_id", "external_account_id"),
+        # Imported accounts have no connection, so the key above never fires for them. The
+        # statement key stays with the account through adoption.
+        UniqueConstraint("household_id", "statement_key"),
+        CheckConstraint(
+            "adopted_at IS NULL OR (statement_key IS NOT NULL"
+            " AND source IN ('plaid', 'simplefin'))",
+            name="adopted_is_connected",
+        ),
+        # Only an imported (or adopted) account carries a statement key, and every imported one
+        # does. With the trigger (no key set after insert, none on a non-import insert) no other
+        # account can take a statement's key and capture its later imports.
+        CheckConstraint(
+            "source <> 'import' OR statement_key IS NOT NULL", name="import_has_statement_key"
+        ),
+        CheckConstraint(
+            "statement_key IS NULL OR source = 'import' OR adopted_at IS NOT NULL",
+            name="statement_key_is_imported",
+        ),
         parent_key(),
     )
 
@@ -118,6 +153,10 @@ class Account(Base):
     owner_person_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     # Plaid account_id / SimpleFIN account id, unique per connection.
     external_account_id: Mapped[str | None]
+    # The statement importer's key; NULL for accounts no statement created.
+    statement_key: Mapped[str | None]
+    # When a connector adopted this imported account; NULL otherwise (and after un-adopt).
+    adopted_at: Mapped[datetime | None]
     source: Mapped[str]
     name: Mapped[str]
     official_name: Mapped[str | None]
@@ -146,6 +185,10 @@ class BalanceSnapshot(Base):
     - ``limit_amt``: the credit limit as a positive magnitude (CHECK ``>= 0``).
 
     Written only by the account's owner, for joint accounts, or by household-wide jobs.
+
+    ``bank_connection_id`` is set on connector-written snapshots only (statement import writes
+    none), so un-adopt deletes exactly the connector's snapshots (ADR 0033 §5). Deleting the
+    connection clears it and keeps the history.
     """
 
     __tablename__ = "balance_snapshot"
@@ -156,12 +199,15 @@ class BalanceSnapshot(Base):
             ["account.id", "account.household_id"],
             ondelete="CASCADE",
         ),
+        child_fk("bank_connection_id", "bank_connection", ondelete="SET NULL"),
         Index("ix_balance_snapshot_as_of_date", "as_of_date"),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     as_of_date: Mapped[date] = mapped_column(primary_key=True)
     household_id: Mapped[HouseholdId]
+    # The connection that wrote this snapshot; NULL for manual and pre-Phase-2 rows.
+    bank_connection_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     current: Mapped[Money | None] = mapped_column(
         comment="Assets positive; credit/loan negative = owed (Plaid negated on ingest)."
     )
@@ -169,4 +215,50 @@ class BalanceSnapshot(Base):
         comment="Spendable / drawable now, as reported (positive; remaining credit for cards)."
     )
     limit_amt: Mapped[Money | None] = mapped_column(comment="Credit limit, positive magnitude.")
+    created_at: Mapped[CreatedAt]
+
+
+class AccountCoverage(Base):
+    """A date interval of an adopted account that statements already cover (ADR 0035 §1).
+
+    Written in the adoption unit of work (one row per reconciled run, plus the runs of twins
+    being closed; overlapping intervals merged), deleted by un-adopt. A posted connector row
+    dated inside an interval (inclusive) is skipped, so coverage decides which connector rows
+    reach the ledger.
+
+    RLS follows the account's detail tables: reading needs the account's details to be visible
+    (not summary_only for someone else), and writing needs the account to be writable (owner,
+    joint) or a household-wide session. So nobody can read another person's coverage or add
+    coverage that hides their connector rows.
+
+    ``source_import_run_id`` is the run the interval came from, NULL for a merged interval or
+    once that run is deleted (coverage is fixed at adoption, so the interval stays).
+    """
+
+    __tablename__ = "account_coverage"
+    __table_args__ = (
+        child_fk("account_id", "account"),
+        child_fk("source_import_run_id", "import_run", ondelete="SET NULL"),
+        CheckConstraint("start_date <= end_date", name="period_order"),
+        CheckConstraint("start_date >= DATE '1990-01-01'", name="start_plausible"),
+        # Coverage is statements already imported: it can't reach past the day it was written.
+        CheckConstraint(
+            "end_date <= (created_at AT TIME ZONE 'UTC')::date", name="not_after_written"
+        ),
+        # Intervals are merged at adoption, so one account's never overlap (btree_gist).
+        ExcludeConstraint(
+            ("account_id", "="),
+            (text("daterange(start_date, end_date, '[]')"), "&&"),
+            using="gist",
+            name="ex_account_coverage_no_overlap",
+        ),
+        Index("ix_account_coverage_account_id_start_date", "account_id", "start_date"),
+    )
+
+    id: Mapped[UUIDPK]
+    household_id: Mapped[HouseholdId]
+    account_id: Mapped[uuid.UUID]
+    start_date: Mapped[date]
+    end_date: Mapped[date]
+    source_import_run_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     created_at: Mapped[CreatedAt]

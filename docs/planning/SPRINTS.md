@@ -50,6 +50,140 @@ Process notes from W1:
 
 Notes: Codex ran its own setup in the main checkout (uncommitted `AGENTS.md` edit, `.codex/`, `.agents/`). Untouched by Keel; reconcile with #8 (which owns AGENTS.md) next window, and read `.codex/hooks/patch.py` before committing any of it.
 
+### Checkpoint 2026-11-20 — owner stop and usage limit
+
+`main` was at `0633604`. Merged in this window: #18, #21, #17, #19, #20, #22, #23, #25, #24, #26.
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| F3c MoneyStr, PriceStr, QuantityStr | #27 | money review APPROVE, then merged `2b4a61e` | — |
+| F7b free-tier main guard | #16 | open, Harbor fixed Bulwark's empty-listing finding | Bulwark re-review, then land |
+| S0 statement sanitizer | #29 | merged `7916e34` | — |
+| F5c secret resolver and rotation | #31 | open, conflicted with main at the stop | merge main, rerun suite, Bulwark |
+| F6 import and sync runs | #28 | merged `6a6c8fa` | — |
+| F2b job hardening | #32 | open | Bulwark |
+| Codex and Grok onboarding | #8 | open, conflicting | reconcile into one PR, Bulwark |
+| Dependabot #11 to #14 | — | closed | — |
+
+### Checkpoint 2026-11-21 — `main` at `733132e`
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| I1 PDF statement import, I1b, I1c, I5b upload API | #40, #41, #48, #46, #55 | merged | follow-ups below |
+| U1 accounts and transactions read API and screen | #42 | merged | — |
+| C1 one ledger writer | #44 | merged | — |
+| I2a CSV and OFX/QFX parsers (pure) | #45 | merged | wire into the import service |
+| C2 category tree and Plaid mapping | #47 | merged | — |
+| I5 import wizard, needs-review queue, I5c stored reason | #49, #57 | merged | web follow-ups |
+| C5a recurring detection (pure), C5a-2 | #52, #58 | merged | storage, job and screen; off the event loop |
+| C3a rules matcher (pure) | #53 | merged | C3b needs an ADR for a linear-time regex engine first |
+| C4 transfer pairing | #50 | merged, not wired (a guard test blocks callers) | C6 stores suggestions per person under RLS |
+| ADR 0021 zero-config private access | #51 | merged as Proposed | owner checks, then Accepted |
+| Phase 4 wiring contract | #59 | open | Gadfly, Bulwark, then slices |
+| P3 Plaid client and checklist | #56 | open, other lane | that lane decides |
+| F5c, F7b, F2b | #31, #16, #32 | open | as above |
+
+Queued follow-ups:
+- Import: freeze `review_reason` in `import_run_guard`; report an ignored profile; an audited re-import action; balance-only documents that stay latched; year ambiguity in periods of 11 months or more.
+- Web: copy for a balanced run with no reason; unknown result codes; Retry error text; the shell remount that drops the result card.
+- Guard tests for `app.household_wide`; ADR 0021 open points.
+- Docs: this refresh. ADR 0031 names the dependencies that had none.
+
+Process notes:
+- `firstchair delegate` bases the worktree on the checkout it runs from. Pass `--repo` for work on a PR branch.
+- Codex cannot run database tests or `pnpm`. Keel applies its patch and runs the suite. Reviewers rerun with their own data.
+- A Grok review is a second opinion. It does not satisfy `review-gate`.
+
+### Checkpoint 2026-11-21 evening — live instance upgraded
+This is the record for the PHASE-4 contract's standing redeploy rule (§7.1, §7.5). It replaces the
+earlier "blocked: live instance upgrade waits on the owner".
+
+**Go-ahead.** On 2026-11-21 the owner asked to "hook up every connector with our data so i can view
+it on my phone". Keel took that as the go-ahead the earlier checkpoint was waiting for. The owner
+also confirmed that day that this laptop is the long-term host.
+
+**Upgrade 1** (to `main` as it stood that evening):
+- Dump: `holdfast-pre-main-upgrade-20261121T211306.dump`, in the private backups directory. It
+  covers 39 tables of data.
+- Commands: `make up`, then `make migrate`, which ran 0008 and 0009.
+- `alembic current`: `0009_import_run_review_reason (head)`.
+- Counts before and after were unchanged: 3,345 transactions, 9 accounts, 109 import runs.
+- The tailnet URL answered 200.
+
+**Upgrade 2** (after #32 merged):
+- Dump: `holdfast-pre-0010-20261121T224905.dump`, in the same directory.
+- Migration 0010 applied. `alembic current`: `0010_list_household_ids (head)`.
+- Counts were the same as above. The tailnet URL answered 200.
+- Re-running the statement loader over all 125 PDFs inserted 0 rows (idempotent).
+
+**From here on**, Keel redeploys after each Phase 4 wave, following the PHASE-4 contract §7.5:
+1. Dump to the private directory.
+2. Compare `alembic current` on the instance with `main`'s head, and rehearse every pending revision
+   on a local restore, whatever lane it came from.
+3. Migrate.
+
+Each redeploy gets a line here with the same facts (dump name, `alembic current`, counts, the
+tailnet check).
+
+### Checkpoint 2026-11-22
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| Phase 2 and Phase 4 contracts | #62, #59 | merged | build to the contracts |
+| firstchair reference, wrapper, ADR 0036, wrapper hides | #64, #70, #72 | merged | none |
+| CSV/OFX import | #65 | merged | I3 competitor exports |
+| Redis password | #66 | merged | none |
+| C3c rules codec | #68 | merged | C3b waits on the regex-engine ADR |
+| F2c job follow-ups | #69 | merged | none |
+| P1 connector protocol | #71 | merged | P4a |
+| F5d hf2 envelope | #73 | merged | P4-link seals tokens as hf2 |
+| P4a connector schema (migration 0011) | #74 | open | review, rehearse on a restore, redeploy |
+| C6a category API | #76 | open | review and merge |
+| W1 Transactions screen | #77 | draft | follows C6a |
+| ADR 0037 install plan | #75 | open | review |
+| Phase 11 plan | #67 | open | review |
+
+**Upgrade 3** (to migration 0011, after #74 and the wave 1–2 merges: C6a #76, W1 #77, C4b #82):
+- Dump: `holdfast-pre-0011-20261122T134009.dump`, in the private backups directory.
+- `alembic current`: `0011_connector_link (head)`.
+- Counts were unchanged: 3,345 transactions, 9 accounts, 109 import runs.
+- The tailnet URL answered 200 for `/` and `/api/health`.
+- The merges after it (#79, #80, #83 to #86) add no migration. The dev stack reloads code from
+  the checkout, and the instance is still at head.
+
+### Checkpoint 2026-11-22 (later)
+
+| Story | PR | State | Next step |
+|---|---|---|---|
+| P4a connector schema, C6a, W1, C4b | #74, #76, #77, #82 | merged, live | none |
+| P2m overlap matcher | #79 | merged | P4-preview, P2b |
+| C5c recurring series | #80 | merged (Ledger fix round) | C5b |
+| P2a writer sync and supersede verbs | #84 | merged (Ledger and Bulwark fix round) | P2b |
+| P4-link link plan, slot guard, exchange | #85 | merged | P9b-link, P5a |
+| P4-link abandon guards | #86 | merged | none |
+| ADR 0038 local advisor model | #83 | merged as Proposed | owner answers O1–O6, then LM-S0 spike |
+| P9b-link Connections screen | — | building (Prism) | Prism, Sounding, Bulwark review |
+| H2 instance and sandbox projects | — | building (Harbor) | Bulwark full review, then H1 |
+
+Carried into later briefs (from the reviews):
+- **P2b:**
+  - Pin the case where a connector row is posted 1–3 days after a coverage `end_date` (ADR 0035 §6).
+  - Use `row.id` as the final sort tiebreak.
+  - Treat `TransactionNotFoundError` from `post_pending` as "fall back to upsert".
+  - The router binds `user_id` to the authenticated user.
+  - Add an unwritable-partner test on a `shared` account.
+- **P5b:**
+  - Surface `transfers_dissolved` to the person.
+  - Connector snapshots never overwrite manual ones.
+- **Next migration:** a SECURITY DEFINER `household_has_real_data(hid)` that returns a boolean only.
+- **Statement import:** take the household lock inside `import_statement`'s own transaction (the coexistence race).
+- **P4-link:** `abandon` also refuses on a `client_fp` mismatch (low).
+- **Phase 4:** the transfer orphan trigger is required (C4c).
+- **C5b:**
+  - Assert replan idempotency in the reconciliation property test.
+  - ADR 0028 says membership is sticky.
+- **P9b-link:** the slot phrase uses `max(ledger_count, owner_count)`.
+
 ## Sprint 2 (W2) — Phase 1.5, wave 2 (planned)
 **First:** F7b free-tier CI (ADR 0013, owner: no paid plans) · resume F3 · Bulwark re-review #8 (first PR to exercise `review-gate`; verify it reports on the head SHA) · F8b, F10b follow-ups.
 F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migration (schema run) · F11 trunk-model skills + PR template · F12 e2e in CI · Phase 1.5 acceptance (Sounding) · tag `phase-1.5`.
@@ -57,6 +191,10 @@ F2 job framework · F5 secrets resolver + key rotation · F6 schema-gap migratio
 ## Standups
 
 ```
+W2d · done: #79, #80, #83 to #86 (P2m, C5c, P2a, P4-link and guards, ADR 0038 Proposed); live instance at 0011 · doing: P9b-link (Prism), H2 (Harbor) · blocked: none (owner questions O1–O6 for the local model) · tokens: builders about 130k to 250k each, reviewers 25k to 85k
+W2c · done: #59, #62, #64 to #66, #68 to #73 (contracts, import, connector protocol, hf2, Redis password, ADR 0036) · doing: P4a (#74), C6a (#76), W1 (#77) · blocked: C3b needs a regex-engine ADR; migration 0011 waits on review · tokens: not tracked
+W2b · done: #40 to #58 (I1, I5, C1 to C5a, ADR 0021); phases 3 and 4 in progress on trunk · doing: Phase 4 wiring contract (#59), Plaid P3 (#56) · blocked: C3b needs a regex-engine ADR; live instance upgrade waits on the owner · tokens: Codex about 6.4M input, Claude builders 65k to 175k each
+W2a · done: #18 to #27, #29, #28 (F2, F3b/c, F5a, F6, F10b/c, S0) · doing: F5c, F7b, F2b reviews · blocked: weekly limit at the stop · tokens: limit
 W1b · done: F1 (#4), F10 (#6), F8 (#7) · doing: F7, F9 reviews; #8 re-review; F3 · blocked: weekly limit (all accounts) · tokens: limit
 W1 · done: F4 (#2) · doing: — (stopped by owner) · blocked: none · open: #3 F7, #4 F1, WIP F9/F10 · tokens: ~1.3M subagent this window
 W0 · done: Phase 1 merged + tagged; round table (7 memos + challenge); roadmap, SDLC, routing, roster, agent defs · doing: — · blocked: none · tokens: ~0.6M output this session

@@ -1,0 +1,12 @@
+SUMMARY OF ACCOUNT ACTIVITY    Navy Federal
+Statement Closing Date 05/06/2026
+ACCOUNT NUMBER      xxx xxxx xxxx 0000
+Previous Balance  $20.00 New Balance  $40.75
+TRANSACTIONS
+Trans Date Post Date Reference No. Description Amount
+04/20/26 04/20/26 EXAMPLE-A Example Cafe  $5.00
+04/21/26 04/22/26 EXAMPLE-B Example Cafe  $5.00
+04/22/26 04/24/26 EXAMPLE-C Example Cafe  $5.00
+04/23/26 04/26/26 EXAMPLE-D Example Cafe  $5.00
+INTEREST CHARGED
+INTEREST CHARGE-PURCHASES  $0.75

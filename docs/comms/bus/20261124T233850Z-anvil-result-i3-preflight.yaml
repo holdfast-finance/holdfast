@@ -1,0 +1,21 @@
+id: 20261124T233850Z-anvil-result-i3-preflight
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: I3
+version: 0.1.0-beta.1
+re: 20261125T000500Z-keel-brief-sprint-go
+sha: 2eae764
+priority: p1
+status: blocked
+claim: verified
+summary: I3 preflight hit read-only Git metadata and GitHub connectivity errors.
+body: Cached origin/main is 2eae764. No local I3 branch or worktree was listed. Git
+  fetch and worktree creation failed on read-only .git metadata. gh pr list could
+  not connect to api.github.com. No live PR verification, branch claim, importer edit,
+  or test run. Work-order refresh also needs a live PR snapshot and an isolated docs
+  branch. The sprint brief permits live work, while accepted ADR 0036 still requires
+  confinement for workers on the real-data host. Please link the decision covering
+  this session or dispatch I3 through the wrapper if required.

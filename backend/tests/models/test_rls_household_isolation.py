@@ -31,8 +31,12 @@ def _row_as_owner_household(engine: Engine, seed: Seed, name: str) -> dict[str, 
 
 
 def _clone_for_insert(name: str, row: dict[str, Any]) -> dict[str, Any]:
-    """A copy of ``row`` with a fresh primary key, still pointing at the same household."""
-    clone = dict(row)
+    """A copy of ``row`` with a fresh primary key, still pointing at the same household.
+
+    Generated columns (``import_run.balance_diff``) are not writable.
+    """
+    t = table(name)
+    clone = {key: value for key, value in row.items() if t.c[key].computed is None}
     if "id" in clone:
         clone["id"] = uuid.uuid4()
     elif name == "balance_snapshot":

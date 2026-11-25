@@ -21,7 +21,9 @@ from app import __version__
 from app.api import errors
 from app.config import Settings, get_settings
 from app.db import CONNECT_TIMEOUT_SECONDS, create_engine, create_session_factory
+from app.integrations.registry import registry as connector_registry
 from app.logging import configure_logging, get_logger
+from app.security import crypto
 from app.security.body_limit import BodySizeLimitMiddleware
 from app.security.csrf import CSRFMiddleware
 from app.services.setup import SETUP_TTL_SECONDS, issue_setup_token, setup_state
@@ -95,7 +97,7 @@ def build_api_router(settings: Settings) -> APIRouter:
 def create_redis(settings: Settings) -> Redis:
     """Build the Redis client. No connection is opened until first use."""
     client: Redis = Redis.from_url(
-        settings.redis_url.get_secret_value(),
+        settings.redis_dsn,
         socket_connect_timeout=CONNECT_TIMEOUT_SECONDS,
         socket_timeout=CONNECT_TIMEOUT_SECONDS,
     )
@@ -145,6 +147,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if settings.fernet_key is not None:
+            crypto.load_ring(settings.fernet_key)  # malformed or duplicate keys fail startup
+        connector_registry.freeze()  # no registration after startup
         log.info("api.startup", version=__version__, app_env=settings.app_env)
         task = asyncio.create_task(_setup_token_loop(app))
         try:

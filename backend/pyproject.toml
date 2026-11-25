@@ -33,10 +33,12 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "pyotp>=2.12.0",
     "webauthn>=3.0.1",
+    "pyyaml>=6.0",
+    # Statement import reads PDFs in the api and worker, so this is not optional.
+    "pdfplumber>=0.11.10",
+    "python-multipart>=0.0.20",
+    "httpx>=0.28",
 ]
-
-[project.optional-dependencies]
-sanitize = ["pdfplumber>=0.11.10"]
 
 [dependency-groups]
 dev = [
@@ -50,6 +52,7 @@ dev = [
     "import-linter>=2.17",
     "reportlab>=5.1.0",
     "pdfplumber>=0.11.10",
+    "types-pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -163,9 +166,62 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Connectors stay at the edge: no request, persistence or job code"
+type = "forbidden"
+source_modules = ["app.integrations"]
+forbidden_modules = [
+    "app.api",
+    "app.services",
+    "app.db",
+    "app.db_context",
+    "app.models",
+    "app.jobs",
+]
+
+[[tool.importlinter.contracts]]
 name = "Routers never touch ORM models or sessions (services own the unit of work)"
 type = "forbidden"
 source_modules = ["app.api"]
 forbidden_modules = ["app.models", "app.db", "app.db_context"]
 # Direct imports only: routers reach these through services, which is the point.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Only app.jobs and app.worker import the job runner (household-wide paths; ADR 0016)"
+type = "forbidden"
+# Every top-level module but app.jobs and app.worker. tests/jobs/test_job_boundaries.py also
+# fails if enqueue_household_wide is named anywhere else, so a new package can't slip past.
+source_modules = [
+    "app.agent",
+    "app.api",
+    "app.config",
+    "app.db",
+    "app.db_context",
+    "app.domain",
+    "app.importers",
+    "app.integrations",
+    "app.logging",
+    "app.main",
+    "app.models",
+    "app.notify",
+    "app.openapi_export",
+    "app.schemas",
+    "app.security",
+    "app.services",
+    "app.tax",
+]
+forbidden_modules = ["app.jobs.runner"]
+
+[[tool.importlinter.contracts]]
+name = "Job handlers use JobContext sessions, never their own (ADR 0016)"
+type = "forbidden"
+source_modules = ["app.jobs.handlers"]
+forbidden_modules = ["app.db", "app.db_context"]
+# Direct imports only: handlers call services, which own sessions through db_context.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Job handlers never import the runner (no household-wide enqueue, no claims; ADR 0016)"
+type = "forbidden"
+source_modules = ["app.jobs.handlers"]
+forbidden_modules = ["app.jobs.runner"]

@@ -6,7 +6,21 @@ SHELL := /usr/bin/env bash
 COMPOSE      := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_PROD := docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml
 
-.PHONY: help docs-dir up up-prod down logs ps test test-db lint lint-imports fmt migrate seed keys check health ports env-check sync test-locked release-check dist
+# H2: two more compose projects beside the dev stack. holdfast-instance is the real-data one (bind
+# mounts in $(HOLDFAST_INSTANCE_DIR), a 0700 directory outside the repo, its own instance.env);
+# holdfast-sandbox is throwaway (fresh synthetic keys in .env.sandbox, PLAID_ENV forced to
+# sandbox). Neither layers the dev override, so neither publishes db or redis. See docs/ops/instances.md.
+# The names are fixed: `override` stops even `make X SANDBOX_PROJECT=holdfast`, which would turn
+# sandbox-destroy into `down -v` on the dev stack.
+override INSTANCE_PROJECT := holdfast-instance
+override SANDBOX_PROJECT  := holdfast-sandbox
+# `env -i` hands compose only what it needs: no exported FERNET_KEY, POSTGRES_* or PLAID_* can
+# override --env-file on the real-data stack.
+ENV_INSTANCE := env -i PATH="$$PATH" HOME="$$HOME" HOLDFAST_INSTANCE_DIR="$(HOLDFAST_INSTANCE_DIR)" $(foreach v,DOCKER_HOST DOCKER_CONFIG HOLDFAST_INSTANCE_PORT,$(if $($(v)),$(v)="$($(v))"))
+COMPOSE_INSTANCE := $(ENV_INSTANCE) docker compose -p $(INSTANCE_PROJECT) --env-file "$(HOLDFAST_INSTANCE_DIR)/instance.env" -f docker-compose.yml -f docker-compose.instance.yml
+COMPOSE_SANDBOX  := docker compose -p $(SANDBOX_PROJECT) --env-file .env.sandbox -f docker-compose.yml -f docker-compose.sandbox.yml
+
+.PHONY: help docs-dir up instance-init instance-up instance-down instance-migrate instance-ps instance-logs sandbox-up sandbox-down sandbox-migrate sandbox-destroy up-prod down logs ps test test-db lint lint-imports fmt migrate rotate-keys rotate-keys-prod seed keys keys-add-missing check health ports env-check sync test-locked release-check dist
 
 help: ## Show this help
 	@echo "Holdfast make targets:"
@@ -14,6 +28,7 @@ help: ## Show this help
 
 env-check:
 	@test -f .env || { echo "error: .env not found. Run 'make keys' to create it from .env.example." >&2; exit 1; }
+	@grep -qE '^REDIS_PASSWORD=[A-Za-z0-9_-]+$$' .env || { echo "error: REDIS_PASSWORD is missing (or has characters outside A-Za-z0-9_-) in .env. Run 'make keys-add-missing' (adds it, changes nothing else)." >&2; exit 1; }
 
 # The backend image runs as uid 10001; hand it ./data/documents using that same image (as root,
 # no extra image pulled). Host-side reads of stored documents then need sudo, by design.
@@ -41,6 +56,54 @@ up-prod: env-check ## Start the prod stack (DNS-01 cert, binds TAILSCALE_BIND_IP
 
 down: ## Stop the stack (keeps volumes)
 	$(COMPOSE) down --remove-orphans
+
+# ---- holdfast-instance (real data). HOLDFAST_INSTANCE_DIR has no default: you choose the path. ----
+instance-init: ## Create HOLDFAST_INSTANCE_DIR (0700), its subdirectories and instance.env with fresh keys
+	docker build -t $(BACKEND_IMAGE) backend
+	BACKEND_IMAGE=$(BACKEND_IMAGE) scripts/instance.sh init
+
+instance-up: ## Start holdfast-instance (refuses unless HOLDFAST_INSTANCE_DIR is mode 0700 outside the repo)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) build api
+	$(COMPOSE_INSTANCE) up -d --build db redis
+	$(COMPOSE_INSTANCE) run --rm migrate
+	$(COMPOSE_INSTANCE) up -d --build
+
+instance-down: ## Stop holdfast-instance (data stays on its bind mounts)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) down --remove-orphans
+
+instance-migrate: ## alembic upgrade head on holdfast-instance
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) run --rm migrate
+
+instance-ps: ## List holdfast-instance services
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) ps
+
+instance-logs: ## Follow holdfast-instance logs (make instance-logs s=api)
+	scripts/instance.sh check
+	$(COMPOSE_INSTANCE) logs -f --tail=200 $(s)
+
+# ---- holdfast-sandbox (throwaway, synthetic keys, loopback port HOLDFAST_SANDBOX_PORT, default 9444) ----
+sandbox-up: ## Start holdfast-sandbox with fresh synthetic keys (.env.sandbox); PLAID_ENV is forced to sandbox
+	scripts/instance.sh sandbox-env
+	$(COMPOSE_SANDBOX) up -d --build db redis
+	$(COMPOSE_SANDBOX) run --rm migrate
+	$(COMPOSE_SANDBOX) up -d --build
+
+sandbox-down: ## Stop holdfast-sandbox (keeps its volumes and .env.sandbox)
+	@[ "$(SANDBOX_PROJECT)" = holdfast-sandbox ] || { echo "refusing: project is not holdfast-sandbox" >&2; exit 2; }
+	$(COMPOSE_SANDBOX) down --remove-orphans
+
+sandbox-migrate: ## alembic upgrade head on holdfast-sandbox
+	scripts/instance.sh sandbox-env
+	$(COMPOSE_SANDBOX) run --rm migrate
+
+sandbox-destroy: ## Delete holdfast-sandbox: containers, volumes and .env.sandbox
+	@[ "$(SANDBOX_PROJECT)" = holdfast-sandbox ] || { echo "refusing: project is not holdfast-sandbox" >&2; exit 2; }
+	$(COMPOSE_SANDBOX) down -v --remove-orphans
+	@rm -f .env.sandbox
 
 logs: ## Follow logs (make logs s=api for one service)
 	$(COMPOSE) logs -f --tail=200 $(s)
@@ -73,7 +136,10 @@ test: ## Backend pytest (needs `make up` for the db) + web vitest
 	      owner_pw=$$($(call envval,POSTGRES_OWNER_PASSWORD)); \
 	      export TEST_MIGRATIONS_DATABASE_URL="postgresql+psycopg://holdfast_owner:$${owner_pw}@127.0.0.1:5432/$(TEST_DB)"; \
 	    fi; \
-	    export TEST_REDIS_URL="$${TEST_REDIS_URL:-redis://127.0.0.1:56379/15}"; \
+	    if [ -z "$${TEST_REDIS_URL:-}" ]; then \
+	      redis_pw=$$($(call envval,REDIS_PASSWORD)); \
+	      export TEST_REDIS_URL="redis://:$${redis_pw}@127.0.0.1:56379/15"; \
+	    fi; \
 	  fi; \
 	  cd backend && uv run pytest -q; \
 	else echo "skip backend: no backend/pyproject.toml"; fi
@@ -95,16 +161,33 @@ fmt: ## Format backend (ruff) and web (format script, if any)
 migrate: env-check ## alembic upgrade head as holdfast_owner (one-off `migrate` container)
 	$(COMPOSE) run --rm migrate
 
+rotate-keys: env-check ## Re-encrypt stored secrets under the primary FERNET_KEY (ADR 0015); run twice
+	$(COMPOSE) run --rm --no-deps rotate-keys
+
+rotate-keys-prod: env-check ## rotate-keys against the prod stack (use this on a prod host)
+	$(COMPOSE_PROD) run --rm --no-deps rotate-keys
+
 seed: ## Seed Plaid Sandbox data (placeholder until Phase 2)
 	python3 scripts/seed_sandbox.py
 
+.PHONY: import-measure
+import-measure: ## Aggregate-only parse report over a directory of statements: make import-measure DIR=<dir>
+	@test -n "$(DIR)" || { echo "usage: make import-measure DIR=<dir of PDFs or sanitized .txt>"; exit 2; }
+	@cd backend && uv run python -m app.importers.harness "$(abspath $(DIR))"
+
 .PHONY: sanitize
-sanitize: ## Sanitize real statements offline: make sanitize IN=data/inbox OUT=data/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
+sanitize: ## Sanitize real statements offline: make sanitize IN=$$HOME/holdfast-private/inbox OUT=$$HOME/holdfast-private/outbox [REVIEW=1] [KEEP="Word"] [CLEAR=1]
 	@test -n "$(IN)" || { echo "usage: make sanitize IN=<dir|zip|file> OUT=<dir> [REVIEW=1] [KEEP=Word]"; exit 2; }
-	@cd backend && uv run --extra sanitize python -m app.importers.sanitize "$(abspath $(IN))" $(if $(REVIEW),--review,"$(abspath $(OUT))") $(if $(CLEAR),--clear-out) $(foreach w,$(KEEP),--keep "$(w)")
+	@for p in "$(abspath $(IN))" $(if $(OUT),"$(abspath $(OUT))"); do \
+	  case "$$p/" in "$(CURDIR)"/*) echo "sanitize: $$p is inside the repository. Real statements and sanitizer output stay outside it (ADR 0019). Use an absolute path such as $$HOME/holdfast-private/..." >&2; exit 2;; esac; \
+	done
+	@cd backend && uv run python -m app.importers.sanitize "$(abspath $(IN))" $(if $(REVIEW),--review,"$(abspath $(OUT))") $(if $(CLEAR),--clear-out) $(foreach w,$(KEEP),--keep "$(w)")
 
 keys: ## Create .env from .env.example with fresh secrets (refuses to overwrite)
 	python3 scripts/gen-keys.py --write
+
+keys-add-missing: ## Existing .env: add the generated values it lacks; never FERNET_KEY or the Postgres passwords
+	python3 scripts/gen-keys.py --add-missing
 
 check: lint test ## lint + test
 
@@ -138,6 +221,10 @@ ports: env-check ## Assert no compose service publishes beyond the rules
 	 TAILSCALE_BIND_IP=$${tip:-100.64.0.1} \
 	 CF_API_TOKEN=$$( [ -n "$$cft" ] && grep -E '^CF_API_TOKEN=' .env | cut -d= -f2- || printf 'x%.0s' $$(seq 40)) \
 	 $(COMPOSE_PROD) config --format json | python3 scripts/check-compose-ports.py --prod
+	@# The H2 projects: rendered with .env's values and a placeholder instance directory (never read).
+	export HOLDFAST_INSTANCE_DIR=$${HOLDFAST_INSTANCE_DIR:-/var/lib/holdfast-instance-check}; \
+	 docker compose --env-file .env -f docker-compose.yml -f docker-compose.instance.yml config --format json | python3 scripts/check-compose-ports.py --instance
+	docker compose --env-file .env -f docker-compose.yml -f docker-compose.sandbox.yml config --format json | python3 scripts/check-compose-ports.py --sandbox
 
 .PHONY: api-types api-types-check api-types-test
 # Hash of the canonical schema is the first line of schema.d.ts (pytest compares it; CI runs pytest).

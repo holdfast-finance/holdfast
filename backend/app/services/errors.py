@@ -18,10 +18,21 @@ STATUS: dict[str, int] = {
     "passkey_verification_failed": 400,
     "last_credential": 409,
     "conflict": 409,
+    "busy": 409,
+    # Plaid Link (P4-link, ADR 0034, ADR 0033 section 7).
+    "confirm_required": 409,
+    "no_slots_left": 409,
+    "product_not_allowed": 409,
+    "days_not_allowed": 409,
+    "sandbox_on_real_data": 409,
+    "sandbox_connection_present": 409,
+    "plaid_error": 409,
+    "plaid_unavailable": 502,
     "not_found": 404,
     "rate_limited": 429,
     "validation_error": 422,
     "payload_too_large": 413,
+    "server_error": 500,
 }
 
 

@@ -39,6 +39,7 @@ from app.schemas.auth import (
 )
 from app.security import crypto, passwords, totp
 from app.security.ratelimit import Locked, RateLimiter, account_scope, ip_scope
+from app.security.secret_token import SecretToken
 from app.services import audit, sessions
 from app.services.context import RequestContext
 from app.services.errors import ApiError
@@ -106,7 +107,7 @@ class AuthService:
         """The time step ``code`` matches for this user, or None. Pure: nothing is recorded."""
         if user.totp_secret_enc is None:
             return None
-        secret = crypto.decrypt(user.totp_secret_enc.decode("ascii"))
+        secret = crypto.open(user.totp_secret_enc).reveal()
         return totp.matching_step(secret, code)
 
     async def _claim_totp_step(self, user: AppUser, step: int) -> bool:
@@ -622,7 +623,7 @@ class AuthService:
             if user.totp_enabled:
                 raise ApiError("conflict", "Codes are already on. Turn them off first.")
             secret = totp.new_secret()
-            user.totp_secret_enc = crypto.encrypt(secret).encode("ascii")
+            user.totp_secret_enc = crypto.seal_unbound(SecretToken(secret))
             await self._audit(s, principal, "auth.totp.setup")
         return TotpSetupOut(otpauth_uri=totp.provisioning_uri(secret, user.email), secret=secret)
 

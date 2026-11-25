@@ -1,0 +1,47 @@
+# holdfast-sandbox: the throwaway project (H2, PHASE-2 contract D12). Layered on the base file:
+#
+#   docker compose -p holdfast-sandbox --env-file .env.sandbox \
+#     -f docker-compose.yml -f docker-compose.sandbox.yml up -d --build
+#
+# (`make sandbox-up` / `./scripts/dev.ps1 sandbox-up`.)
+#
+# - Fresh synthetic keys every time: .env.sandbox is minted by gen-keys.py and removed with the
+#   project by `make sandbox-destroy`. It is git-ignored (.env.*).
+# - PLAID_ENV is forced to sandbox here (a literal beats the env file), the production secret is
+#   forced empty, and HOLDFAST_SANDBOX makes the api and worker refuse PLAID_ENV=production at
+#   startup (app/config.py), so a hand-edited env file cannot turn this into a real-data stack.
+# - Named volumes under the holdfast-sandbox project, never the repo's ./data/documents, so it
+#   shares nothing with the dev stack or the instance. No dev override: db and redis publish
+#   nothing. Caddy publishes loopback only, on its own port.
+
+x-sandbox-env: &sandbox-env
+  PLAID_ENV: sandbox
+  PLAID_SECRET_PRODUCTION: ""
+  HOLDFAST_SANDBOX: "true"
+
+services:
+  api:
+    environment: *sandbox-env
+    volumes:
+      - sandbox_documents:/data/documents
+
+  worker:
+    environment: *sandbox-env
+    volumes:
+      - sandbox_documents:/data/documents
+
+  migrate:
+    environment:
+      HOLDFAST_SANDBOX: "true"
+
+  rotate-keys:
+    environment:
+      HOLDFAST_SANDBOX: "true"
+
+  caddy:
+    ports: !override
+      - "127.0.0.1:${HOLDFAST_SANDBOX_PORT:-9444}:443"
+
+volumes:
+  # Image-initialised (owned by the backend uid), unlike a root-made bind mount.
+  sandbox_documents:

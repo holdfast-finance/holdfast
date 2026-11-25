@@ -28,8 +28,23 @@
 		-Server
 	}
 
-	# Cap request bodies (the API enforces the same 1 MiB limit as defense in depth).
+	# Cap request bodies (the API enforces the same limits as defense in depth).
 	# X-Forwarded-For is overwritten with the real peer, never appended to a client-sent value.
+	# The one upload route takes a PDF: 21 MiB (20 MiB file + multipart framing), ADR 0020.
+	# Matched first and exactly; everything else under /api keeps 1 MiB.
+	@statement_upload {
+		method POST
+		path /api/imports/statements
+	}
+	handle @statement_upload {
+		request_body {
+			max_size 21MiB
+		}
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
 	handle /api/* {
 		request_body {
 			max_size 1MB

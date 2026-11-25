@@ -4,12 +4,16 @@ import { Navigate, type RouteObject } from 'react-router'
 import { RequireAuth } from '@/app/guards'
 import { PAGES, type PageId } from '@/app/nav'
 import {
+  ConnectionsOAuth,
+  ConnectionsSettings,
   HouseholdSettings,
+  ImportPage,
   InvitePage,
   LoginPage,
   SecuritySettings,
   SettingsLayout,
   SetupPage,
+  TransactionsPage,
 } from '@/app/lazyRoutes'
 import { AppShell } from '@/components/layout/AppShell'
 import {
@@ -23,7 +27,7 @@ import { OverviewPage } from '@/pages/OverviewPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
 
 const placeholderIds = (Object.keys(PAGES) as PageId[]).filter(
-  (id) => id !== 'overview' && id !== 'settings',
+  (id) => id !== 'overview' && id !== 'settings' && id !== 'transactions' && id !== 'import',
 )
 
 function withSuspense(node: ReactNode, fallback: ReactNode) {
@@ -59,8 +63,22 @@ export const routes: RouteObject[] = [
                 path: 'security',
                 element: withSuspense(<SecuritySettings />, <SectionSkeleton />),
               },
+              {
+                path: 'connections',
+                element: withSuspense(<ConnectionsSettings />, <SectionSkeleton />),
+              },
             ],
           },
+          // Where a bank's OAuth page returns (the suggested PLAID_REDIRECT_URI).
+          {
+            path: 'plaid/oauth-return',
+            element: withSuspense(<ConnectionsOAuth />, <SectionSkeleton />),
+          },
+          {
+            path: 'transactions',
+            element: withSuspense(<TransactionsPage />, <ShellPageSkeleton />),
+          },
+          { path: 'import', element: withSuspense(<ImportPage />, <ShellPageSkeleton />) },
           ...placeholderIds.map((id) => ({
             path: PAGES[id].path.slice(1),
             element: <PlaceholderPage id={id} />,

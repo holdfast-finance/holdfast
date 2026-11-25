@@ -118,3 +118,36 @@ def test_migrations_url_uses_owner_role_and_password(clean_env: pytest.MonkeyPat
 def test_migrations_url_falls_back_to_database_url(clean_env: pytest.MonkeyPatch) -> None:
     clean_env.setenv("DATABASE_URL", "postgresql+psycopg://holdfast_app:explicit@db:5432/holdfast")
     assert make_settings().migrations_sqlalchemy_url.username == "holdfast_app"
+
+
+def test_redis_password_is_filled_into_a_passwordless_url(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("REDIS_PASSWORD", "pw-1_x")
+    s = make_settings()
+    assert s.redis_dsn == "redis://:pw-1_x@redis:6379/0"
+    assert "pw-1_x" not in repr(s)
+
+
+def test_redis_url_with_its_own_password_wins(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("REDIS_URL", "redis://:inline@redis:6379/3")
+    clean_env.setenv("REDIS_PASSWORD", "other")
+    assert make_settings().redis_dsn == "redis://:inline@redis:6379/3"
+
+
+def test_redis_dsn_without_a_password_is_the_plain_url(clean_env: pytest.MonkeyPatch) -> None:
+    assert make_settings().redis_dsn == "redis://redis:6379/0"
+
+
+def test_sandbox_instance_refuses_production_plaid(clean_env: pytest.MonkeyPatch) -> None:
+    # H2: holdfast-sandbox is throwaway, so it can never be pointed at real Plaid Items.
+    with pytest.raises(ValidationError, match="refuses PLAID_ENV=production"):
+        make_settings(holdfast_sandbox=True, plaid_env="production")
+    assert make_settings(holdfast_sandbox=True, plaid_env="sandbox").holdfast_sandbox is True
+
+
+def test_production_plaid_only_in_the_instance(clean_env: pytest.MonkeyPatch) -> None:
+    # H2 D13: the dev stack (no flag) refuses production; prod and holdfast-instance set the flag.
+    with pytest.raises(ValidationError, match="needs a real-data deployment"):
+        make_settings(plaid_env="production")
+    assert make_settings(plaid_env="sandbox").plaid_env == "sandbox"
+    s = make_settings(holdfast_real_data=True, plaid_env="production")
+    assert s.plaid_env == "production"

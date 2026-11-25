@@ -25,6 +25,33 @@ import {
   type MockCredential,
   type MockUser,
 } from '@/mocks/db'
+import {
+  UPLOAD_ERRORS,
+  balancesOnlyResult,
+  importFile,
+  MOCK_IMPORT_ACCOUNTS,
+  uploadErrorKey,
+  type ScenarioError,
+} from '@/mocks/imports'
+import {
+  categoryExists,
+  decodeCursor,
+  encodeCursor,
+  filterFromParams,
+  matching,
+  MOCK_CATEGORIES,
+  newestFirst,
+  totalsByCurrency,
+} from '@/mocks/ledger'
+import { ABANDON_PHRASE } from '@/api/connections'
+import {
+  linkPlan,
+  linkReservation,
+  linkTokenRefusal,
+  MOCK_LINK_TOKEN,
+  slotOut,
+} from '@/mocks/connections'
+import { MOCK_CHECK_LIMIT, plaidSetup } from '@/mocks/plaid'
 
 /*
  * MSW handlers mirroring docs/phases/PHASE-1-contract.md "API contract", backed by `./db.ts`.
@@ -51,6 +78,15 @@ const STATUS: Record<KnownErrorCode, number> = {
   passkey_verification_failed: 400,
   last_credential: 409,
   conflict: 409,
+  busy: 409,
+  confirm_required: 409,
+  no_slots_left: 409,
+  product_not_allowed: 409,
+  days_not_allowed: 409,
+  sandbox_on_real_data: 409,
+  sandbox_connection_present: 409,
+  plaid_error: 409,
+  plaid_unavailable: 502,
   not_found: 404,
   rate_limited: 429,
   validation_error: 422,
@@ -62,6 +98,16 @@ export function apiError(code: KnownErrorCode, message: string) {
 }
 
 const path = (p: string) => `*/api${p}`
+
+/** An upload refusal with the server's fixed message (and `Retry-After` on a 429). */
+export function uploadFailure(e: ScenarioError) {
+  const headers: Record<string, string> = {}
+  if ('retryAfter' in e && e.retryAfter) headers['Retry-After'] = String(e.retryAfter)
+  return HttpResponse.json(
+    { error: { code: e.code, message: e.message } },
+    { status: e.status, headers },
+  )
+}
 
 // --- Serializers (never include passwords, TOTP secrets or public keys) ------------------------
 
@@ -709,5 +755,256 @@ export const handlers = [
       },
       { owner: true },
     ),
+  ),
+
+  // Accounts and transactions (read-only; docs: U1a). Any signed-in member may read.
+  http.get(
+    path('/accounts'),
+    authed(() => HttpResponse.json({ items: db.accounts })),
+  ),
+  // Statement import (I5 / I5b). Upload needs no step-up; accepting a run does.
+  http.get(
+    path('/imports/accounts'),
+    authed(() => HttpResponse.json(MOCK_IMPORT_ACCOUNTS)),
+  ),
+  http.get(
+    path('/imports/runs'),
+    authed(({ request }) => {
+      const params = new URL(request.url).searchParams
+      const limit = Number(params.get('limit') ?? 20)
+      const start = Number(params.get('cursor') ?? 0)
+      const items = db.importRuns.slice(start, start + limit)
+      const next = start + limit < db.importRuns.length ? String(start + limit) : null
+      return HttpResponse.json({ items, next_cursor: next })
+    }),
+  ),
+  http.post(
+    path('/imports/runs/:id/accept'),
+    authed(
+      ({ params }) => {
+        const run = db.importRuns.find((r) => r.id === params.id)
+        if (!run) return apiError('not_found', "That import run doesn't exist.")
+        if (run.reconcile_status !== 'needs_review') {
+          return apiError('conflict', 'Only a run that needs review can be accepted.')
+        }
+        run.reconcile_status = 'accepted'
+        run.reason = null
+        run.reviewed_at = now()
+        return HttpResponse.json(run)
+      },
+      { reauth: true },
+    ),
+  ),
+  http.post(
+    path('/imports/statements'),
+    authed(async ({ request }) => {
+      // Parse the one multipart part by hand: jsdom's File and undici's `formData()` disagree
+      // about what a File is, and jsdom's XHR can lose the filename. The mock keys its scenario
+      // and its dedupe on the filename plus the file bytes, which is all it needs.
+      const raw = await request.text()
+      const name = /filename="([^"]*)"/.exec(raw)?.[1]
+      if (!name) return apiError('validation_error', 'Choose a PDF to import.')
+      const content = raw.split('\r\n\r\n').slice(1).join('\r\n\r\n').split('\r\n--')[0] ?? ''
+      const scenario = `${name} ${content}`.toLowerCase()
+      const failure = uploadErrorKey(scenario)
+      if (failure) return uploadFailure(UPLOAD_ERRORS[failure])
+      if (scenario.includes('balances')) return HttpResponse.json(balancesOnlyResult(name))
+      const account = /name="account"\r\n\r\n([^\r]*)/.exec(raw)?.[1] ?? 'new'
+      return HttpResponse.json(importFile(name, content, account))
+    }),
+  ),
+  http.get(
+    path('/categories'),
+    authed(() => HttpResponse.json({ items: MOCK_CATEGORIES })),
+  ),
+  http.put(
+    path('/transactions/:id/category'),
+    authed(async ({ request, params }) => {
+      const row = db.transactions.find((t) => t.id === params.id)
+      if (!row || !row.can_edit) return apiError('not_found', "That transaction wasn't found.")
+      const categoryId = str(await readJson(request), 'category_id')
+      if (!categoryExists(categoryId)) return apiError('not_found', "That category wasn't found.")
+      row.category_id = categoryId
+      row.category_source = 'user'
+      return HttpResponse.json(row)
+    }),
+  ),
+  http.post(
+    path('/transactions/:id/category/release'),
+    authed(({ params }) => {
+      const row = db.transactions.find((t) => t.id === params.id)
+      if (!row || !row.can_edit) return apiError('not_found', "That transaction wasn't found.")
+      row.category_source = null
+      return HttpResponse.json(row)
+    }),
+  ),
+  // Plaid setup checklist (P3). Owner only; the check is limited like the real one.
+  http.get(
+    path('/plaid/setup'),
+    authed(() => HttpResponse.json(plaidSetup(db.plaid, false)), { owner: true }),
+  ),
+  http.post(
+    path('/plaid/setup/check'),
+    authed(
+      () => {
+        if (db.plaid.checks >= MOCK_CHECK_LIMIT) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: ERROR_CODES.rateLimited,
+                message: 'Too many attempts. Try again in 5 minutes.',
+              },
+            },
+            { status: 429, headers: { 'Retry-After': '300' } },
+          )
+        }
+        db.plaid.checks += 1
+        return HttpResponse.json(plaidSetup(db.plaid, true))
+      },
+      { owner: true },
+    ),
+  ),
+  // Plaid Link (P4-link): plan, token, exchange, resolve, abandon, and the list.
+  http.get(
+    path('/connections'),
+    authed((_ctx, user) =>
+      HttpResponse.json({
+        connections: db.connections.connections,
+        open_reservations:
+          user.role === 'owner'
+            ? db.connections.reservations
+                .filter((r) => r.state === 'reserved' || r.state === 'unknown')
+                .map((r) => ({ id: r.id, state: r.state, env: r.env, created_at: r.created_at }))
+            : [],
+      }),
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/link-plan'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        const kind = str(body, 'login_kind')
+        if (kind !== 'bank_card' && kind !== 'retirement_hsa' && kind !== 'brokerage') {
+          return apiError(ERROR_CODES.validationError, 'Choose what kind of login this is.')
+        }
+        return HttpResponse.json(linkPlan(db.connections, kind, db.plaid.env === 'production'))
+      },
+      { owner: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/link-token'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        if (db.plaid.env === 'production') {
+          const refusal = linkTokenRefusal(db.connections, body)
+          if (refusal) return apiError(refusal.code, refusal.message)
+        }
+        const id = crypto.randomUUID()
+        db.connections.reservations.push({
+          id,
+          state: 'reserved',
+          env: db.plaid.env,
+          created_at: now(),
+          outcome: 'open',
+        })
+        audit('plaid.link_token')
+        return HttpResponse.json({
+          link_token: MOCK_LINK_TOKEN,
+          expiration: null,
+          reservation_id: id,
+        })
+      },
+      { owner: true, reauth: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/exchange'),
+    authed(
+      async ({ request }) => {
+        const body = await readJson(request)
+        const reservation = db.connections.reservations.find(
+          (r) => r.id === str(body, 'reservation_id'),
+        )
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        const connection = linkReservation(db.connections, reservation)
+        return HttpResponse.json({ connection })
+      },
+      { owner: true, reauth: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/reservations/:id/resolve'),
+    authed(
+      ({ params }) => {
+        const reservation = db.connections.reservations.find((r) => r.id === params.id)
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        if (reservation.state === 'reserved' && !db.connections.plaidDown) {
+          if (reservation.outcome === 'item') linkReservation(db.connections, reservation)
+          if (reservation.outcome === 'nothing') reservation.state = 'abandoned'
+        }
+        return HttpResponse.json(slotOut(db.connections, reservation))
+      },
+      { owner: true },
+    ),
+  ),
+  http.post(
+    path('/connections/plaid/reservations/:id/abandon'),
+    authed(
+      async ({ request, params }) => {
+        const body = await readJson(request)
+        if (str(body, 'confirm_phrase') !== ABANDON_PHRASE) {
+          return apiError(ERROR_CODES.confirmRequired, 'Type the confirmation phrase exactly.')
+        }
+        const reservation = db.connections.reservations.find((r) => r.id === params.id)
+        if (!reservation) {
+          return apiError(ERROR_CODES.notFound, "That link reservation doesn't exist.")
+        }
+        if (reservation.state !== 'reserved' && reservation.state !== 'unknown') {
+          return apiError(ERROR_CODES.conflict, 'That reservation is already settled.')
+        }
+        if (db.connections.plaidDown) {
+          return apiError(
+            ERROR_CODES.plaidUnavailable,
+            "Plaid couldn't confirm that no Item was made. Try again shortly.",
+          )
+        }
+        if (db.connections.abandonConflict) {
+          return apiError(
+            ERROR_CODES.conflict,
+            'Link created an Item. Resolve the reservation instead.',
+          )
+        }
+        reservation.state = 'abandoned'
+        return HttpResponse.json(slotOut(db.connections, reservation))
+      },
+      { owner: true, reauth: true },
+    ),
+  ),
+  http.get(
+    path('/transactions/summary'),
+    authed(({ request }) => {
+      const filters = filterFromParams(new URL(request.url).searchParams)
+      return HttpResponse.json({ totals: totalsByCurrency(matching(filters)) })
+    }),
+  ),
+  http.get(
+    path('/transactions'),
+    authed(({ request }) => {
+      const url = new URL(request.url)
+      const filters = filterFromParams(url.searchParams)
+      const limit = Math.min(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 200)
+      const start = decodeCursor(url.searchParams.get('cursor'))
+      const rows = newestFirst(matching(filters))
+      const items = rows.slice(start, start + limit)
+      const next = start + limit < rows.length ? encodeCursor(start + limit) : null
+      return HttpResponse.json({ items, next_cursor: next })
+    }),
   ),
 ]

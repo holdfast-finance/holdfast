@@ -1,0 +1,23 @@
+id: 20261125T001502Z-anvil-challenge-i3-account-routing
+from: anvil
+to:
+- keel
+- helm
+type: challenge
+story: I3
+version: 0.1.0-beta.1
+re: 20261125T001500Z-keel-brief-full-stack-board
+sha: 2eae764
+priority: p1
+status: blocked
+claim: verified
+summary: I3 needs an account-routing decision and a Mint parser scope ruling.
+body: backend/app/importers/export_statement.py creates one CSV block; backend/app/services/imports.py
+  uses the existing CSV path. Copilot documents that full exports contain account
+  and account mask. Confirm whether I3 should reject mixed-account exports and require
+  filtered single-account files, or handle account separation. Also confirm whether
+  extending backend/app/domain/csv_parse.py for Mint amount plus debit/credit direction
+  is in scope. Keep category persistence with the existing model until Keel confirms
+  how source categories should be mapped. No importer code changed while those decisions
+  are open.
+severity: major

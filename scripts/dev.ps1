@@ -10,7 +10,9 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('help', 'up', 'up-prod', 'down', 'logs', 'ps', 'test', 'lint', 'fmt', 'migrate',
-        'seed', 'keys', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check', 'dist')]
+        'rotate-keys', 'rotate-keys-prod', 'seed', 'keys', 'keys-add-missing', 'check', 'health', 'ports', 'sync', 'wt-new', 'test-locked', 'release-check', 'dist',
+        'instance-init', 'instance-up', 'instance-down', 'instance-migrate', 'instance-ps', 'instance-logs',
+        'sandbox-up', 'sandbox-down', 'sandbox-migrate', 'sandbox-destroy')]
     [string]$Target = 'help',
 
     [Parameter(Position = 1)]
@@ -29,6 +31,18 @@ $Compose = @('compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.ym
 $ComposeProd = @('compose', '-f', 'docker-compose.yml', '-f', 'infra/docker-compose.prod.yml')
 $BackendUid = '10001'  # backend image user; it owns ./data/documents
 $BackendImage = 'holdfast-backend:local'
+# H2: holdfast-instance (real data, bind mounts in $env:HOLDFAST_INSTANCE_DIR) and holdfast-sandbox
+# (throwaway). Same files and project names as the Makefile; scripts/instance.sh does the checks.
+# The project names are fixed, with no env fallback: an override could aim `down -v` at the dev stack.
+$InstanceProject = 'holdfast-instance'
+$SandboxProject = 'holdfast-sandbox'
+# env -i: no exported shell variable can override instance.env on the real-data stack.
+$InstanceEnv = @('-i', "PATH=$env:PATH", "HOME=$env:HOME", "HOLDFAST_INSTANCE_DIR=$env:HOLDFAST_INSTANCE_DIR")
+foreach ($v in 'DOCKER_HOST', 'DOCKER_CONFIG', 'HOLDFAST_INSTANCE_PORT') {
+    if (Get-Item "Env:$v" -ErrorAction SilentlyContinue) { $InstanceEnv += "$v=$((Get-Item "Env:$v").Value)" }
+}
+$ComposeInstance = @('compose', '-p', $InstanceProject, '--env-file', "$env:HOLDFAST_INSTANCE_DIR/instance.env", '-f', 'docker-compose.yml', '-f', 'docker-compose.instance.yml')
+$ComposeSandbox = @('compose', '-p', $SandboxProject, '--env-file', '.env.sandbox', '-f', 'docker-compose.yml', '-f', 'docker-compose.sandbox.yml')
 $Python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
 
 $Help = [ordered]@{
@@ -42,8 +56,11 @@ $Help = [ordered]@{
     'lint'    = 'ruff + ruff format --check + mypy + import-linter, eslint + tsc'
     'fmt'     = 'Format backend (ruff) and web (format script, if any)'
     'migrate' = 'alembic upgrade head as holdfast_owner (one-off migrate container)'
+    'rotate-keys' = 'Re-encrypt stored secrets under the primary FERNET_KEY (ADR 0015); run twice'
+    'rotate-keys-prod' = 'rotate-keys against the prod stack (use this on a prod host)'
     'seed'    = 'Seed Plaid Sandbox data (placeholder until Phase 2)'
     'keys'    = 'Create .env from .env.example with fresh secrets (refuses to overwrite)'
+    'keys-add-missing' = 'Existing .env: add the generated values it lacks; never FERNET_KEY or the Postgres passwords'
     'check'   = 'lint + test'
     'health'  = 'GET /api/health through Caddy'
     'ports'   = 'Assert no compose service publishes beyond the rules'
@@ -51,12 +68,25 @@ $Help = [ordered]@{
     'wt-new'  = 'New worktree on a fresh base: dev.ps1 wt-new <branch> [base]'
     'test-locked' = 'test under an exclusive lock (${XDG_RUNTIME_DIR:-/tmp}/holdfast-make-test.lock) so parallel worktrees share the test DB safely'
     'dist' = 'Build wheel + sdist (holdfast-finance) and SHA256SUMS into ./dist. Does not publish.'
+    'instance-init' = 'Create HOLDFAST_INSTANCE_DIR (0700), its subdirectories and instance.env with fresh keys'
+    'instance-up' = 'Start holdfast-instance (refuses unless HOLDFAST_INSTANCE_DIR is mode 0700 outside the repo)'
+    'instance-down' = 'Stop holdfast-instance (data stays on its bind mounts)'
+    'instance-migrate' = 'alembic upgrade head on holdfast-instance'
+    'instance-ps' = 'List holdfast-instance services'
+    'instance-logs' = 'Follow holdfast-instance logs (dev.ps1 instance-logs api)'
+    'sandbox-up' = 'Start holdfast-sandbox with fresh synthetic keys (.env.sandbox); PLAID_ENV is forced to sandbox'
+    'sandbox-down' = 'Stop holdfast-sandbox (keeps its volumes and .env.sandbox)'
+    'sandbox-migrate' = 'alembic upgrade head on holdfast-sandbox'
+    'sandbox-destroy' = 'Delete holdfast-sandbox: containers, volumes and .env.sandbox'
     'release-check' = 'Compare product SemVer and Python version. Does not tag or publish.'
 }
 
 function Assert-Env {
     if (-not (Test-Path '.env')) {
         Write-Error "error: .env not found. Run './scripts/dev.ps1 keys' to create it from .env.example."
+    }
+    if ((Get-EnvValue 'REDIS_PASSWORD') -notmatch '^[A-Za-z0-9_-]+$') {
+        Write-Error "error: REDIS_PASSWORD is missing (or has characters outside A-Za-z0-9_-) in .env. Run './scripts/dev.ps1 keys-add-missing' (adds it, changes nothing else)."
     }
 }
 
@@ -75,6 +105,12 @@ function Get-EnvValue([string]$Name) {
     $line = Get-Content '.env' | Where-Object { $_ -match "^$Name=" } | Select-Object -First 1
     if ($line) { return $line.Substring($Name.Length + 1) }
     return $null
+}
+
+# scripts/instance.sh is bash (mode and ownership checks of a Unix directory): run it with bash
+# (macOS, Linux, WSL). The instance host is a Unix machine.
+function Invoke-Instance([string]$Verb) {
+    bash scripts/instance.sh $Verb
 }
 
 function Invoke-In([string]$Dir, [scriptblock]$Block) {
@@ -109,7 +145,7 @@ function Invoke-Test {
                 $set += 'TEST_MIGRATIONS_DATABASE_URL'
             }
             if (-not $env:TEST_REDIS_URL) {
-                $env:TEST_REDIS_URL = 'redis://127.0.0.1:56379/15'
+                $env:TEST_REDIS_URL = "redis://:$(Get-EnvValue 'REDIS_PASSWORD')@127.0.0.1:56379/15"
                 $set += 'TEST_REDIS_URL'
             }
         }
@@ -160,8 +196,11 @@ switch ($Target) {
         }
     }
     'migrate' { Assert-Env; docker @Compose run --rm migrate }
+    'rotate-keys' { Assert-Env; docker @Compose run --rm --no-deps rotate-keys }
+    'rotate-keys-prod' { Assert-Env; docker @ComposeProd run --rm --no-deps rotate-keys }
     'seed' { & $Python scripts/seed_sandbox.py }
     'keys' { & $Python scripts/gen-keys.py --write }
+    'keys-add-missing' { & $Python scripts/gen-keys.py --add-missing }
     'check' { Invoke-Lint; Invoke-Test }
     'health' { curl -fsSk https://localhost/api/health; Write-Host '' }
     'ports' {
@@ -179,6 +218,50 @@ switch ($Target) {
             $env:TAILSCALE_BIND_IP = $saved.TAILSCALE_BIND_IP
             $env:CF_API_TOKEN = $saved.CF_API_TOKEN
         }
+        # The H2 projects: .env's values and a placeholder instance directory (never read).
+        $savedDir = $env:HOLDFAST_INSTANCE_DIR
+        try {
+            if (-not $env:HOLDFAST_INSTANCE_DIR) { $env:HOLDFAST_INSTANCE_DIR = '/var/lib/holdfast-instance-check' }
+            docker compose --env-file .env -f docker-compose.yml -f docker-compose.instance.yml config --format json | & $Python scripts/check-compose-ports.py --instance
+        } finally { $env:HOLDFAST_INSTANCE_DIR = $savedDir }
+        docker compose --env-file .env -f docker-compose.yml -f docker-compose.sandbox.yml config --format json | & $Python scripts/check-compose-ports.py --sandbox
+    }
+    'instance-init' {
+        docker build -t $BackendImage backend
+        $env:BACKEND_IMAGE = $BackendImage
+        Invoke-Instance 'init'
+    }
+    'instance-up' {
+        Invoke-Instance 'check'
+        env @InstanceEnv docker @ComposeInstance build api
+        env @InstanceEnv docker @ComposeInstance up -d --build db redis
+        env @InstanceEnv docker @ComposeInstance run --rm migrate
+        env @InstanceEnv docker @ComposeInstance up -d --build
+    }
+    'instance-down' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance down --remove-orphans }
+    'instance-migrate' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance run --rm migrate }
+    'instance-ps' { Invoke-Instance 'check'; env @InstanceEnv docker @ComposeInstance ps }
+    'instance-logs' {
+        Invoke-Instance 'check'
+        $logArgs = @('logs', '-f', '--tail=200')
+        if ($Service) { $logArgs += $Service }
+        env @InstanceEnv docker @ComposeInstance @logArgs
+    }
+    'sandbox-up' {
+        Invoke-Instance 'sandbox-env'
+        docker @ComposeSandbox up -d --build db redis
+        docker @ComposeSandbox run --rm migrate
+        docker @ComposeSandbox up -d --build
+    }
+    'sandbox-down' {
+        if ($SandboxProject -ne 'holdfast-sandbox') { throw 'refusing: project is not holdfast-sandbox' }
+        docker @ComposeSandbox down --remove-orphans
+    }
+    'sandbox-migrate' { Invoke-Instance 'sandbox-env'; docker @ComposeSandbox run --rm migrate }
+    'sandbox-destroy' {
+        if ($SandboxProject -ne 'holdfast-sandbox') { throw 'refusing: project is not holdfast-sandbox' }
+        docker @ComposeSandbox down -v --remove-orphans
+        Remove-Item -Force .env.sandbox -ErrorAction SilentlyContinue
     }
     'sync' {
         git fetch origin --quiet
