@@ -20,6 +20,7 @@ from app.domain.rule_regex import (
 from tests.domain.regex_corpus import (
     BUDGET_ONLY,
     CORPUS,
+    MUST_ACCEPT,
     PROBE_ONLY_VARIANTS,
     REQUIRED_REJECTIONS,
 )
@@ -41,6 +42,7 @@ def test_probe_alone_still_refuses_the_required_patterns(
     """The structural limits are not the only defence: with them off, the probe refuses."""
     monkeypatch.setattr(rule_regex, "MAX_REPEAT_BUDGET", 10_000)
     monkeypatch.setattr(rule_regex, "MAX_PROGRAM_SIZE", 10**9)
+    monkeypatch.setattr(rule_regex, "MAX_CLASS_POSITIONS", 10**9)
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
     assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
@@ -49,25 +51,30 @@ def test_probe_alone_still_refuses_the_required_patterns(
 @pytest.mark.parametrize(
     ("pattern", "allowed"),
     (
-        ("A{8}", True),
-        ("A{9}", False),
-        ("A{2,9}", False),
-        ("A{9,}", False),
+        (r"\d{8}", True),
+        (r"\d{9}", False),
+        (r"\d{2,9}", False),
+        (r"\d{9,}", False),
         ("[W]{8}[W]{8}", False),
         ("[W]{4}[W]{4}", True),
         ("[W]{4}[W]{5}", False),
-        ("A{4}|B{8}", True),
-        ("A{4}|B{9}", False),
-        ("(?:A{4}){2}", True),
-        ("(?:A{4}){3}", False),
-        ("(?:(?:A{2}){2}){2}", True),
-        ("(?:A{2}){2}(?:B{2}){3}", False),
-        ("(?:A{3}|B{2}){3}", False),
-        ("(?:A{3}|B{2}){2}C{2}", True),
-        ("(?:A{9})", False),
+        (r"\d{4}|\d{8}", True),
+        (r"\d{4}|\d{9}", False),
+        (r"(?:\d{4}){2}", True),
+        (r"(?:\d{4}){3}", False),
+        (r"(?:(?:\d{2}){2}){2}", True),
+        (r"(?:\d{2}){2}(?:\w{2}){3}", False),
+        (r"(?:\d{3}|\w{2}){3}", False),
+        (r"(?:\d{3}|\w{2}){2}\d{2}", True),
+        (r"(?:\d{9})", False),
         (r"\d{3}-\d{4}", True),
         (r"A\{99\}", True),
         ("A{,99}", True),
+        # Counts on literals do not branch the DFA, so they are free.
+        ("A{9}", True),
+        ("(?:AB){40}", True),
+        (r"\*{8}\d{4}", True),
+        (r"X{8}\d{4}", True),
     ),
 )
 def test_counted_repetition_is_capped_and_nested_counts_multiply(
@@ -254,7 +261,7 @@ def test_save_time_is_bounded_and_a_cap_hit_rejects(pattern: str) -> None:
 def test_probe_family_cap_rejects_and_never_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rule_regex, "MAX_PROBE_FAMILIES", 3)
     with pytest.raises(RuleValidationError) as caught:
-        compile_pattern("PAYMENT")
+        compile_pattern("PAY[A-Z]MENT")
     assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
 
 
@@ -271,8 +278,8 @@ def test_group_alphabets_are_probed_and_negated_classes_use_non_ascii_samples() 
 
 
 def test_open_ended_count_costs_its_lower_bound() -> None:
-    assert rule_regex._scan("A{8,}").repeat_cost == 8
-    assert rule_regex._scan("A{3,9}").repeat_cost == 9
+    assert rule_regex._scan(r"\d{8,}").repeat_cost == 8
+    assert rule_regex._scan(r"\d{3,9}").repeat_cost == 9
 
 
 @pytest.mark.parametrize(
@@ -304,3 +311,48 @@ def test_range_ends_and_midpoint_are_decoded() -> None:
         "\u10df",
     }
     assert set(rule_regex._class_endpoints(r"[\101-\103x]")) >= {"A", "C", "B", "x"}
+
+
+@pytest.mark.parametrize("pattern", MUST_ACCEPT)
+def test_masked_account_and_literal_only_patterns_are_accepted(pattern: str) -> None:
+    assert compile_pattern(pattern)
+
+
+def test_pure_literal_patterns_skip_the_timing_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_probe(*_: object) -> int:
+        pytest.fail("a literal-only pattern was timed")
+
+    monkeypatch.setattr(rule_regex, "_family_mean_ns", no_probe)
+    assert compile_pattern("A" * 128).search("a" * 128)
+    assert rule_regex._scan("A" * 128).pure_literal
+    assert not rule_regex._scan("AB|CD").pure_literal
+    assert not rule_regex._scan("A*B").pure_literal
+    assert not rule_regex._scan("A.B").pure_literal
+    assert not rule_regex._scan("A{3}").pure_literal
+
+
+@pytest.mark.parametrize(
+    ("pattern", "positions"),
+    (
+        (".", 1),
+        ("ABC", 0),
+        (r"\d{4}-\d{4}", 8),
+        (".*X.{3}", 4),
+        ("(?:AB|CD)", 1),
+        ("(?:AB|CD){5}", 5),
+        ("(?:AB){5}", 0),
+        ("(?:\\d|\\w){2}[A-Z]", 3),
+        ("A|BC.", 1),
+    ),
+)
+def test_class_positions_count_dots_classes_and_branching_groups(
+    pattern: str, positions: int
+) -> None:
+    assert rule_regex._scan(pattern).class_positions == positions
+
+
+def test_written_out_copies_hit_the_class_position_budget() -> None:
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern("QJV.*X" + "." * 24 + "W")
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+    assert compile_pattern("QJV.*X" + "." * 4 + "W")

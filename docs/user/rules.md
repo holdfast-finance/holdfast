@@ -13,8 +13,9 @@ Use plain text to find a word, or use RE2 pattern syntax for more control.
 - Use `\pL` for a Unicode letter or `[[:alpha:]]` for an ASCII letter.
 
 The shortcuts `\d`, `\w`, `\s`, and `\b` use ASCII definitions. For example,
-`\b` treats `é` as a non-word character. A pattern can use repeat counts that add up to 8
-(`\d{3}-\d{4}` uses 7), with nested counts multiplied and the larger side of `|` counted.
+`\b` treats `é` as a non-word character. Repeat counts on classes add up to at most 8 (`\d{3}-\d{4}` uses 7), and a pattern can have at
+most 24 dots, classes and alternations in a row, counting each repeat. Counts on plain
+text such as `\*{8}\d{4}` are free, and plain-text patterns skip the speed check.
 RE2 does not support backreferences or lookahead and lookbehind.
 
 Patterns must be 1 to 128 characters long. Holdfast refuses patterns that

@@ -285,3 +285,10 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   written only as escapes (`[\x{10D0}-\x{10EF}]`) is sampled at both range ends and the midpoint,
   and a class with no sample at all refuses the pattern instead of falling back to a generic
   alphabet.
+- **Class-position budget of 24** (round 4). Hand-written copies of a class cost nothing in the
+  repetition budget (`QJV.*X` plus 121 dots). Every `.`, class or branching group in sequence
+  counts 1, times its count, and the total is capped at 24. Literals are free, and a count on a
+  literal or pure-literal group costs nothing against either budget, so `\*{8}\d{4}` passes.
+  Pure-literal patterns skip the timing probe: their DFA has at most len + 1 states.
+  The probe gained literal-prefix + dense-trigger families, so variants at 21 positions are
+  refused by the probe alone.

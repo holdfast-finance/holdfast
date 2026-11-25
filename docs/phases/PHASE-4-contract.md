@@ -139,10 +139,16 @@ REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
 INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
 MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
 MAX_REPEAT_BUDGET = 8             # TOTAL counted repetition: sum along a sequence, max across `|`, nesting multiplies, `{n,}` counts n. Over it: PATTERN_TOO_COMPLEX
+MAX_CLASS_POSITIONS = 24          # class/dot/branching-group positions, written-out copies included
 MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ceiling
 def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
 def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
+  the same calculator. `MAX_CLASS_POSITIONS = 24`, refused with PATTERN_TOO_COMPLEX. Literals are free,
+  and a count on a single literal or a pure-literal group costs nothing against either budget
+  (programsize bounds it). Pure-literal patterns (no class, dot, alternation or repeat) skip the
+  timing probe. The probe adds literal-prefix + dense-trigger families.
 - Repetition budget: `[W]{8}[W]{8}` is 16 and refused, `\d{3}-\d{4}` is 7 and valid. The probe fails
   closed: escape-only classes are sampled from their decoded range ends and midpoint, and a class
   with no sample refuses the pattern.

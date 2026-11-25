@@ -24,6 +24,9 @@ MAX_PROBE_FAMILIES = 160
 # counts multiplied). DFA state growth is 2^n in the count, so 8 bounds what the probe can
 # only sample, and bank descriptions never need more.
 MAX_REPEAT_BUDGET = 8
+# Class positions (every ., class or branching group, times its count) per pattern. Written-out
+# copies cost the same as a count, so this closes what the repetition budget cannot see.
+MAX_CLASS_POSITIONS = 24
 # RE2 program size ceiling (instructions). See PHASE-4-contract 2.2 for the measurements.
 MAX_PROGRAM_SIZE = 2000
 REGEX_BUDGET_SECONDS = 10
@@ -173,6 +176,11 @@ class _Scan:
     # Total counted-repetition cost: counts add along a sequence, the larger alternative
     # counts across ``|``, nesting multiplies ((?:a{4}){8} is 32) and ``{n,}`` counts n.
     repeat_cost: int
+    # Class positions: every ``.``, class or branching group in sequence counts 1, times its
+    # ``{n}`` through the same calculator. Literals are free.
+    class_positions: int
+    # No class, dot, alternation or repetition anywhere: the DFA has at most len + 1 states.
+    pure_literal: bool
 
 
 def _fold_key(text: str) -> str:
@@ -200,9 +208,11 @@ def _scan(pattern: str) -> _Scan:
     groups: dict[tuple[str, tuple[str, ...]], None] = {}
     # Each open group: literal letters and class atoms inside it.
     open_groups: list[tuple[dict[str, str], dict[str, None]]] = []
-    # Repeat cost per nesting level: [largest finished alternative, current alternative].
-    levels: list[list[int]] = [[0, 0]]
-    last_cost = 0
+    # Cost per nesting level: [repeat: finished max, current; positions: finished max, current].
+    levels: list[list[int]] = [[0, 0, 0, 0]]
+    has_alternation = [False]
+    last_rep = last_pos = 0
+    pure_literal = True
     literals: dict[str, str] = {}
     runs: dict[str, str] = {}
     recent = ""
@@ -212,7 +222,7 @@ def _scan(pattern: str) -> _Scan:
         end = i + 1
         literal = ""
         atom = ""
-        closed_cost = 0
+        closed_rep = closed_pos = 0
         if char == "[":
             end = _bracket_end(pattern, i)
             atom = pattern[i:end]
@@ -236,32 +246,50 @@ def _scan(pattern: str) -> _Scan:
             end += 1
             if pattern[end - 1] != ")":
                 open_groups.append(({}, {}))
-                levels.append([0, 0])
+                levels.append([0, 0, 0, 0])
+                has_alternation.append(False)
         elif char == "(":
             open_groups.append(({}, {}))
-            levels.append([0, 0])
+            levels.append([0, 0, 0, 0])
+            has_alternation.append(False)
         elif char == "|":
-            levels[-1] = [max(levels[-1]), 0]
+            pure_literal = False
+            top = levels[-1]
+            levels[-1] = [max(top[:2]), 0, max(top[2:]), 0]
+            has_alternation[-1] = True
         elif char == ")":
             if open_groups:
                 letters, members = open_groups.pop()
                 groups[("".join(letters.values()), tuple(members))] = None
-                closed_cost = max(levels.pop())
-                levels[-1][1] += closed_cost
+                done = levels.pop()
+                closed_rep, closed_pos = max(done[:2]), max(done[2:])
+                if has_alternation.pop():
+                    closed_pos = max(closed_pos, 1)
+                levels[-1][1] += closed_rep
+                levels[-1][3] += closed_pos
                 for parent in open_groups:
                     parent[1].update(members)
                     for key, letter in letters.items():
                         parent[0][key] = letter
         elif char == "{" and (parsed := _repeat_count(pattern, i)) is not None:
             end, count = parsed
-            repeated_cost = count * max(last_cost, 1)
-            levels[-1][1] += repeated_cost - last_cost
-            closed_cost = repeated_cost
+            pure_literal = False
+            if last_pos:
+                # A count on a single literal or a pure-literal group does not branch the DFA.
+                closed_rep = count * max(last_rep, 1)
+                closed_pos = count * last_pos
+                levels[-1][1] += closed_rep - last_rep
+                levels[-1][3] += closed_pos - last_pos
         elif char not in "^$|()*+?":
             literal = char
+        if char in "*+?" and not pattern.startswith("(?", i):
+            pure_literal = False
 
-        last_cost = closed_cost
+        last_rep, last_pos = closed_rep, closed_pos
         if atom:
+            pure_literal = False
+            levels[-1][3] += 1
+            last_pos = 1
             atoms[atom] = None
             for _, members in open_groups:
                 members[atom] = None
@@ -281,7 +309,9 @@ def _scan(pattern: str) -> _Scan:
         tuple(literals.values()),
         tuple(runs.values()),
         tuple(groups),
-        max(levels[0]),
+        max(levels[0][:2]),
+        max(levels[0][2:]),
+        pure_literal,
     )
 
 
@@ -390,6 +420,18 @@ def _probe_families(
     union = "".join(dict.fromkeys("".join(alphabets) + "".join(groups) + "".join(literals)))
     if len(union) > 1:
         yield _subjects(rng, union, 32)
+    # A literal prefix followed by a dense mix of the pattern's own literals and a few class
+    # samples: the shape that written-out repetition after a literal anchor needs.
+    prefix = max(runs, key=len, default="".join(literals[:1]))
+    for alphabet in dict.fromkeys((*alphabets, *groups)):
+        for dense in dict.fromkeys(
+            (alphabet[:4], "".join(dict.fromkeys(alphabet[:4] + "".join(literals))))
+        ):
+            if len(dense) > 1:
+                yield tuple(
+                    prefix + "".join(rng.choices(dense, k=MAX_SUBJECT_LENGTH - len(prefix)))
+                    for _ in range(32)
+                )
     for alphabet in dict.fromkeys(alphabets):
         yield _subjects(rng, alphabet, 32)
         for literal in literals:
@@ -438,10 +480,15 @@ def compile_pattern(pattern: str) -> CompiledPattern:
         raise RuleValidationError(PATTERN_INVALID) from None
     if scanned.repeat_cost > MAX_REPEAT_BUDGET:
         raise RuleValidationError(PATTERN_TOO_COMPLEX)
+    if scanned.class_positions > MAX_CLASS_POSITIONS:
+        raise RuleValidationError(PATTERN_TOO_COMPLEX)
     if compiled.engine.programsize > MAX_PROGRAM_SIZE:
         raise RuleValidationError(PATTERN_TOO_COMPLEX)
     if len(scanned.atoms) > MAX_CLASS_ATOMS:
         raise RuleValidationError("This pattern has too many character classes.")
+    if scanned.pure_literal:
+        # A literal-only DFA has at most len + 1 states, and programsize bounds it already.
+        return compiled
     alphabets = tuple(_atom_alphabets(scanned.atoms))
     groups = _group_alphabets(scanned.groups)
     families = _probe_families(alphabets, scanned.literals, scanned.runs, groups)

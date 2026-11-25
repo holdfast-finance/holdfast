@@ -29,6 +29,9 @@ REQUIRED_REJECTIONS = (
     r"(?:[\x{100}-\x{17F}]|[\x{180}-\x{24F}]){16}#",
     r"[\x{105}\x{142}]*\x{105}[\x{105}\x{142}\x{17C}]{16}#",
     "[W]{8}[W]{8}",
+    "QJV.*X" + "." * 121 + "W",
+    "KZ.*X" + "." * 122 + "W",
+    "QJV[XY]*X" + "[XY]" * 25 + "W",
 )
 
 # The four escape-only-class patterns again at a total count of 8, which the repetition
@@ -41,8 +44,29 @@ PROBE_ONLY_VARIANTS = (
     r"[\x{105}\x{142}]*\x{105}[\x{105}\x{142}\x{17C}]{8}#",
 )
 
+# Hand-written repetition after a literal prefix, inside the class-position budget of 24.
+# The probe must refuse these on its own.
+PROBE_ONLY_VARIANTS += (
+    "QJV.*X" + "." * 20 + "W",
+    "KZ.*X" + "." * 20 + "W",
+    "QJV.*X" + "." * 21 + "W",
+    "QJV.*X" + "[^#]" * 20 + "#",
+    "QJV[XY]*X" + "[XY]" * 20 + "W",
+)
+
 # Required rejections the repetition budget alone refuses (nothing for a probe to sample).
 BUDGET_ONLY = ("[W]{8}[W]{8}",)
+
+# Realistic patterns that must stay valid: masked accounts and literal-only counts.
+MUST_ACCEPT = (
+    r"X{8}\d{4}",
+    r"\*{8}\d{4}",
+    r"\*{12}\d{4}",
+    r"(?:AB){12}\d{4}",
+    r"XXXX\d{4}",
+    r"ACCT [X*]{4}\d{4}",
+    "A" * 128,
+)
 
 CORPUS = (
     *REQUIRED_REJECTIONS,
