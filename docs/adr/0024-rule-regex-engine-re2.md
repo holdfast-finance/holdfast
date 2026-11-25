@@ -304,3 +304,10 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
 - **Long literal prefixes** (round 7). Probe prefixes came from runs capped at three characters, so
   `QJVK.*X` plus 22 dots slipped through. `_scan` now keeps every maximal literal run and the probe
   emits a prefix family per run, longest first, within the family cap.
+- **Class-position budget lowered from 24 to 10** (round 8). Prefix shapes the probe cannot enumerate
+  (two prefixes, a prefix split by a class, a class or `\d` or `(?:A|B)` before the prefix, decoys
+  after it) still cost 110 to 128 µs. Measured against class positions with the probe off: 8 is 1.5 µs,
+  10 is 1.9, 12 is 53, 16 is 92, 23 is 114. The cliff is the DFA cache, between 10 and 12, so the
+  budget sits at 10, in line with the repetition budget of 8, and no more probe families are added.
+  `\d{3}-\d{4}` (7) and `\d{2}/\d{2}/\d{4}` (8) pass. `\(\d{3}\) \d{3}-\d{4}` fits the position budget
+  (10) but costs 10 against the repetition budget of 8, so it is refused and reported, not widened.

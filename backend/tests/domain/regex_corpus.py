@@ -44,6 +44,14 @@ REQUIRED_REJECTIONS = (
     "QJVK[XY]*X" + "[XY]" * 22 + "W",
 )
 
+# Prefix shapes the probe cannot enumerate. The class-position budget (cliff between 10 and 12
+# positions with the probe off) must refuse them, budget on.
+BUDGET_REJECTIONS = (
+    "QJVK.*ZZZZ.*X" + "." * 21 + "W",
+    "QJ[XY]VK.*X" + "." * 21 + "W",
+    "[AB]QJVK.*X" + "." * 21 + "W",
+)
+
 # The four escape-only-class patterns again at a total count of 8, which the repetition
 # budget allows. The probe must refuse these on its own.
 PROBE_ONLY_VARIANTS = (
@@ -79,7 +87,11 @@ MUST_ACCEPT = (
     r"XXXX\d{4}",
     r"ACCT [X*]{4}\d{4}",
     "A" * 128,
+    r"\d{2}/\d{2}/\d{4}",
 )
+
+# A benign pattern the repetition budget of 8 refuses (10 counted digits). Reported, not widened.
+KNOWN_REFUSED_BENIGN = (r"\(\d{3}\) \d{3}-\d{4}",)
 
 CORPUS = (
     *REQUIRED_REJECTIONS,
@@ -94,6 +106,7 @@ CORPUS = (
     "UBER (EATS|TRIP)",
     "^[A-Z]+ [0-9]{4}$",
     r"\d{3}-\d{4}",
+    r"\d{2}/\d{2}/\d{4}",
     "[^0-9]+ PAYMENT",
     r"(?:VENMO|ZELLE|PAYPAL) \*?[A-Z ]+",
     "[^A-W]{1}[XYZ]{120}#",

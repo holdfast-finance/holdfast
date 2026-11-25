@@ -14,7 +14,7 @@ Use plain text to find a word, or use RE2 pattern syntax for more control.
 
 The shortcuts `\d`, `\w`, `\s`, and `\b` use ASCII definitions. For example,
 `\b` treats `é` as a non-word character. Repeat counts on classes add up to at most 8 (`\d{3}-\d{4}` uses 7), and a pattern can have at
-most 24 dots, classes and alternations in a row, counting each repeat. Counts on plain
+most 10 dots, classes and alternations in all, counting each repeat (`\d{2}/\d{2}/\d{4}` uses 8). Counts on plain
 text such as `\*{8}\d{4}` are free, and patterns of plain text skip the speed check. A plain-text pattern has no `.`, class, `|`,
 `*`, `+`, `?` or `{n}`. Inline flags such as `(?i)` or `(?s)` aren't supported, because matching is
 always case-insensitive. Holdfast also normalizes descriptions and patterns to NFKC before matching, so

@@ -19,7 +19,9 @@ from app.domain.rule_regex import (
 )
 from tests.domain.regex_corpus import (
     BUDGET_ONLY,
+    BUDGET_REJECTIONS,
     CORPUS,
+    KNOWN_REFUSED_BENIGN,
     MUST_ACCEPT,
     PROBE_ONLY_VARIANTS,
     REQUIRED_REJECTIONS,
@@ -210,7 +212,11 @@ def test_error_does_not_echo_input(pattern: str, capfd: pytest.CaptureFixture[st
     assert capfd.readouterr().err == ""
 
 
-def test_more_than_sixteen_distinct_class_atoms_are_refused() -> None:
+def test_more_than_sixteen_distinct_class_atoms_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The position budget (10) now fires first; the atom cap stays as a second line.
+    monkeypatch.setattr(rule_regex, "MAX_CLASS_POSITIONS", 100)
     with pytest.raises(RuleValidationError, match="too many character classes"):
         compile_pattern("".join(f"[{letter}]" for letter in "ABCDEFGHIJKLMNOPQ"))
 
@@ -558,3 +564,40 @@ def test_long_prefix_families_are_generated_longest_first() -> None:
         )
     )
     assert any(subject.startswith("ACHPMT") for family in families for subject in family)
+
+
+@pytest.mark.parametrize("pattern", BUDGET_REJECTIONS)
+def test_unenumerable_prefix_shapes_are_refused_by_the_position_budget(pattern: str) -> None:
+    assert rule_regex._scan(pattern).class_positions > rule_regex.MAX_CLASS_POSITIONS
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+
+
+def test_position_budget_sits_below_the_measured_dfa_cache_cliff() -> None:
+    assert rule_regex.MAX_CLASS_POSITIONS == 10
+    assert compile_pattern("QJV.*X" + "." * 8 + "W")  # 9 positions
+    with pytest.raises(RuleValidationError):
+        compile_pattern("QJV.*X" + "." * 10 + "W")  # 11 positions
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    (
+        r"\d{3}-\d{4}",
+        r"\d{2}/\d{2}/\d{4}",
+        r"(?:VENMO|ZELLE|PAYPAL) \*?[A-Z ]+",
+    ),
+)
+def test_common_phone_date_and_merchant_shapes_still_pass(pattern: str) -> None:
+    assert compile_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", KNOWN_REFUSED_BENIGN)
+def test_known_refused_benign_pattern_is_refused_by_the_repetition_budget(pattern: str) -> None:
+    scanned = rule_regex._scan(pattern)
+    assert scanned.repeat_cost == 10
+    assert scanned.class_positions == 10  # inside the position budget
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX

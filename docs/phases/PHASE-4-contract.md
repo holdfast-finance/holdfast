@@ -139,7 +139,7 @@ REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
 INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
 MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
 MAX_REPEAT_BUDGET = 8             # TOTAL counted repetition: sum along a sequence, max across `|`, nesting multiplies, `{n,}` counts n. Over it: PATTERN_TOO_COMPLEX
-MAX_CLASS_POSITIONS = 24          # class/dot/branching-group positions, written-out copies included
+MAX_CLASS_POSITIONS = 10          # class/dot/branching-group positions, written-out copies included
 MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ceiling
 def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
 def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
@@ -156,7 +156,7 @@ def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 
   Inline flags give `PATTERN_INLINE_FLAGS`; other refused syntax gives the neutral
   `PATTERN_UNSUPPORTED`.
 - Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
-  the same calculator. `MAX_CLASS_POSITIONS = 24`, refused with PATTERN_TOO_COMPLEX. Literals are free,
+  the same calculator. `MAX_CLASS_POSITIONS = 10` (was 24), refused with PATTERN_TOO_COMPLEX. With the probe off, search cost against positions measured 8: 1.5 µs, 10: 1.9, 12: 53, 16: 92, 23: 114, so the DFA-cache cliff sits between 10 and 12 and the probe cannot enumerate every prefix shape above it. Literals are free,
   and a count on a single literal or a pure-literal group costs nothing against either budget
   (programsize bounds it). Pure-literal patterns skip the
   timing probe. The code's rule: no `.`, no class or class escape (`\d`, `\pL`), no `|`, no `*`, `+`

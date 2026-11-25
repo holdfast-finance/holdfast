@@ -28,7 +28,7 @@ MAX_PREFIX_RUNS = 4
 MAX_REPEAT_BUDGET = 8
 # Class positions (every ., class or branching group, times its count) per pattern. Written-out
 # copies cost the same as a count, so this closes what the repetition budget cannot see.
-MAX_CLASS_POSITIONS = 24
+MAX_CLASS_POSITIONS = 10
 # RE2 program size ceiling (instructions). See PHASE-4-contract 2.2 for the measurements.
 MAX_PROGRAM_SIZE = 2000
 REGEX_BUDGET_SECONDS = 10
