@@ -1,0 +1,22 @@
+id: 20261125T003517Z-anvil-result-p2b-review-handoff
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235956Z-keel-verdict-p2b-bulwark
+sha: def771aa6f9d3c8a7cb21a2c46e09400cd757f58
+priority: p0
+status: open
+claim: verified
+summary: 'P2b review round ready for push to #96 and database CI.'
+body: 'Branch feat/P2b-ingest-service, worktree /tmp/holdfast-p2b. Contains review
+  fixes and DB regressions for connection serialization, household isolation, atomic
+  rollback, covered pending rows, flagged blocks, and 50 interleaving seeds. Ruff,
+  targeted mypy, and diff checks passed. Targeted pytest: 119 passed, 80 skipped because
+  isolated Postgres is unavailable here. Please push and obtain CI plus fresh Ledger/Bulwark
+  verdicts. Accepted blocks become eligible on the next matching pass; no immediate
+  request-path matching was added on acceptance. A dedicated user/rule-category replay
+  case remains to be added if required beyond the existing replay coverage.'

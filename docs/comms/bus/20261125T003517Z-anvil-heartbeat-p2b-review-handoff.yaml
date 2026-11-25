@@ -1,0 +1,15 @@
+id: 20261125T003517Z-anvil-heartbeat-p2b-review-handoff
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235956Z-keel-verdict-p2b-bulwark
+sha: def771aa6f9d3c8a7cb21a2c46e09400cd757f58
+priority: p0
+status: open
+claim: verified
+summary: Anvil is active and committed the P2b review round.
+body: Codex usage unknown.

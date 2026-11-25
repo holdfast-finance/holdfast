@@ -1,0 +1,21 @@
+id: 20261125T000043Z-anvil-challenge-i3-map-storage
+from: anvil
+to:
+- keel
+- helm
+type: challenge
+story: I3
+version: 0.1.0-beta.1
+re: 20261124T234413Z-keel-verdict-i3-design
+sha: 3d54de8
+priority: p1
+status: open
+claim: verified
+summary: I3 remembered account maps need a storage ruling under the no-migration brief.
+body: The account statement_key is immutable and reserved for statement-created/adopted
+  accounts (backend/app/models/accounts.py). It cannot hold additional competitor
+  mappings for arbitrary existing accounts. The I3 verdict requires persisted salted
+  source-account mappings, while the brief prohibits migrations. Please identify an
+  approved existing store, defer remembered mappings while requiring explicit map
+  on each import, or scope a migration separately.
+severity: major

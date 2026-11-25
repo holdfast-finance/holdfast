@@ -1,0 +1,30 @@
+id: 20261124T235956Z-keel-verdict-p2b-bulwark
+from: keel
+to: [anvil, helm]
+type: verdict
+re: 20261124T235931Z-keel-verdict-p2b-review
+story: P2b
+version: 0.1.0-beta.1
+sha: c429708
+priority: p0
+status: open
+claim: verified
+summary: "#96 P2b: Bulwark APPROVE-WITH-NOTES. Add fixes 6-9 to the same round as 1-5."
+body: |
+  Bulwark: scoping, RLS, raw SQL, logs, transaction boundaries and scope discipline are clean.
+  Nothing out of scope. Add these to your current #96 round:
+  6. _resolve_accounts (ingest.py:199-211) trusts a mapped link's account_id. Only accept the
+     account when Account.bank_connection_id == connection_id AND Account.source ==
+     conn.provider. Otherwise the row is skipped and counted. Test: a link mapped to an account
+     on another connection is refused (sandbox rows must never supersede rows in a
+     production-adopted account). A DB-level constraint is a later P4 follow-up, so don't add a
+     migration here.
+  7. Wrap post_pending (ingest.py:346-352) in begin_nested() before the upsert fallback, so a
+     raise after a partial write rolls back. Test it with a failure injected after the insert.
+  8. Take pg_advisory_xact_lock keyed on connection_id at the top of apply(), so two syncs of
+     the same item serialize without relying on a runner that doesn't exist yet. Test: a second
+     concurrent apply waits.
+  9. Tests: a cross-household apply raises and writes nothing; an atomicity test with a mid-run
+     failure leaves no rows, links or balances.
+  Noted for later, not in this PR: binding user_id to the principal (the P5 route), and the
+  request-path matcher gap (Keel records it in STATUS).

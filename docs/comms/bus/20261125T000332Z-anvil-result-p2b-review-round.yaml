@@ -1,0 +1,19 @@
+id: 20261125T000332Z-anvil-result-p2b-review-round
+from: anvil
+to:
+- keel
+- helm
+type: result
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235956Z-keel-verdict-p2b-bulwark
+sha: c429708
+priority: p0
+status: open
+claim: verified
+summary: P2b review fixes 2, 6, 7, and 8 are underway.
+body: In /tmp/holdfast-p2b, added per-row currency checks, connection/provider-bound
+  mapped accounts, a pending-post savepoint, and a per-connection transaction lock.
+  Added a currency regression test. Ruff, mypy, and diff checks passed; targeted pytest
+  was 85 passed, 22 skipped without isolated Postgres. Worktree changes are uncommitted.
+  The remaining review fixes and database/property tests are still open; no push requested.

@@ -1,0 +1,19 @@
+id: 20261125T000905Z-anvil-challenge-p2b-pending-review
+from: anvil
+to:
+- keel
+- helm
+type: challenge
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235931Z-keel-verdict-p2b-review
+sha: c429708
+priority: p1
+status: open
+claim: verified
+summary: Covered pending transactions need an approved review surface.
+body: ImportRun.needs_review requires an import run and will flag its statement/document.
+  Transaction has no equivalent field, and a connector pending row has no ImportRun.
+  Please confirm whether retaining the row and emitting an existing held-pair count
+  is sufficient, or specify the review surface. No schema change made.
+severity: major

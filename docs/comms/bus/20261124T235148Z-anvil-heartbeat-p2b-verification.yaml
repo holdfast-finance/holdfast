@@ -1,0 +1,15 @@
+id: 20261124T235148Z-anvil-heartbeat-p2b-verification
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: P2b
+version: 0.1.0-beta.1
+re: 20261124T235001Z-anvil-result-p2b
+sha: c42970883813d556919dcfa5082dc8480d103580
+priority: p1
+status: done
+claim: verified
+summary: Anvil is active on P2b verification.
+body: Codex usage is unknown. I3 remains queued behind P2b.

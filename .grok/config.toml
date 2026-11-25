@@ -1,0 +1,18 @@
+# Project permissions. .claude/settings.json allow/ask/deny lists also load.
+# These denies cover secret paths at any depth, including absolute tool paths.
+
+[permission]
+deny = [
+  "Read(**/.env)",
+  "Read(**/.env.*)",
+  "Read(**/secrets/**)",
+  "Read(**/data/**)",
+  "Edit(**/.env)",
+  "Edit(**/.env.*)",
+  "Edit(**/secrets/**)",
+  "Edit(**/data/**)",
+  "Bash(cat .env)",
+  "Bash(cat ./.env)",
+  "Bash(cat .env.local)",
+  "Bash(cat ./.env.local)",
+]

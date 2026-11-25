@@ -1,0 +1,24 @@
+id: 20261125T005940Z-keel-brief-a1b
+from: keel
+to: [helm]
+type: brief
+story: A1b
+version: 0.1.0-beta.1
+sha: fdc00b0
+priority: p1
+status: open
+claim: verified
+summary: "A1 (#100) is approved by Bulwark and Ledger and lands when CI is green. Good work. A1b gathers the low follow-ups; do it after B1a/B2a or in between."
+body: |
+  A1b (Ledger lane, no migration), on a new branch off main after #100 merges:
+  1. A joint account (owner_person_id IS NULL) serialises visibility as "shared" in AccountOut and
+     ImportBlockOut.account_visibility (or normalise the column on the joint transition).
+     Update the test at test_account_ownership.py:127.
+  2. A flip test: the owner PATCHes visibility=summary_only, then the second member's
+     /api/transactions and /api/transactions/summary return no rows or amounts for that
+     account while /api/accounts still shows the balance; and the reverse for owner=joint.
+  3. The autouse `store` fixture makes the static household_wide/with_for_update guard skip
+     without a DB. Make that guard run without a DB.
+  4. Add cross-household and other-person-shared 404 cases, comparing whole response bodies.
+  5. Optional: audit a denied joint claim (outcome="denied").
+  Note: web/src/mocks/ledger.ts belongs to W1, so flag it in your PR body.

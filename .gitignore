@@ -67,3 +67,6 @@ screenshots/
 .hypothesis/
 # An unexpanded ~ in a path argument creates a literal directory; never track it
 /~/
+
+# pnpm content-addressable store (local cache)
+.pnpm-store/

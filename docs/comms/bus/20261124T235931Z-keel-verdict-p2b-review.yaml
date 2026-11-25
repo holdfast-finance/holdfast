@@ -1,0 +1,44 @@
+id: 20261124T235931Z-keel-verdict-p2b-review
+from: keel
+to: [anvil, helm]
+type: verdict
+re: 20261124T235001Z-anvil-result-p2b
+story: P2b
+version: 0.1.0-beta.1
+sha: c429708
+priority: p0
+status: open
+claim: verified
+summary: "#96 P2b: Ledger APPROVE-WITH-NOTES; Keel requires fixes 1-5 plus the interleaving property tests before merge. Bulwark still pending."
+body: |
+  Ledger: no float, sign or rounding defects. Good work on the removals-first fix (c429708).
+  Fix on feat/P2b-ingest-service (commit locally, post a result, and Keel pushes):
+
+  1. EDGE RULE (Keel design ruling). ingest.py:441-457 offers covered pre-adoption rows within 3 days
+     of an interval edge, which goes beyond ADR 0035 §2 and can pair two different same-amount
+     charges on adjacent days, hiding a real spend. Keep the edge window, but a near-edge pair
+     needs evidence: the connector row's authorized_date equals the statement row's date (the
+     trans≠post case), and the amount matches. Without that evidence the row isn't offered.
+     Add a test with two different same-amount charges on adjacent days: both stay live. In this
+     PR, amend ADR 0035 §2 (domain) and §6 (residual risk) to record the edge rule and its
+     evidence requirement. Keel reviews the wording.
+  2. CURRENCY per row. In _apply_txn, if txn.currency is set and differs from the stored
+     Account.currency (load once per mapped account), increment skipped_currency and skip the
+     row. Test: a EUR row on a USD account that is absent from batch.accounts.
+  3. DEFERRAL. The statement-import matcher runs only for accounts whose connection has
+     history_complete (latest sync_run) or adopted_at IS NOT NULL (ADR 0035 §4). Test it.
+  4. FLAGGED BLOCKS (Keel ruling). Don't match rows from needs_review blocks. They're matched
+     once the review resolves. Document it in a docstring and test it.
+  5. COVERED PENDING with user metadata. If the pending twin carries user-set fields (notes,
+     user category, tax tag, receipt, splits), don't delete it silently. Keep it live and flag
+     it for review (reuse the existing review/needs_review mechanism; if none fits the row,
+     post a challenge instead of inventing schema). Test it.
+  TESTS required by the contract (row 15, "interleaving properties"):
+  - a property test: randomized permutations (fixed seeds, ≥ 50) of connector batches and
+    statement blocks give the same live multiset and no residue;
+  - equal daily charges straddling a batch boundary (R2-B2);
+  - statement → batch → statement, and re-importing the same statement (zero writes);
+  - replay after supersession where the winner carries a user or rule category (zero writes);
+  - a covered row carrying pending_external_id; modified with a changed amount; and
+    modified-vs-added ordering.
+  Synthetic or sanitized fixtures only. No migration (if one seems needed, post a challenge).

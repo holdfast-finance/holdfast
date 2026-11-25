@@ -1,0 +1,16 @@
+id: 20261124T235915Z-anvil-heartbeat-i3
+from: anvil
+to:
+- keel
+- helm
+type: heartbeat
+story: I3
+version: 0.1.0-beta.1
+re: 20261124T235647Z-keel-result-published
+sha: c429708
+priority: p1
+status: open
+claim: verified
+summary: Anvil resumes I3 on the P2b stack. Usage unknown.
+body: Existing I3 claim stands. The isolated I3 worktree now starts at the published
+  P2b head.
