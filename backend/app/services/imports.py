@@ -64,6 +64,7 @@ from app.schemas.imports import (
 )
 from app.security.ratelimit import RateLimiter
 from app.services import audit
+from app.services.accounts import owner_kind
 from app.services.context import RequestContext
 from app.services.errors import ApiError
 from app.services.plaid_slots import assert_can_import
@@ -682,21 +683,32 @@ class ImportService:
             return []
         created = {r.run_id: r.created for r in results}
         stmt = (
-            select(ImportRun, Account.name, Account.currency)
+            select(
+                ImportRun,
+                Account.name,
+                Account.currency,
+                Account.owner_person_id,
+                Account.visibility,
+            )
             .join(Account, Account.id == ImportRun.account_id)
             .where(ImportRun.id.in_(created))
         )
         async with self._session() as s:
-            rows = {run.id: (run, name, cur) for run, name, cur in (await s.execute(stmt)).all()}
+            rows = {
+                run.id: (run, name, cur, owner_id, visibility)
+                for run, name, cur, owner_id, visibility in (await s.execute(stmt)).all()
+            }
         out: list[ImportBlockOut] = []
         for r in results:
-            run, name, cur = rows[r.run_id]
+            run, name, cur, owner_id, visibility = rows[r.run_id]
             out.append(
                 ImportBlockOut.model_validate(
                     {
                         "run_id": run.id,
                         "account_id": r.account_id,
                         "account_name": name,
+                        "account_owner": owner_kind(owner_id, self.principal.person_id),
+                        "account_visibility": visibility,
                         "currency": cur,
                         "reconcile_status": run.reconcile_status,
                         "period_start": run.period_start,

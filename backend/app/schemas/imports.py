@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
+from app.schemas.accounts import OwnerKind
 from app.schemas.common import Model, MoneyStr
 
 ReconcileStatus = Literal["pending", "reconciled", "needs_review", "accepted"]
@@ -67,6 +68,8 @@ class ImportBlockOut(ReconcileNumbers):
     run_id: uuid.UUID
     account_id: uuid.UUID
     account_name: str
+    account_owner: OwnerKind
+    account_visibility: Literal["private", "shared", "summary_only"]
     currency: str
     reconcile_status: ReconcileStatus
     period_start: date | None

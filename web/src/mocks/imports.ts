@@ -229,6 +229,8 @@ export function importFile(
     run_id: runId,
     account_id: LEDGER_IDS.checking,
     account_name: 'Everyday checking',
+    account_owner: 'me',
+    account_visibility: 'shared',
     currency: 'USD',
     reconcile_status: status,
     reason: stale ? 'date_out_of_period,odd_new_code' : flagged ? 'balance_mismatch' : null,
