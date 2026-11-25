@@ -1,6 +1,6 @@
 # 0019. Agents may read the instance owner's real statements locally; real data never leaves the machine
 
-- Status: Accepted
+- Status: Accepted (amended by 0039)
 - Date: 2026-11-20
 - Deciders: Owner; Keel
 
@@ -28,6 +28,8 @@ reconciles after sanitizing proves nothing about the original.
 3. Real data never enters a commit, a PR or issue, a log line, a fixture, an image, a wheel or
    sdist, a release, or any service or tool outside the machine. That includes other vendors'
    coding CLIs (Codex, Grok): they keep working in clean worktrees with no real data.
+   *(Amended by 0039: live, owner-controlled Codex and Grok sessions may reach the directory but
+   don't open it without a brief from Keel or the owner. Headless workers stay confined.)*
 4. Anything derived from real data is real data: extracted text, parser output, golden or
    snapshot files, test IDs, database dumps, screenshots of an instance loaded with it, and any
    regex or profile that embeds a name or account digits. Agents report on real data in

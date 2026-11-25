@@ -134,6 +134,14 @@ class FcDelegateTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(self.calls(), [])
 
+    def test_grok_write_flag_and_its_abbreviations_are_refused(self) -> None:
+        for flag in ("--allow-grok-write", "--allow-grok", "--allow", "--all", "--allow-grok-write=1"):
+            with self.subTest(flag=flag):
+                result = self.run_script("grok", flag, "task")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("read-only", result.stderr)
+                self.assertEqual(self.calls(), [])
+
     def test_ordinary_flags_are_not_mistaken_for_hide_prefixes(self) -> None:
         result = self.run_script("codex", "--mode", "read", "--name", "n", "--help-me", "task")
         self.assertEqual(result.returncode, 0, result.stderr)
