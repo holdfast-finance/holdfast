@@ -9,3 +9,4 @@ This Grok session is **Helm**. Claude Code's **Keel** remains the organizer and 
 - `PLAID_ENV` stays `sandbox`. Never read, print, or write `.env`, `data/`, or `secrets/`. Never use the dev stack's ports. Never force-push. Never credit a model vendor.
 - Commits end with `Co-Authored-By: <Agent> (Holdfast) <agents@holdfastfinance.app>`. PR bodies end with `— <Agent>, Holdfast`.
 - Live Plaid, private data, deploys, and owner-queue actions stay out of Helm's lane. Setup for this harness is `docs/process/GROK-SETUP.md`.
+- Push with the repo hooks (`core.hooksPath` is `.githooks`) and never use `--no-verify`.

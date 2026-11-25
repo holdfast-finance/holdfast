@@ -3,8 +3,7 @@
 Anvil is the Codex contributor. Start a fresh local Codex session at the repo
 root so it can discover the agent definitions and skills. Review the project hook
 commands before trusting them with `/hooks`. The hook commands use Git and
-Python 3. The Python and web formatters run when the local toolchains
-are available. See [Codex agent guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+Python 3. See [Codex agent guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 and [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 
 | Claude Code setup | Codex setup |
@@ -12,8 +11,8 @@ and [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 | `CLAUDE.md` and nine `.claude/rules/` files | [AGENTS.md](../../AGENTS.md) points to the shared engineering contract and requires reading all matching path rules. Security applies to every task. |
 | Fifteen builders, specialists, and reviewer profiles | [Custom agents](../../.codex/agents/) preserve role names, instructions, and effort. Opus maps to GPT-6.2 Astra. Sonnet and Haiku map to GPT-6.2 Sol with the original effort. Keel remains the project coordinator. |
 | Six Markdown skills | [Codex skills](../../.agents/skills/) contain their workflows. Phase operations follow the current SDLC and Anvil routes phase decisions to Keel. |
-| Pre-edit guard and post-edit formatter | [Hooks](../../.codex/hooks.json) handle Codex `apply_patch` events directly. The guard checks resolved paths and patch additions. The formatter invokes the local Ruff and Prettier binaries for supported paths. |
-| Shell approvals and Plaid defaults | [Project config](../../.codex/config.toml) sets `PLAID_ENV=sandbox` for shell commands. [Command rules](../../.codex/rules/holdfast.rules) carry over the explicit approval prefixes and the two forbidden `cat` commands. |
+| Pre-edit guard | [Hooks](../../.codex/hooks.json) handle Codex `apply_patch` events directly. The guard checks resolved paths and patch additions, fails closed on malformed patches, and blocks edits to the guard machinery itself. There is no post-edit formatter hook, because it would run repo-writable code (Prettier config, `.venv` Ruff) outside the sandbox. Codex runs `make fmt` inside its sandbox instead. |
+| Shell approvals and Plaid defaults | [Project config](../../.codex/config.toml) sets `PLAID_ENV=sandbox` for shell commands. [Command rules](../../.codex/rules/holdfast.rules) carry over the explicit approval prefixes and the forbidden secret-reading and gate-bypass prefixes. |
 | Plugin capabilities | Use the project's lint/type commands, review profiles, Git tooling, official library sources, and Playwright. Browser and documentation tools depend on the Codex surface and session. |
 
 The hooks cover Codex patch edits. Trusted local CLI sessions default to the
@@ -130,3 +129,5 @@ The first alpha has a separate gate covering matching versions, build
 artifacts and checksums, and a synthetic clean-install and first-run smoke.
 Keel owns the release. Product story dispatch remains gated by PR #8's
 isolated account setup.
+
+Command prefix rules cannot catch every refspec form (for example `git push origin HEAD:refs/heads/main`), so the merge gate and `review-gate` stay the real control.

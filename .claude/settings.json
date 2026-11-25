@@ -1,8 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "PLAID_ENV": "sandbox"
-  },
   "permissions": {
     "allow": [
       "Bash(make:*)",
@@ -43,15 +40,6 @@
       "WebFetch(domain:www.law.cornell.edu)",
       "WebFetch(domain:uscode.house.gov)"
     ],
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.local)",
-      "Read(./.env.prod*)",
-      "Read(./data/**)",
-      "Read(./secrets/**)",
-      "Bash(cat .env:*)",
-      "Bash(cat ./.env:*)"
-    ],
     "ask": [
       "Bash(git push:*)",
       "Bash(git remote:*)",
@@ -60,18 +48,35 @@
       "Bash(git reset --hard:*)",
       "Bash(gh repo create:*)",
       "Bash(docker compose down -v:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.prod*)",
+      "Read(./data/**)",
+      "Read(./secrets/**)",
+      "Bash(cat .env:*)",
+      "Bash(cat ./.env:*)"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-volumes.sh", "timeout": 10 }
+        ]
+      },
+      {
         "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-secrets.sh",
-            "timeout": 10
-          }
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-volumes.sh", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-secrets.sh", "timeout": 10 }
         ]
       }
     ],
@@ -79,11 +84,7 @@
       {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format.sh",
-            "timeout": 60
-          }
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format.sh", "timeout": 60 }
         ]
       }
     ]
@@ -98,5 +99,8 @@
     "claude-md-management@claude-plugins-official": true,
     "context7@claude-plugins-official": true,
     "playwright@claude-plugins-official": true
+  },
+  "env": {
+    "PLAID_ENV": "sandbox"
   }
 }

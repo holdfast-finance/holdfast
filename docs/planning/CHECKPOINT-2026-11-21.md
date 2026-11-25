@@ -35,7 +35,7 @@ A second session ("holdfast-fa") owns the Plaid lane by owner assignment: PR #56
 - Web: a balanced run with no reason reads "From the figures: No reason could be determined"; the result card shows an unknown code verbatim; Retry in the Needs review section shows no error text beside it; the shell remounts a page across the desktop/mobile breakpoint and drops the import result card.
 - Guards: fail on any use of the string `app.household_wide` outside `db_context.py` and migrations, and on `household_wide=` with anything but `False` under `app/api/`.
 - ADR 0021 before Accepted: fresh-node sign-in can stall (allow sign-in when no profile exists, `up --reset`, extend U-11); a tripwire should latch, not log the node out; §9 and §2 contradictions; Bulwark review.
-- Docs are stale (Grok audit, `~/.local/state/holdfast-keel/helm-status.out`): `docs/STATUS.md` says Phase 1.5 is not started; it is in progress (blocked on F5 and the free-tier half of F7), Phases 3 and 4 are in progress on trunk, Phase 2 has not started. `docs/planning/SPRINTS.md` still describes the 2026-11-19 checkpoint. Dependencies with no ADR naming them: `pdfplumber`, `python-multipart`, `uqr`, `reportlab`, `hypothesis`. Update both files in one docs PR.
+- Docs are stale (Grok audit, `<keel-state-dir>`): `docs/STATUS.md` says Phase 1.5 is not started; it is in progress (blocked on F5 and the free-tier half of F7), Phases 3 and 4 are in progress on trunk, Phase 2 has not started. `docs/planning/SPRINTS.md` still describes the 2026-11-19 checkpoint. Dependencies with no ADR naming them: `pdfplumber`, `python-multipart`, `uqr`, `reportlab`, `hypothesis`. Update both files in one docs PR.
 - From earlier: ADR 0020's "one person can never hold both slots"; per-household upload limit before Cloud; killable parse subprocess; orphan-file sweep; `agents@` in `docs/ops/domain-email-pages.md`.
 
 ## Owner decisions waiting
@@ -45,7 +45,7 @@ A second session ("holdfast-fa") owns the Plaid lane by owner assignment: PR #56
 ## Housekeeping
 - Spike leftovers: containers `hfspike-ts`, `hfspike-up`; volumes `hfspike_flag`, `hfspike_sock`, `hfspike_ts_state`, `hfspike_up`; network `hfspike-net`; image `hfspike-tcpdump:latest`. Remove once the owner checks no longer need the test node.
 - Worktrees of merged branches that can go: `ledger-c2`, `tide-i1b`, `prism-i5`, `tide-i5b`, `keel-i2a`, `ledger-c1`, `u1-transactions`, `keel-apphost`, `keel-c5a`, `keel-c3a`, `keel-c5c`, `keel-w1`, `keel-flake`, `lattice-access`, `agent-a1f084e5e5564964c`, `agent-ab135e721aad5440e`. No `firstchair` delegate worktrees remain.
-- Briefs, patches, worker reports and `land.sh` are in `~/.local/state/holdfast-keel/` (the session scratchpad does not survive a reboot).
+- Briefs, patches, worker reports and `land.sh` are in `<keel-state-dir>` (the session scratchpad does not survive a reboot).
 
 ## Tooling notes
 - `firstchair delegate` dispatches only Codex and Grok and bases the worktree on the checkout it runs from: pass `--repo .claude/worktrees/<branch-worktree>` for work on a PR branch. `finish` needs the same `--repo`, and `--session <id>` (placed before `finish`) when the job was started by an earlier session. Do not delete `.firstchair/` in that checkout first.
@@ -53,5 +53,5 @@ A second session ("holdfast-fa") owns the Plaid lane by owner assignment: PR #56
 - Gate sign-offs come from the project's own reviewers. A Grok review is a second opinion and does not satisfy `review-gate`. Grok's read-only recon was accurate (web test timeouts, the flaky import test, the status audit).
 - A new worktree has no `web/node_modules`: run `pnpm install --frozen-lockfile` in `web/` before `make test` or `make lint`, or both fail on missing tools.
 - Tests: `ln -s <repo>/.env .env` (never read; remove after), `COMPOSE_PROJECT_NAME=holdfast make TEST_DB=holdfast_test_<name> test-locked`, `make lint`. The local suite now runs the Alembic drift check.
-- Landing: `~/.local/state/holdfast-keel/land.sh <pr> <worktree> <branch> <reviewed-sha> <subject> <body-file>` merges main, proves the PR diff equals the reviewed diff, scans, pushes, waits for CI and squash-merges. If the merge conflicts, resolve by hand, compare added and removed lines with the reviewed diff, rerun the suite, and re-add `bulwark-approved` after the push.
+- Landing: `<keel-state-dir> <pr> <worktree> <branch> <reviewed-sha> <subject> <body-file>` merges main, proves the PR diff equals the reviewed diff, scans, pushes, waits for CI and squash-merges. If the merge conflicts, resolve by hand, compare added and removed lines with the reviewed diff, rerun the suite, and re-add `bulwark-approved` after the push.
 - Measured this session: Codex ran 10 build tasks (about 6.4M input tokens, mostly cached re-sends, 71k output). Claude builders 65k to 175k each; reviews 18k to 146k each. Codex-built stories needed 2 to 3 review rounds each; so did Claude-built C4.

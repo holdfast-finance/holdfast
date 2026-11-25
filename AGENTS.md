@@ -37,6 +37,9 @@ and `.grok/hooks/`. The roster lanes apply. Live Plaid, private data, secret
 files, deployments, and owner-queue actions stay outside Helm's lane. Treat
 `CLAUDE.md` and `.claude/` as read-only during Helm work too.
 
+Helm builds full-stack on its own branches per ADR 0039 and `docs/process/TRIAD.md`.
+Both Anvil and Helm push with the repo hooks (`core.hooksPath` is `.githooks`) and
+never use `--no-verify`.
+
 See `docs/process/GROK-SETUP.md`. Define a lane here before another agent or
-vendor starts work. PR #8 owns the long-term wording of this file; reconcile
-Helm's section with that PR before either setup is committed.
+vendor starts work.

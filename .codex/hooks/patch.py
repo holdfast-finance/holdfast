@@ -1,13 +1,17 @@
-"""Guard and format Codex apply_patch edits in the Holdfast workspace."""
+"""Guard Codex apply_patch edits in the Holdfast workspace."""
 
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FILE_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$")
+MARKERS = {"*** Begin Patch", "*** End Patch", "*** End of File"}
+GUARD_PATHS = (
+    ".codex/hooks.json", ".codex/hooks", ".codex/rules", ".codex/config.toml",
+    ".grok/hooks", ".grok/config.toml", ".githooks", "scripts/fc-delegate.sh",
+)
 
 
 SECRET_PATTERNS = (
@@ -21,18 +25,27 @@ SECRET_PATTERNS = (
 )
 
 
+def unknown_markers(command):
+    for raw in command.splitlines():
+        line = raw.strip()
+        if line.startswith("***") and line not in MARKERS and not FILE_HEADER.fullmatch(line):
+            return True
+    return False
+
+
 def patch_files(command):
     path = None
     content = []
-    for line in command.splitlines():
+    for raw in command.splitlines():
+        line = raw.strip()
         header = FILE_HEADER.fullmatch(line)
         if header:
             if path is not None:
                 yield path, "\n".join(content)
-            path = header[2]
+            path = header[2].strip()
             content = []
-        elif path is not None and line.startswith("+"):
-            content.append(line[1:])
+        elif path is not None and raw.startswith("+"):
+            content.append(raw[1:])
     if path is not None:
         yield path, "\n".join(content)
 
@@ -50,52 +63,42 @@ def block(reason):
     return 2
 
 
-def format_file(path):
-    if not path.is_file():
-        return
-    area = path.relative_to(ROOT).parts[0]
-    commands = []
-    if area == "backend" and path.suffix == ".py":
-        ruff = ROOT / "backend/.venv/bin/ruff"
-        if ruff.is_file():
-            commands = [[ruff, "format", path], [ruff, "check", "--fix", path]]
-    elif area in {"web", "site"} and path.suffix in {".ts", ".tsx", ".css", ".json", ".astro", ".md"}:
-        prettier = ROOT / area / "node_modules/.bin/prettier"
-        if prettier.is_file():
-            commands = [[prettier, "--write", "--log-level", "silent", path]]
-    for command in commands:
-        try:
-            result = subprocess.run(command, cwd=ROOT / area, capture_output=True, check=False)
-        except OSError:
-            print(f"Holdfast formatter could not run for {path.name}.", file=sys.stderr)
-            return
-        if result.returncode:
-            print(f"Holdfast formatter reported an error for {path.name}.", file=sys.stderr)
-            return
+def guard_path(absolute):
+    return any(
+        absolute == ROOT / g or absolute.is_relative_to(ROOT / g) for g in GUARD_PATHS
+    )
 
 
-def main(action):
+def main():
     event = json.load(sys.stdin)
     cwd = Path(event["cwd"])
     command = event["tool_input"]["command"]
-    formatted = set()
-
+    if not isinstance(command, str) or not command.strip():
+        return block("patch command is missing or empty")
+    if unknown_markers(command):
+        return block("patch has an unrecognised *** marker")
+    seen = False
     for name, content in patch_files(command):
+        seen = True
         candidate = cwd / name
         absolute = candidate.resolve()
-        if action == "guard":
-            if private(candidate) or private(absolute):
-                return block("patch targets a protected data or secret path")
-            if absolute == ROOT / "CLAUDE.md" or absolute.is_relative_to(ROOT / ".claude"):
-                return block("patch targets the Claude Code configuration")
-            for label, pattern in SECRET_PATTERNS:
-                if re.search(pattern, content):
-                    return block(f"possible {label} in patch additions")
-        elif absolute.is_relative_to(ROOT) and absolute not in formatted:
-            formatted.add(absolute)
-            format_file(absolute)
+        if private(candidate) or private(absolute):
+            return block("patch targets a protected data or secret path")
+        if absolute == ROOT / "CLAUDE.md" or absolute.is_relative_to(ROOT / ".claude"):
+            return block("patch targets the Claude Code configuration")
+        if guard_path(absolute):
+            return block("patch targets the guard machinery")
+        for label, pattern in SECRET_PATTERNS:
+            if re.search(pattern, content):
+                return block(f"possible {label} in patch additions")
+    if not seen:
+        return block("no file parsed from patch")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    try:
+        code = main()
+    except BaseException:
+        code = block("guard failed closed on an internal error")
+    sys.exit(code)
