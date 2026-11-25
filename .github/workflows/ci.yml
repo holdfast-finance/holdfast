@@ -207,6 +207,13 @@ jobs:
           TAILSCALE_BIND_IP=100.64.0.1 APP_HOST=holdfast.example.com CF_API_TOKEN=ci-placeholder \
             docker compose -f docker-compose.yml -f infra/docker-compose.prod.yml config --format json \
             | python3 scripts/check-compose-ports.py --prod
+      - name: holdfast-instance and holdfast-sandbox render within the rules (H2)
+        run: |
+          HOLDFAST_INSTANCE_DIR=/srv/holdfast-instance-ci docker compose \
+            -f docker-compose.yml -f docker-compose.instance.yml config --format json \
+            | HOLDFAST_INSTANCE_DIR=/srv/holdfast-instance-ci python3 scripts/check-compose-ports.py --instance
+          docker compose -f docker-compose.yml -f docker-compose.sandbox.yml config --format json \
+            | python3 scripts/check-compose-ports.py --sandbox
       - name: Validate Caddyfiles
         run: |
           docker run --rm -v "$PWD/infra/caddy:/etc/caddy:ro" -e APP_HOST=localhost -e WEB_UPSTREAM=web:80 \

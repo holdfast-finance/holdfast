@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
@@ -82,6 +82,14 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.0/8", "::1/128", FRONTEND_SUBNET]
     )
 
+    # Set only by docker-compose.sandbox.yml (the throwaway `holdfast-sandbox` project, H2). A
+    # sandbox instance must never hold real data, so it refuses PLAID_ENV=production at startup.
+    holdfast_sandbox: bool = False
+    # Set by the deployments that hold real data (infra/docker-compose.prod.yml and
+    # docker-compose.instance.yml), never by the dev stack or the sandbox. PLAID_ENV=production is
+    # refused without it (PHASE-2 contract D13).
+    holdfast_real_data: bool = False
+
     # Plaid
     plaid_env: Literal["sandbox", "production"] = "sandbox"
     plaid_client_id: str | None = None
@@ -138,6 +146,21 @@ class Settings(BaseSettings):
         if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value.get_secret_value()):
             raise ValueError("REDIS_PASSWORD may only contain A-Z a-z 0-9 _ - (run make keys)")
         return value
+
+    @model_validator(mode="after")
+    def _sandbox_never_production(self) -> Settings:
+        if self.holdfast_sandbox and self.plaid_env != "sandbox":
+            raise ValueError(
+                "HOLDFAST_SANDBOX is set: this instance is throwaway and refuses "
+                "PLAID_ENV=production (real Items belong in holdfast-instance)"
+            )
+        if self.plaid_env == "production" and not self.holdfast_real_data:
+            raise ValueError(
+                "PLAID_ENV=production needs a real-data deployment: use "
+                "infra/docker-compose.prod.yml "
+                "or the holdfast-instance project (docs/setup/plaid.md)"
+            )
+        return self
 
     @field_validator("plaid_products", "plaid_country_codes", "trusted_proxies", mode="before")
     @classmethod
