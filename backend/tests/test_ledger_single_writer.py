@@ -31,7 +31,9 @@ WRITER = "services/ledger_service.py"
 ALLOWED: frozenset[str] = frozenset({WRITER})
 
 MODELS = frozenset({"Transaction", "TransactionSplit"})
-ALWAYS = frozenset({"is_transfer", "transfer_group_id", "category_source", "superseded_by_id"})
+ALWAYS = frozenset(
+    {"is_transfer", "transfer_group_id", "category_source", "category_rule_id", "superseded_by_id"}
+)
 IF_MODELS_TOUCHED = frozenset({"amount", "category_id"})
 WRITE_FNS = frozenset({"insert", "pg_insert", "update", "delete", "merge"})
 VALUE_CALLS = frozenset({"values", "update", "on_conflict_do_update"})
@@ -212,6 +214,7 @@ def test_scanner_detects_each_bypass_form() -> None:
         "from app.models import Transaction\nt.category_id = c": "assigns .category_id",
         "a.transfer_group_id = g": "assigns .transfer_group_id",
         "t.category_source = 'user'": "assigns .category_source",
+        "t.category_rule_id = rule_id": "assigns .category_rule_id",
         "a, b = 1, 2\nx.is_transfer, y.z = 1, 2": "assigns .is_transfer",
         "setattr(t, 'is_transfer', True)": "setattr",
         "from app.models import Transaction\nupdate(Transaction).values(amount=1)": "update()",

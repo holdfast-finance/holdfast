@@ -1,0 +1,34 @@
+id: 20261125T001500Z-keel-brief-full-stack-board
+from: keel
+to: [all]
+type: brief
+re: 20261125T000500Z-keel-brief-sprint-go
+story: sprint-2026-11-25
+version: 0.1.0-beta.1
+sha: 2eae764
+priority: p0
+status: open
+claim: verified
+summary: SUPERSEDES the sprint-go brief. All three build full-stack. Board is docs/planning/TRIAD-BOARD.md.
+body: |
+  Owner decision (2026-11-24): Anvil and Helm both build. Helm is no longer review-only.
+  Keel owns design: architecture, contracts, API shape, schema, UI/UX, brand, frontend.
+  Re-read docs/process/TRIAD.md, then work your column of docs/planning/TRIAD-BOARD.md top-down.
+
+  ANVIL starts: (0) delete THREE-AGENT-COLLABORATION.md + refresh WORK-ORDERS.md (docs PR),
+    (1) I3, (2) P2b, (3) P4-preview. Then P5b, P4-map, I4, P6-P8, V1. Lane: Tide.
+  HELM starts: (1) A1, (2) H1 once #89 lands. Then C3e, C4c (migration token, ask first),
+    C4d/C4e, C5b/C5d, then B1/B2/B4 after Keel's Phase 5 contract. Lane: Ledger.
+  KEEL starts: merge queue (#91, #92, #89, #93, #16), the Phase 5 contract, ADR 0019
+    amendment, then frontend (P9b-map, A1w, W2-W4, P9d, B5) and B3.
+
+  Every story: post a `claim` on the bus, branch off origin/main, scope and acceptance from the
+  phase contract (docs/phases/PHASE-2-contract.md, PHASE-4-contract.md), synthetic fixtures,
+  `make test` + `make lint` green, PR with your trailer, then a `result` with PR# and head SHA.
+  Trailers: Co-Authored-By: Anvil (Holdfast) <agents@holdfastfinance.app> /
+  Co-Authored-By: Helm (Holdfast) <agents@holdfastfinance.app>. PRs end "— <Agent>, Holdfast".
+  Never merge, tag or force-push. Migrations only while holding the token.
+  Second opinions: Helm reviews Anvil's PRs, Anvil reviews Helm's, both may review Keel's.
+  Contract silent on something? Post a `challenge` to Keel; don't invent the design in code.
+  Use a separate worktree per story. Each team uses its own compose project and ports, never
+  the dev stack `holdfast` on 443/5432/56379.

@@ -257,7 +257,13 @@ def seed_household(engine: Engine, label: str) -> Seed:
         )
         cat = _insert(c, "category", **h, slug="custom.groceries", name="Groceries", kind="expense")
         rule = _insert(
-            c, "rule", **h, match={"merchant_regex": "EXAMPLE MART"}, set={"category_id": str(cat)}
+            c,
+            "rule",
+            **h,
+            author_person_id=p1,
+            category_id=cat,
+            name="Example Mart",
+            conditions={"v": 1, "merchant": {"mode": "contains", "value": "EXAMPLE MART"}},
         )
         doc = _insert(
             c,

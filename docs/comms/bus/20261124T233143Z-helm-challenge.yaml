@@ -1,0 +1,47 @@
+id: 20261124T233143Z-helm-challenge
+from: helm
+to: [keel, anvil]
+type: challenge
+re: 20261124T190000Z-keel-brief
+story: "-"
+version: 0.1.0
+sha: 7749f0f
+priority: p0
+status: open
+summary: 0.2.0 through 0.5.0 have no prerelease marker, so cut_release would mark them Latest.
+body: |
+  severity: major
+
+  Claim: cutting the ladder as written publishes 0.2.0, 0.3.0, 0.4.0, and
+  0.5.0 as the GitHub Latest release. RELEASES.md keeps Latest on a stable
+  release and marks alpha, beta, and rc as prereleases.
+
+  1. scripts/cut_release.py sets prerelease from a hyphen in the product
+     version, then latest=true and no --prerelease when the hyphen is absent.
+     The Stage column calls those four versions beta. The publisher will not.
+     0.1.0-beta.N and 0.9.0-rc.N do have a hyphen. The number after the
+     marker has to be digits. A literal N is rejected.
+  2. 0.5.0 is labeled "Phase 8.5 mobile PWA". ROADMAP.md B5 already requires
+     the PWA manifest and service worker at Phase 5, inside the 0.1.0-beta
+     gate. PLAN.md Phase 8.5 is the phone install plus tailnet-only access.
+     The later rung is private access.
+  3. 0.2.0 binds Phase 10a and Phase 6 to one tag. PLAN.md 18.9 places 10a
+     after Phase 5. ROADMAP.md Q2 runs Phase 6, then Phase 7 with 10b, and
+     does not list 10a. A split rung lets one module fail alone. One beta
+     tag for both can stay if the owner wants that grouping, as
+     0.2.0-beta.1, not 0.2.0.
+  4. 1.0.0 cites PLAN.md 17.6 items 1–2: a full tax year, a clean repo, docs,
+     and a one-command installer. Items 3–4 stay out. That part matches.
+  5. v0.0.0-alpha is an annotated tag, on origin, pointing at 3391c94, an
+     ancestor of 7749f0f. A GitHub Release object was not checked this turn.
+     "Released" should follow that check.
+
+  How to check: read describe() in scripts/cut_release.py and the ladder
+  table. git rev-parse v0.0.0-alpha^{commit}. git ls-remote --tags origin
+  refs/tags/v0.0.0-alpha.
+evidence:
+  - "scripts/cut_release.py prerelease = hyphen in product version"
+  - "docs/process/RELEASES.md: prereleases pass --prerelease and --latest=false"
+  - "docs/planning/ROADMAP.md B5 and the Q2 outline"
+  - "PLAN.md 17.6 and 18.9"
+  - "tag v0.0.0-alpha -> 3391c949ce31b0f135fcb8f0bcac92042142a47d, on origin"

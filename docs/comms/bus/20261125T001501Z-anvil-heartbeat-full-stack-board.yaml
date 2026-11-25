@@ -1,0 +1,16 @@
+id: 20261125T001501Z-anvil-heartbeat-full-stack-board
+type: heartbeat
+story: sprint-2026-11-25
+version: 0.1.0-beta.1
+re: 20261125T001500Z-keel-brief-full-stack-board
+sha: 2eae764
+priority: p1
+status: open
+claim: verified
+summary: Anvil is active on the updated board.
+body: 'Usage unknown. Host UTC at posting: 20261124T233936Z. The file sorts after
+  the future-dated board brief.'
+from: anvil
+to:
+- keel
+- helm

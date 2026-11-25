@@ -6,6 +6,8 @@ import uuid
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from sqlalchemy import Engine, select, text
@@ -18,7 +20,9 @@ from app.domain.ledger_rules import (
     SplitError,
     TransferPairError,
 )
-from app.models import Account, AuditLog, Category, Person, Transaction, TransactionSplit
+from app.models import Account, AuditLog, Category, Person, Rule, Transaction, TransactionSplit
+from app.services.context import RequestContext
+from app.services.ledger import LedgerService
 from app.services.ledger_service import (
     AccountNotFoundError,
     AutoCategorySource,
@@ -30,6 +34,7 @@ from app.services.ledger_service import (
     SupersededTransactionError,
     TransactionNotFoundError,
 )
+from app.services.sessions import Principal
 from tests.models import conftest as mc
 
 pytestmark = pytest.mark.services
@@ -742,3 +747,201 @@ async def _two_people(f: Factory, hid: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]
         s.add(Person(id=alex, household_id=hid, display_name="Alex", filing_role="primary"))
         s.add(Person(id=sam, household_id=hid, display_name="Sam", filing_role="spouse"))
     return alex, sam
+
+
+async def _rule(f: Factory, hid: uuid.UUID, person: uuid.UUID, category_id: uuid.UUID) -> uuid.UUID:
+    rid = uuid.uuid4()
+    async with scoped_session(f, hid, person) as s:
+        s.add(
+            Rule(
+                id=rid,
+                household_id=hid,
+                author_person_id=person,
+                name="Example rule",
+                category_id=category_id,
+                conditions={"v": 1, "description": {"mode": "contains", "value": "EXAMPLE"}},
+            )
+        )
+    return rid
+
+
+async def test_bulk_rule_precedence_exact_counts_and_audit(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    hid = household
+    alex, sam = await _two_people(factory, hid)
+    category_id = await _category(factory, hid)
+    rid = await _rule(factory, hid, alex, category_id)
+    account = await _account(factory, hid, owner=alex)
+    other = await _account(factory, hid, owner=sam, visibility="shared")
+    plain = await _txn(factory, hid, account, "-1.00")
+    automated = await _txn(
+        factory,
+        hid,
+        account,
+        "-1.00",
+        category_id=category_id,
+        category_source=AutoCategorySource.PLAID,
+    )
+    user = await _txn(factory, hid, account, "-1.00")
+    split = await _txn(factory, hid, account, "-1.00")
+    shared = await _txn(factory, hid, other, "-1.00")
+    async with scoped_session(factory, hid, alex) as s:
+        writer = LedgerWriter(s, hid, user_id=USER)
+        await writer.set_category(user, None)
+        await writer.write_splits(split, [SplitInput(D("-0.40")), SplitInput(D("-0.60"))])
+        for stale in (user, split, shared, uuid.uuid4(), plain):
+            with pytest.raises(LedgerRuleError, match=r"^preview_stale$"):
+                await writer.apply_rule_bulk(rid, category_id, [plain, stale])
+        assert not await writer.apply_category(split, category_id, AutoCategorySource.RULE, rid)
+        untouched = await s.get(Transaction, plain)
+        assert untouched is not None and untouched.category_rule_id is None
+        assert await writer.apply_rule_bulk(rid, category_id, [plain, automated]) == 2
+
+    for tid in (plain, automated):
+        applied = await _row(factory, hid, tid)
+        assert (applied.category_id, applied.category_source, applied.category_rule_id) == (
+            category_id,
+            "rule",
+            rid,
+        )
+    assert (await _row(factory, hid, user)).category_source == "user"
+    for tid in (split, shared):
+        assert (await _row(factory, hid, tid)).category_rule_id is None
+
+    async with scoped_session(factory, hid, alex) as s:
+        writer = LedgerWriter(s, hid, user_id=USER)
+        with pytest.raises(LedgerRuleError, match=r"^preview_stale$"):
+            await writer.clear_rule_categories(rid, [plain, user])
+        assert await writer.clear_rule_categories(rid, [plain, automated]) == 2
+    for tid in (plain, automated):
+        cleared = await _row(factory, hid, tid)
+        assert (cleared.category_id, cleared.category_source, cleared.category_rule_id) == (
+            None,
+            None,
+            None,
+        )
+
+    async with scoped_session(factory, hid, alex) as s:
+        audits = list(
+            await s.scalars(
+                select(AuditLog).where(AuditLog.action.in_(["rule.applied", "rule.cleared"]))
+            )
+        )
+    assert sorted(a.action for a in audits) == ["rule.applied", "rule.cleared"]
+    assert all(a.user_id == USER and a.entity == "rule" for a in audits)
+    assert all(a.detail == {"outcome": "success", "rule_id": str(rid)} for a in audits)
+
+
+@pytest.mark.parametrize("rule_on_old", [True, False])
+async def test_supersede_and_unsupersede_keep_live_rule_provenance(
+    factory: Factory, household: uuid.UUID, rule_on_old: bool
+) -> None:
+    from tests.ledger.test_supersede_verbs import setup
+
+    hid = household
+    alex, _ = await _two_people(factory, hid)
+    category_id = await _category(factory, hid)
+    rid = await _rule(factory, hid, alex, category_id)
+    _, old, winner = await setup(factory, hid)
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        writer = LedgerWriter(s, hid, user_id=USER)
+        if rule_on_old:
+            assert await writer.apply_category(old, category_id, AutoCategorySource.RULE, rid)
+        await writer.supersede_transaction(old, winner)
+        if not rule_on_old:
+            assert await writer.apply_category(winner, category_id, AutoCategorySource.RULE, rid)
+        with pytest.raises(LedgerRuleError, match=r"^preview_stale$"):
+            await writer.apply_rule_bulk(rid, category_id, [old])
+        with pytest.raises(LedgerRuleError, match=r"^preview_stale$"):
+            await writer.clear_rule_categories(rid, [old])
+
+    applied = await _row(factory, hid, winner)
+    assert applied.superseded_by_id is None
+    assert (applied.category_id, applied.category_source, applied.category_rule_id) == (
+        category_id,
+        "rule",
+        rid,
+    )
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        await LedgerWriter(s, hid).unsupersede_transaction(old)
+    restored = await _row(factory, hid, old)
+    assert restored.superseded_by_id is None
+    assert (restored.category_id, restored.category_source, restored.category_rule_id) == (
+        category_id,
+        "rule",
+        rid,
+    )
+
+
+async def test_post_pending_carries_rule_provenance_and_person_edit_clears_it(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    from tests.ledger.test_ledger_sync_verbs import conn_account, connector, put
+
+    hid = household
+    alex, _ = await _two_people(factory, hid)
+    category_id = await _category(factory, hid)
+    rid = await _rule(factory, hid, alex, category_id)
+    account = await conn_account(factory, hid)
+    await put(
+        factory,
+        hid,
+        connector(
+            account,
+            "example-pending",
+            "-25.00",
+            is_pending=True,
+            category_id=category_id,
+            category_source=AutoCategorySource.RULE,
+            category_rule_id=rid,
+        ),
+    )
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        posted = await LedgerWriter(s, hid).post_pending(
+            "example-pending", connector(account, "example-posted", "-25.00")
+        )
+    applied = await _row(factory, hid, posted)
+    assert (applied.category_id, applied.category_source, applied.category_rule_id) == (
+        category_id,
+        "rule",
+        rid,
+    )
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        writer = LedgerWriter(s, hid, user_id=USER)
+        await writer.release_category(posted)
+    assert (await _row(factory, hid, posted)).category_rule_id is None
+    async with scoped_session(factory, hid, None, household_wide=True) as s:
+        writer = LedgerWriter(s, hid, user_id=USER)
+        await writer.apply_category(posted, category_id, AutoCategorySource.RULE, rid)
+        await writer.set_category(posted, category_id)
+    assert (await _row(factory, hid, posted)).category_rule_id is None
+
+
+async def test_can_edit_matches_account_writable_for_person_sessions(
+    factory: Factory, household: uuid.UUID
+) -> None:
+    hid = household
+    alex, sam = await _two_people(factory, hid)
+    context = cast(RequestContext, SimpleNamespace(factory=factory))
+    for owner, visibility in (
+        (alex, "private"),
+        (alex, "shared"),
+        (alex, "summary_only"),
+        (None, "private"),
+        (sam, "shared"),
+    ):
+        account = await _account(factory, hid, owner=owner, visibility=visibility)
+        tid = await _txn(factory, hid, account, "-1.00")
+        principal = Principal(uuid.uuid4(), USER, hid, alex, "owner", "alex@example.test", None)
+        async with scoped_session(factory, hid, alex) as s:
+            writable = await s.scalar(
+                text("SELECT public.app_account_writable(:account)"), {"account": account}
+            )
+        row = await LedgerService(context, principal).get(tid)
+        assert row.can_edit == writable == (owner in (None, alex))
+        if owner is None:
+            no_person = Principal(
+                principal.session_id, USER, hid, None, "owner", principal.email, None
+            )
+            assert (await LedgerService(context, no_person).get(tid)).can_edit is False

@@ -39,7 +39,7 @@ def _extensions(database_url: str) -> set[str]:
 
 def test_single_head() -> None:
     script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == ["0011_connector_link"]
+    assert script.get_heads() == ["0012_rules"]
 
 
 @pytest.mark.services
