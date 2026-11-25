@@ -16,7 +16,7 @@ if [ "$mode" = staged ]; then
 elif [ "$mode" = range ]; then
   range="${2:?range mode needs a rev range}"
   # Every commit counts: a file added and then deleted in the same push is still published.
-  files=$(git log --format= --name-only --diff-filter=ACMR "$range" | sort -u)
+  files=$(git log --format= --name-only --diff-merges=first-parent --diff-filter=ACMR "$range" | sort -u)
 else
   files=$(git ls-files)
   ignored=$(git ls-files -ci --exclude-standard)
@@ -51,7 +51,7 @@ if [ "$mode" = staged ] && [ -s "$deny" ]; then
   fi
 fi
 if [ "$mode" = range ] && [ -s "$deny" ]; then
-  if git log -p --no-color -U0 --format= "$range" | grep -E '^\+' | grep -qiFf "$deny"; then
+  if git log -p --no-color -U0 --format= --diff-merges=first-parent "$range" | grep -E '^\+' | grep -qiFf "$deny"; then
     echo "private-data: a commit in the pushed range contains a string from your private denylist." >&2
     fail=1
   fi
