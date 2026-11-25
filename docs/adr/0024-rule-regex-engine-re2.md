@@ -268,8 +268,11 @@ property classes, single-letter classes, and a literal whose full case mapping d
 simple folding). A heuristic over sampled subjects cannot close a class of attacks alone, so
 `compile_pattern` now applies structural limits first, and the probe is the second line:
 
-- **Counted repetition cap.** Any `{n}`, `{n,}` or `{n,m}` with n or m above 16 is refused, and
-  nested counts multiply: `(?:a{4}){8}` is 32 and is refused. Bank descriptions never need more.
+- **Total counted-repetition budget of 8** (round 3; round 2 capped each count at 16). DFA state
+  growth is 2^n in the count, so 16 was too generous, and a per-count cap missed `[W]{16}[W]{16}`.
+  Counts add along a sequence, the larger side counts across `|`, nesting multiplies
+  (`(?:a{4}){8}` is 32) and `{n,}` counts n. Over 8 is refused. `\d{3}-\d{4}` costs 7. Bank
+  descriptions never need more.
 - **RE2 program-size ceiling** of 2,000 (`MAX_PROGRAM_SIZE`, from the binding's `programsize`).
   The benign corpus peaks at 153 (13x headroom). `\p{L}+` is 1,202 and passes. A 16-fold
   `\p{Greek}|\p{Cyrillic}` group is 1,617, and ASCII-class blow-ups are far smaller, so this
@@ -278,4 +281,7 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   plus the samples of every class inside it. One bounded union family mixes all samples. Dedupe
   keys use simple lower-casing, so `ß` is not `SS`.
 - With the first two limits switched off, the probe alone still refuses every required rejection,
-  including count-16 variants of the four evasions.
+  including variants of the evasions at a total count of 8. The probe also fails closed: a class
+  written only as escapes (`[\x{10D0}-\x{10EF}]`) is sampled at both range ends and the midpoint,
+  and a class with no sample at all refuses the pattern instead of falling back to a generic
+  alphabet.

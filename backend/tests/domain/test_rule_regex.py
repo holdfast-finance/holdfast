@@ -17,7 +17,12 @@ from app.domain.rule_regex import (
     RuleValidationError,
     compile_pattern,
 )
-from tests.domain.regex_corpus import CORPUS, REQUIRED_REJECTIONS
+from tests.domain.regex_corpus import (
+    BUDGET_ONLY,
+    CORPUS,
+    PROBE_ONLY_VARIANTS,
+    REQUIRED_REJECTIONS,
+)
 
 
 @pytest.mark.parametrize("pattern", REQUIRED_REJECTIONS)
@@ -27,12 +32,14 @@ def test_required_corpus_patterns_are_refused(pattern: str) -> None:
     assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
 
 
-@pytest.mark.parametrize("pattern", REQUIRED_REJECTIONS)
+@pytest.mark.parametrize(
+    "pattern", [p for p in (*REQUIRED_REJECTIONS, *PROBE_ONLY_VARIANTS) if p not in BUDGET_ONLY]
+)
 def test_probe_alone_still_refuses_the_required_patterns(
     pattern: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The structural limits are not the only defence: with them off, the probe refuses."""
-    monkeypatch.setattr(rule_regex, "MAX_REPEAT_COUNT", 10_000)
+    monkeypatch.setattr(rule_regex, "MAX_REPEAT_BUDGET", 10_000)
     monkeypatch.setattr(rule_regex, "MAX_PROGRAM_SIZE", 10**9)
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
@@ -42,15 +49,23 @@ def test_probe_alone_still_refuses_the_required_patterns(
 @pytest.mark.parametrize(
     ("pattern", "allowed"),
     (
-        ("A{16}", True),
-        ("A{17}", False),
-        ("A{2,17}", False),
-        ("A{17,}", False),
-        ("(?:A{4}){8}", False),
-        ("(?:A{4}){4}", True),
-        ("(?:(?:A{4}){2}){3}", False),
-        ("(?:A{17})", False),
-        ("A{4}B{4}C{4}D{4}E{4}", True),
+        ("A{8}", True),
+        ("A{9}", False),
+        ("A{2,9}", False),
+        ("A{9,}", False),
+        ("[W]{8}[W]{8}", False),
+        ("[W]{4}[W]{4}", True),
+        ("[W]{4}[W]{5}", False),
+        ("A{4}|B{8}", True),
+        ("A{4}|B{9}", False),
+        ("(?:A{4}){2}", True),
+        ("(?:A{4}){3}", False),
+        ("(?:(?:A{2}){2}){2}", True),
+        ("(?:A{2}){2}(?:B{2}){3}", False),
+        ("(?:A{3}|B{2}){3}", False),
+        ("(?:A{3}|B{2}){2}C{2}", True),
+        ("(?:A{9})", False),
+        (r"\d{3}-\d{4}", True),
         (r"A\{99\}", True),
         ("A{,99}", True),
     ),
@@ -253,3 +268,39 @@ def test_group_alphabets_are_probed_and_negated_classes_use_non_ascii_samples() 
     (alphabet,) = rule_regex._atom_alphabets(("[^ -~]",))
     assert "É" in alphabet
     assert "A" not in alphabet
+
+
+def test_open_ended_count_costs_its_lower_bound() -> None:
+    assert rule_regex._scan("A{8,}").repeat_cost == 8
+    assert rule_regex._scan("A{3,9}").repeat_cost == 9
+
+
+@pytest.mark.parametrize(
+    "pattern", (r"[\x{10D0}-\x{10EF}]+#", r"\x{105}[\x{105}\x{142}]", r"[\x{10D0}-\x{10EF}]{3}")
+)
+def test_classes_written_as_escapes_are_sampled(pattern: str) -> None:
+    scanned = rule_regex._scan(pattern)
+    for alphabet in rule_regex._atom_alphabets(scanned.atoms):
+        assert alphabet
+    assert compile_pattern(pattern)
+
+
+def test_class_with_no_probe_sample_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fail closed: no fallback alphabet stands in for a class the probe cannot sample.
+    monkeypatch.setattr(rule_regex, "_CLASS_SAMPLES", "")
+    rule_regex._atom_alphabet.cache_clear()
+    try:
+        with pytest.raises(RuleValidationError) as caught:
+            rule_regex._atom_alphabet(r"\p{Georgian}")
+        assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+    finally:
+        rule_regex._atom_alphabet.cache_clear()
+
+
+def test_range_ends_and_midpoint_are_decoded() -> None:
+    assert set(rule_regex._class_endpoints(r"[\x{10D0}-\x{10EF}]")) >= {
+        "\u10d0",
+        "\u10ef",
+        "\u10df",
+    }
+    assert set(rule_regex._class_endpoints(r"[\101-\103x]")) >= {"A", "C", "B", "x"}

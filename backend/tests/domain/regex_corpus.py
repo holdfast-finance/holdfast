@@ -23,7 +23,26 @@ REQUIRED_REJECTIONS = (
     "(?:[q]|[j])*[q](?:[q]|[j]|[k]){90}[w]",
     "(?:[x]|[y])*[x](?:[x]|[y]|[z]){20}[w]",
     "(?:ß|X)*ß(?:ß|X|Y){90}W",
+    r"[\x{10D0}-\x{10EF}]*[\x{10D0}-\x{10DF}][\x{10D0}-\x{10EF}]{16}#",
+    r"[\x{10D0}-\x{10EF}]*[\x{10D0}-\x{10DF}][\x{10D0}-\x{10EF}]{16}[\x{10D0}-\x{10EF}]{16}#",
+    r"(?:[\x{100}-\x{17F}]|[\x{180}-\x{24F}])*[\x{100}-\x{17F}]"
+    r"(?:[\x{100}-\x{17F}]|[\x{180}-\x{24F}]){16}#",
+    r"[\x{105}\x{142}]*\x{105}[\x{105}\x{142}\x{17C}]{16}#",
+    "[W]{8}[W]{8}",
 )
+
+# The four escape-only-class patterns again at a total count of 8, which the repetition
+# budget allows. The probe must refuse these on its own.
+PROBE_ONLY_VARIANTS = (
+    r"[\x{10D0}-\x{10EF}]*[\x{10D0}-\x{10DF}][\x{10D0}-\x{10EF}]{8}#",
+    r"[\x{10D0}-\x{10EF}]*[\x{10D0}-\x{10DF}][\x{10D0}-\x{10EF}]{4}[\x{10D0}-\x{10EF}]{4}#",
+    r"(?:[\x{100}-\x{17F}]|[\x{180}-\x{24F}])*[\x{100}-\x{17F}]"
+    r"(?:[\x{100}-\x{17F}]|[\x{180}-\x{24F}]){8}#",
+    r"[\x{105}\x{142}]*\x{105}[\x{105}\x{142}\x{17C}]{8}#",
+)
+
+# Required rejections the repetition budget alone refuses (nothing for a probe to sample).
+BUDGET_ONLY = ("[W]{8}[W]{8}",)
 
 CORPUS = (
     *REQUIRED_REJECTIONS,

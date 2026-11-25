@@ -20,9 +20,10 @@ MAX_SUBJECT_LENGTH = 256
 PROBE_LIMIT_MICROSECONDS = 10
 MAX_CLASS_ATOMS = 16
 MAX_PROBE_FAMILIES = 160
-# Counted repetition above this is refused, nested counts multiplied: bank descriptions never
-# need more, and it bounds the DFA state growth the probe can only sample.
-MAX_REPEAT_COUNT = 16
+# Total counted repetition above this is refused (sum along a sequence, max across |, nested
+# counts multiplied). DFA state growth is 2^n in the count, so 8 bounds what the probe can
+# only sample, and bank descriptions never need more.
+MAX_REPEAT_BUDGET = 8
 # RE2 program size ceiling (instructions). See PHASE-4-contract 2.2 for the measurements.
 MAX_PROGRAM_SIZE = 2000
 REGEX_BUDGET_SECONDS = 10
@@ -169,8 +170,9 @@ class _Scan:
     # One entry per parenthesised group: its literal letters and the class atoms inside it,
     # nested groups included.
     groups: tuple[tuple[str, tuple[str, ...]], ...]
-    # The largest repetition count, multiplied through nesting: (?:a{4}){8} is 32.
-    max_repeat: int
+    # Total counted-repetition cost: counts add along a sequence, the larger alternative
+    # counts across ``|``, nesting multiplies ((?:a{4}){8} is 32) and ``{n,}`` counts n.
+    repeat_cost: int
 
 
 def _fold_key(text: str) -> str:
@@ -196,10 +198,11 @@ def _scan(pattern: str) -> _Scan:
     """Scan syntax after RE2 validates it. Track literal runs across quoted text."""
     atoms: dict[str, None] = {}
     groups: dict[tuple[str, tuple[str, ...]], None] = {}
-    # Each open group: literal letters, class atoms, and the largest repeat weight inside.
-    open_groups: list[tuple[dict[str, str], dict[str, None], list[int]]] = []
-    top_weight = [1]
-    last_weight = 1
+    # Each open group: literal letters and class atoms inside it.
+    open_groups: list[tuple[dict[str, str], dict[str, None]]] = []
+    # Repeat cost per nesting level: [largest finished alternative, current alternative].
+    levels: list[list[int]] = [[0, 0]]
+    last_cost = 0
     literals: dict[str, str] = {}
     runs: dict[str, str] = {}
     recent = ""
@@ -209,8 +212,7 @@ def _scan(pattern: str) -> _Scan:
         end = i + 1
         literal = ""
         atom = ""
-        repeated = False
-        closed_weight = 0
+        closed_cost = 0
         if char == "[":
             end = _bracket_end(pattern, i)
             atom = pattern[i:end]
@@ -233,40 +235,40 @@ def _scan(pattern: str) -> _Scan:
                 end += 1
             end += 1
             if pattern[end - 1] != ")":
-                open_groups.append(({}, {}, [1]))
+                open_groups.append(({}, {}))
+                levels.append([0, 0])
         elif char == "(":
-            open_groups.append(({}, {}, [1]))
+            open_groups.append(({}, {}))
+            levels.append([0, 0])
+        elif char == "|":
+            levels[-1] = [max(levels[-1]), 0]
         elif char == ")":
             if open_groups:
-                letters, members, inner = open_groups.pop()
+                letters, members = open_groups.pop()
                 groups[("".join(letters.values()), tuple(members))] = None
-                closed_weight = inner[0]
-                level = open_groups[-1][2] if open_groups else top_weight
-                level[0] = max(level[0], closed_weight)
+                closed_cost = max(levels.pop())
+                levels[-1][1] += closed_cost
                 for parent in open_groups:
                     parent[1].update(members)
                     for key, letter in letters.items():
                         parent[0][key] = letter
         elif char == "{" and (parsed := _repeat_count(pattern, i)) is not None:
             end, count = parsed
-            repeated = True
-            weight = count * last_weight
-            level = open_groups[-1][2] if open_groups else top_weight
-            level[0] = max(level[0], weight)
-            last_weight = weight
+            repeated_cost = count * max(last_cost, 1)
+            levels[-1][1] += repeated_cost - last_cost
+            closed_cost = repeated_cost
         elif char not in "^$|()*+?":
             literal = char
 
-        if not repeated:
-            last_weight = max(closed_weight, 1)
+        last_cost = closed_cost
         if atom:
             atoms[atom] = None
-            for _, members, _ in open_groups:
+            for _, members in open_groups:
                 members[atom] = None
         if literal:
             for letter in literal:
                 literals.setdefault(_fold_key(letter), letter)
-                for letters, _, _ in open_groups:
+                for letters, _ in open_groups:
                     letters.setdefault(_fold_key(letter), letter)
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
@@ -279,8 +281,43 @@ def _scan(pattern: str) -> _Scan:
         tuple(literals.values()),
         tuple(runs.values()),
         tuple(groups),
-        top_weight[0],
+        max(levels[0]),
     )
+
+
+def _class_endpoints(atom: str) -> str:
+    """Characters a bracket class names by escape or range: both ends and each midpoint.
+
+    ``[\\x{10D0}-\\x{10EF}]`` names no printable character, so without this it is never sampled.
+    """
+    if not atom.startswith("["):
+        return ""
+    body_start = 1 + (atom[1:2] == "^")
+    tokens: list[str | None] = []
+    i = body_start
+    stop = len(atom) - 1
+    while i < stop:
+        if atom[i] == "\\":
+            end = _escape_end(atom, i)
+            tokens.append(None if atom[i + 1] in "dDwWsSpPC" else _literal_escape(atom[i:end]))
+            i = end
+        elif atom.startswith("[:", i) and (close := atom.find(":]", i + 2)) != -1:
+            tokens.append(None)
+            i = close + 2
+        else:
+            tokens.append(atom[i])
+            i += 1
+    found: dict[str, None] = {}
+    for position, token in enumerate(tokens):
+        if token is None:
+            continue
+        found[token] = None
+        high = tokens[position + 2] if position + 2 < len(tokens) else None
+        if tokens[position + 1 : position + 2] == ["-"] and high is not None:
+            for code in (ord(token), ord(high), (ord(token) + ord(high)) // 2):
+                if not 0xD800 <= code <= 0xDFFF:
+                    found[chr(code)] = None
+    return "".join(found)
 
 
 @lru_cache(maxsize=256)
@@ -288,8 +325,13 @@ def _atom_alphabet(atom: str) -> str:
     atom_pattern = _compile_cold(atom)
     # Negated classes use the same non-ASCII-aware sample set as the rest, so a blow-up
     # built from "not ASCII" is probed over the characters it actually matches.
-    matched = (char for char in _CLASS_SAMPLES + atom if atom_pattern.fullmatch(char))
-    return "".join({_fold_key(char): char for char in matched}.values())
+    candidates = _CLASS_SAMPLES + atom + _class_endpoints(atom)
+    matched = (char for char in candidates if atom_pattern.fullmatch(char))
+    alphabet = "".join({_fold_key(char): char for char in matched}.values())
+    if not alphabet:
+        # Fail closed: a class with no probe sample would never be exercised.
+        raise RuleValidationError(PATTERN_TOO_COMPLEX)
+    return alphabet
 
 
 @lru_cache(maxsize=256)
@@ -349,9 +391,6 @@ def _probe_families(
     if len(union) > 1:
         yield _subjects(rng, union, 32)
     for alphabet in dict.fromkeys(alphabets):
-        # An atom can have no representative in the bounded sample, for example
-        # a negated class that excludes all printable ASCII.
-        alphabet = alphabet or _DESCRIPTION_ALPHABET
         yield _subjects(rng, alphabet, 32)
         for literal in literals:
             yield _subjects(rng, alphabet, 8 if len(literals) > 32 else 32, literal)
@@ -397,7 +436,7 @@ def compile_pattern(pattern: str) -> CompiledPattern:
     except (IndexError, ValueError):
         # The scanner only sees patterns RE2 accepted; anything it can't parse is refused.
         raise RuleValidationError(PATTERN_INVALID) from None
-    if scanned.max_repeat > MAX_REPEAT_COUNT:
+    if scanned.repeat_cost > MAX_REPEAT_BUDGET:
         raise RuleValidationError(PATTERN_TOO_COMPLEX)
     if compiled.engine.programsize > MAX_PROGRAM_SIZE:
         raise RuleValidationError(PATTERN_TOO_COMPLEX)

@@ -138,11 +138,14 @@ MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
 REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
 INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
 MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
-MAX_REPEAT_COUNT = 16             # counted repetition cap, nested counts multiplied. Refused with PATTERN_TOO_COMPLEX
+MAX_REPEAT_BUDGET = 8             # TOTAL counted repetition: sum along a sequence, max across `|`, nesting multiplies, `{n,}` counts n. Over it: PATTERN_TOO_COMPLEX
 MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ceiling
 def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
 def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- Repetition budget: `[W]{8}[W]{8}` is 16 and refused, `\d{3}-\d{4}` is 7 and valid. The probe fails
+  closed: escape-only classes are sampled from their decoded range ends and midpoint, and a class
+  with no sample refuses the pattern.
 - Structural limits run before the probe (ADR 0024 follow-up). `MAX_PROGRAM_SIZE = 2000` is
   13x the benign corpus peak (153), leaves `\p{L}+` (1,202) valid, and a 16-fold
   `\p{Greek}|\p{Cyrillic}` group (1,617) is under it, so the repetition cap is the primary control
