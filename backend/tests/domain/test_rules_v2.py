@@ -376,3 +376,12 @@ def test_no_write_path_can_reach_the_stored_loader() -> None:
 def test_stored_flag_is_not_a_constructor_argument() -> None:
     with pytest.raises(TypeError):
         DescriptionCondition("regex", "^moon", True)  # type: ignore[call-arg]
+
+
+def test_rule_matching_normalises_nfkc_without_touching_fingerprints() -> None:
+    from app.domain.fingerprint import normalize_description
+    from app.domain.rules import normalize_for_rules
+
+    assert normalize_for_rules("pay \u212a") == "PAY K"
+    # The shared normaliser behind fingerprints and statement dedupe is unchanged.
+    assert normalize_description("pay \u212a") != "PAY K"

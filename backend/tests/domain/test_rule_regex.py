@@ -30,7 +30,11 @@ from tests.domain.regex_corpus import (
 def test_required_corpus_patterns_are_refused(pattern: str) -> None:
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
-    assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
+    assert str(caught.value) in (
+        PATTERN_TOO_SLOW,
+        rule_regex.PATTERN_TOO_COMPLEX,
+        rule_regex.PATTERN_UNSUPPORTED,
+    )
 
 
 @pytest.mark.parametrize(
@@ -45,7 +49,11 @@ def test_probe_alone_still_refuses_the_required_patterns(
     monkeypatch.setattr(rule_regex, "MAX_CLASS_POSITIONS", 10**9)
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
-    assert str(caught.value) in (PATTERN_TOO_SLOW, rule_regex.PATTERN_TOO_COMPLEX)
+    assert str(caught.value) in (
+        PATTERN_TOO_SLOW,
+        rule_regex.PATTERN_TOO_COMPLEX,
+        rule_regex.PATTERN_UNSUPPORTED,
+    )
 
 
 @pytest.mark.parametrize(
@@ -268,7 +276,9 @@ def test_probe_family_cap_rejects_and_never_accepts(monkeypatch: pytest.MonkeyPa
 def test_group_alphabets_are_probed_and_negated_classes_use_non_ascii_samples() -> None:
     scanned = rule_regex._scan("(?:X|Y)*X(?:X|Y|Z){20}W")
     assert scanned.atoms == ()
-    assert {"".join(sorted(a.upper())) for a in rule_regex._group_alphabets(scanned.groups)} == {
+    assert {
+        "".join(sorted(set(a.upper()))) for a in rule_regex._group_alphabets(scanned.groups)
+    } == {
         "XY",
         "XYZ",
     }
@@ -356,3 +366,33 @@ def test_written_out_copies_hit_the_class_position_budget() -> None:
         compile_pattern("QJV.*X" + "." * 24 + "W")
     assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
     assert compile_pattern("QJV.*X" + "." * 4 + "W")
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ("(?i)A", "(?-i)A", "(?s)A.B", "(?m)^A", "(?U)A+", "(?i:A)", "(?-i:A)B", "(?i-s:A)", "A(?i)B"),
+)
+def test_inline_flags_are_refused_on_every_path(pattern: str) -> None:
+    for compile_ in (compile_pattern, rule_regex.compile_stored_pattern):
+        with pytest.raises(RuleValidationError) as caught:
+            compile_(pattern)
+        assert str(caught.value) == rule_regex.PATTERN_UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "pattern", (r"\(?i\)A", r"[(?i)]A", r"\Q(?i)\EA", "(?:AB|CD)E", "(?P<brand>AB|CD)E")
+)
+def test_non_flag_groups_and_escaped_text_are_accepted(pattern: str) -> None:
+    assert compile_pattern(pattern)
+
+
+def test_compatibility_twins_are_normalised_to_one_character() -> None:
+    from app.domain.rules import normalize_for_rules
+
+    assert normalize_for_rules("\u212a \u2126 \u212b") == "K \u03a9 \u00c5"
+    assert compile_pattern("\u2126\u2126").search(normalize_for_rules("\u03a9\u2126"))
+
+
+def test_probe_alphabets_keep_exact_code_points() -> None:
+    assert {"\u03a9", "\u2126"} <= set(rule_regex._literal_alphabet("\u03a9"))
+    assert {"\u03a9", "\u2126"} <= set(rule_regex._atom_alphabet(r"[\x{3a9}\x{2126}]"))

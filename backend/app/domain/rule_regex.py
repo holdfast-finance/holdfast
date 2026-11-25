@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -35,11 +36,14 @@ INGEST_REGEX_US_PER_ROW = 500
 PATTERNS_UNAVAILABLE = "Patterns aren't available on this server."
 PATTERN_INVALID = "This pattern uses unsupported syntax."
 PATTERN_TOO_SLOW = "This pattern is too slow to run on every transaction."
+PATTERN_UNSUPPORTED = "Inline flags aren't supported. Matching is always case-insensitive."
 PATTERN_TOO_COMPLEX = "This pattern is too complex to check. Try a simpler one."
 _PRINTABLE_ASCII = "".join(chr(code) for code in range(32, 127))
 _DESCRIPTION_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789    *#-./"
 # Provide representatives for whitespace and common non-ASCII scripts and categories.
-_CLASS_SAMPLES = _PRINTABLE_ASCII + "\t\n\r\f\v" + "ÉΩЖԱאشअก中あ한٠Ⅳ²€—"
+_CLASS_SAMPLES = (
+    _PRINTABLE_ASCII + "\t\n\r\f\v" + "ÉΩЖԱאشअก中あ한٠Ⅳ²€—" + "\u212a\u2126\u212b\u017f\u1e9e"
+)  # fold twins: Kelvin, Ohm, Angstrom, long s, capital sharp s
 
 
 class RuleValidationError(ValueError):
@@ -183,12 +187,6 @@ class _Scan:
     pure_literal: bool
 
 
-def _fold_key(text: str) -> str:
-    """A case-insensitive dedupe key that never relies on full case mapping (ß is not SS)."""
-    lowered = text.lower()
-    return lowered if len(lowered) == len(text) else text
-
-
 def _repeat_count(pattern: str, start: int) -> tuple[int, int] | None:
     """Parse ``{n}``, ``{n,}`` or ``{n,m}`` at ``start``. Return (end, largest count)."""
     close = pattern.find("}", start + 1)
@@ -295,12 +293,12 @@ def _scan(pattern: str) -> _Scan:
                 members[atom] = None
         if literal:
             for letter in literal:
-                literals.setdefault(_fold_key(letter), letter)
+                literals.setdefault(letter, letter)
                 for letters, _ in open_groups:
-                    letters.setdefault(_fold_key(letter), letter)
+                    letters.setdefault(letter, letter)
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
-                    runs.setdefault(_fold_key(recent[-size:]), recent[-size:])
+                    runs.setdefault(recent[-size:], recent[-size:])
         else:
             recent = ""
         i = end
@@ -357,7 +355,7 @@ def _atom_alphabet(atom: str) -> str:
     # built from "not ASCII" is probed over the characters it actually matches.
     candidates = _CLASS_SAMPLES + atom + _class_endpoints(atom)
     matched = (char for char in candidates if atom_pattern.fullmatch(char))
-    alphabet = "".join({_fold_key(char): char for char in matched}.values())
+    alphabet = "".join(dict.fromkeys(matched))
     if not alphabet:
         # Fail closed: a class with no probe sample would never be exercised.
         raise RuleValidationError(PATTERN_TOO_COMPLEX)
@@ -370,7 +368,7 @@ def _literal_alphabet(letter: str) -> str:
     engine = _compile_cold(f"\\x{{{ord(letter):x}}}")
     candidates = dict.fromkeys(_CLASS_SAMPLES + letter + letter.upper() + letter.lower())
     matched = (char for char in candidates if engine.fullmatch(char))
-    return "".join({_fold_key(char): char for char in matched}.values())
+    return "".join(dict.fromkeys(matched))
 
 
 def _atom_alphabets(atoms: tuple[str, ...]) -> Iterator[str]:
@@ -452,24 +450,61 @@ def _family_mean_ns(pattern: str, subjects: tuple[str, ...]) -> int:
     return min(one_run() for _ in range(3)) // len(subjects)
 
 
+def _has_inline_flags(pattern: str) -> bool:
+    """Find ``(?i)``, ``(?-i:...)`` and every other ``(?`` form but ``(?:`` and ``(?P<name>``.
+
+    One case mode is what keeps folding twins (K and the Kelvin sign) from branching the DFA.
+    """
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "[":
+            i = _bracket_end(pattern, i)
+        elif char == "\\":
+            if pattern[i + 1] == "Q":
+                close = pattern.find(r"\E", i + 2)
+                i = len(pattern) if close == -1 else close + 2
+            else:
+                i = _escape_end(pattern, i)
+        elif pattern.startswith("(?", i):
+            if not pattern.startswith(("(?:", "(?P<"), i):
+                return True
+            i += 3
+        else:
+            i += 1
+    return False
+
+
 def _compile_checked(pattern: str) -> _Pattern:
     if not 1 <= len(pattern) <= MAX_PATTERN_LENGTH or "\0" in pattern:
         raise RuleValidationError("Patterns must be 1 to 128 characters and contain no NUL.")
     engine = _compile_cold(pattern)
+    try:
+        flagged = _has_inline_flags(pattern)
+    except (IndexError, ValueError):
+        raise RuleValidationError(PATTERN_INVALID) from None
+    if flagged:
+        raise RuleValidationError(PATTERN_UNSUPPORTED)
     if engine.search("") is not None:
         raise RuleValidationError("Patterns must not match an empty description.")
     return _Pattern(engine)
 
 
+def _nfkc(pattern: str) -> str:
+    """Patterns see the same NFKC text as subjects, so compatibility twins cannot differ."""
+    return unicodedata.normalize("NFKC", pattern)
+
+
 def compile_stored_pattern(pattern: str) -> CompiledPattern:
     """Compile a previously validated stored pattern without a load-dependent cost probe."""
-    return _compile_checked(pattern)
+    return _compile_checked(_nfkc(pattern))
 
 
 def compile_pattern(pattern: str) -> CompiledPattern:
     """Validate and measure a new pattern before admitting it to the rules engine."""
     if re2 is None:
         raise RuleValidationError(PATTERNS_UNAVAILABLE)
+    pattern = _nfkc(pattern)
     compiled = _compile_checked(pattern)
     # Structural limits run first and bound the whole class of blow-ups. The probe below
     # is a second line, not the only one.

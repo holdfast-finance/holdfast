@@ -147,8 +147,12 @@ def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 
 - Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
   the same calculator. `MAX_CLASS_POSITIONS = 24`, refused with PATTERN_TOO_COMPLEX. Literals are free,
   and a count on a single literal or a pure-literal group costs nothing against either budget
-  (programsize bounds it). Pure-literal patterns (no class, dot, alternation or repeat) skip the
-  timing probe. The probe adds literal-prefix + dense-trigger families.
+  (programsize bounds it). Pure-literal patterns skip the
+  timing probe. The code's rule: no `.`, no class or class escape (`\d`, `\pL`), no `|`, no `*`, `+`
+  or `?`, and no `{n}` (plain `(?:...)` groups, anchors and escaped literals are allowed). Inline
+  flags are refused (PATTERN_UNSUPPORTED): only `(?:` and `(?P<name>` open a group, so there is one
+  case mode. Subjects and patterns go through NFKC (`rules.normalize_for_rules`, rule matching
+  only: fingerprints and merchant keys keep `normalize_description`). The probe adds literal-prefix + dense-trigger families.
 - Repetition budget: `[W]{8}[W]{8}` is 16 and refused, `\d{3}-\d{4}` is 7 and valid. The probe fails
   closed: escape-only classes are sampled from their decoded range ends and midpoint, and a class
   with no sample refuses the pattern.

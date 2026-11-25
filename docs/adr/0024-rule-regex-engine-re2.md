@@ -289,6 +289,10 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   repetition budget (`QJV.*X` plus 121 dots). Every `.`, class or branching group in sequence
   counts 1, times its count, and the total is capped at 24. Literals are free, and a count on a
   literal or pure-literal group costs nothing against either budget, so `\*{8}\d{4}` passes.
-  Pure-literal patterns skip the timing probe: their DFA has at most len + 1 states.
+  Pure-literal patterns (no `.`, class, `|`, `*`, `+`, `?` or `{n}`) skip the timing probe. Their
+  DFA has at most len + 1 states only with a single case mode, which round 5 guarantees: inline
+  flags are refused, since `(?-i:\x{2126})` makes the folding twins K/Kelvin, Ω/Ohm and Å/Angstrom
+  branch. Subjects and patterns are also NFKC-normalised for rule matching, and probe alphabets use
+  exact code points, not case-folded keys.
   The probe gained literal-prefix + dense-trigger families, so variants at 21 positions are
   refused by the probe alone.

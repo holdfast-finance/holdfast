@@ -32,6 +32,9 @@ REQUIRED_REJECTIONS = (
     "QJV.*X" + "." * 121 + "W",
     "KZ.*X" + "." * 122 + "W",
     "QJV[XY]*X" + "[XY]" * 25 + "W",
+    r"(?-i:\x{2126})Ω{200}#",
+    r"(?-i)\x{212A}(?i)K{200}#",
+    "(?-i:\u2126)" + "Ω" * 100 + "#",
 )
 
 # The four escape-only-class patterns again at a total count of 8, which the repetition

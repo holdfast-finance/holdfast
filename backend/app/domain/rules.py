@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -41,6 +42,12 @@ TOKEN_VERSION = 2
 MAX_DESCRIPTION_VALUE_LENGTH = 128
 MAX_AMOUNT = Decimal(10) ** 12
 CENT = Decimal("0.01")
+
+
+def normalize_for_rules(text: str) -> str:
+    """NFKC, then the fingerprint normalisation. Rule matching only: fingerprints, merchant
+    keys and every stored hash keep ``normalize_description`` unchanged."""
+    return normalize_description(unicodedata.normalize("NFKC", text))
 
 
 def _check_amount(amount: Decimal) -> None:
@@ -104,7 +111,7 @@ class DescriptionCondition:
             raise RuleValidationError("Description text is required.")
         if self.mode != "regex" and len(self.value) > MAX_DESCRIPTION_VALUE_LENGTH:
             raise RuleValidationError("Description text is too long.")
-        literal = normalize_description(self.value) if self.mode != "regex" else ""
+        literal = normalize_for_rules(self.value) if self.mode != "regex" else ""
         regex = compile_regex(self.value) if self.mode == "regex" else None
         object.__setattr__(self, "_literal", literal)
         object.__setattr__(self, "_regex", regex)
@@ -276,7 +283,7 @@ def _ordered_rules(rules: Iterable[Rule]) -> list[Rule]:
 
 
 def _first_match(ordered: list[Rule], txn: RuleTransaction) -> RuleMatch | None:
-    normalized = normalize_description(txn.description)
+    normalized = normalize_for_rules(txn.description)
     for rule in ordered:
         if rule_may_touch(rule, txn) and rule.conditions.matches(txn, normalized):
             return RuleMatch(txn.id, rule.id, rule.action)
@@ -338,10 +345,10 @@ def preview_for(
         if not target.enabled:
             break
         if not rule_may_touch(target, txn):
-            if target.conditions.matches(txn, normalize_description(txn.description)):
+            if target.conditions.matches(txn, normalize_for_rules(txn.description)):
                 skipped_not_writable += 1
             continue
-        if not target.conditions.matches(txn, normalize_description(txn.description)):
+        if not target.conditions.matches(txn, normalize_for_rules(txn.description)):
             continue
         if txn.is_split:
             skipped_split += 1
