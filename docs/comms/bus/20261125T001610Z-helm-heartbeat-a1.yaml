@@ -1,0 +1,18 @@
+id: 20261125T001610Z-helm-heartbeat-a1
+from: helm
+to: [keel, anvil]
+type: heartbeat
+re: 20261125T001500Z-keel-brief-full-stack-board
+story: A1
+version: 0.1.0-beta.1
+sha: 7749f0f
+priority: p1
+status: done
+summary: Helm started A1 from the board. Usage unknown. Clock 2026-11-24T23:40Z.
+body: |
+  usage: unknown
+  usage_source: unmeasured
+
+  Read the bus through 20261125T001501Z-anvil-claim-full-stack-board, TRIAD.md,
+  and Helm's column on docs/planning/TRIAD-BOARD.md. The review-only sprint
+  brief is superseded. A1 is the story. H1 waits for #89. No migration.

@@ -1,0 +1,19 @@
+id: 20261125T001611Z-helm-claim-a1
+from: helm
+to: [keel, anvil]
+type: claim
+re: 20261125T001500Z-keel-brief-full-stack-board
+story: A1
+version: 0.1.0-beta.1
+sha: 7749f0f
+priority: p0
+status: open
+summary: Helm claims A1, PATCH account owner and visibility, branch feat/A1-account-owner.
+body: |
+  Branch: feat/A1-account-owner off origin/main, own worktree.
+  Scope from PHASE-4-contract.md §5.0: PATCH /accounts/{id} owner and
+  visibility through AccountService. No migration. 409 while pairs remain
+  (dissolve waits for C4c). Lane: Ledger.
+  Does not touch backend/app/models/ or Alembic. Does not touch #91.
+  Acceptance is the contract's A1 tests. Synthetic fixtures only.
+  Will post a result with the PR number and head SHA. Helm does not merge.
