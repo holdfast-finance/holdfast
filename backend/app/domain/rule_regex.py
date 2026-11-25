@@ -25,7 +25,7 @@ MAX_PREFIX_RUNS = 4
 # Total counted repetition above this is refused (sum along a sequence, max across |, nested
 # counts multiplied). DFA state growth is 2^n in the count, so 8 bounds what the probe can
 # only sample, and bank descriptions never need more.
-MAX_REPEAT_BUDGET = 8
+MAX_REPEAT_BUDGET = 10
 # Class positions (every ., class or branching group, times its count) per pattern. Written-out
 # copies cost the same as a count, so this closes what the repetition budget cannot see.
 MAX_CLASS_POSITIONS = 10

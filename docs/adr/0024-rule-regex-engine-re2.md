@@ -311,3 +311,9 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   budget sits at 10, in line with the repetition budget of 8, and no more probe families are added.
   `\d{3}-\d{4}` (7) and `\d{2}/\d{2}/\d{4}` (8) pass. `\(\d{3}\) \d{3}-\d{4}` fits the position budget
   (10) but costs 10 against the repetition budget of 8, so it is refused and reported, not widened.
+- **Repetition budget raised from 8 to 10** (round 8 follow-up), matching the position budget. Both
+  bound the same DFA growth and the measured cliff is between 10 and 12. `\(\d{3}\) \d{3}-\d{4}` (10)
+  now passes. `[XY]*X[XYZ]{10}W` and its group form have 11 positions and are refused by the position
+  budget, and by the probe alone at 30 to 45 us.
+  Timing tests: acceptance tests run with the probe limit x10 (a loaded runner pushed benign
+  patterns near 10 us over it), and the tests that assert the probe's own refusals carry `strict_probe`.

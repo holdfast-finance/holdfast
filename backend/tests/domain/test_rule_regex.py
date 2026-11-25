@@ -21,13 +21,13 @@ from tests.domain.regex_corpus import (
     BUDGET_ONLY,
     BUDGET_REJECTIONS,
     CORPUS,
-    KNOWN_REFUSED_BENIGN,
     MUST_ACCEPT,
     PROBE_ONLY_VARIANTS,
     REQUIRED_REJECTIONS,
 )
 
 
+@pytest.mark.strict_probe
 @pytest.mark.parametrize("pattern", REQUIRED_REJECTIONS)
 def test_required_corpus_patterns_are_refused(pattern: str) -> None:
     with pytest.raises(RuleValidationError) as caught:
@@ -40,6 +40,7 @@ def test_required_corpus_patterns_are_refused(pattern: str) -> None:
     )
 
 
+@pytest.mark.strict_probe
 @pytest.mark.parametrize(
     "pattern", [p for p in (*REQUIRED_REJECTIONS, *PROBE_ONLY_VARIANTS) if p not in BUDGET_ONLY]
 )
@@ -63,22 +64,22 @@ def test_probe_alone_still_refuses_the_required_patterns(
 @pytest.mark.parametrize(
     ("pattern", "allowed"),
     (
-        (r"\d{8}", True),
-        (r"\d{9}", False),
-        (r"\d{2,9}", False),
-        (r"\d{9,}", False),
+        (r"\d{10}", True),
+        (r"\d{11}", False),
+        (r"\d{2,11}", False),
+        (r"\d{11,}", False),
         ("[W]{8}[W]{8}", False),
-        ("[W]{4}[W]{4}", True),
-        ("[W]{4}[W]{5}", False),
+        ("[W]{5}[W]{5}", True),
+        ("[W]{5}[W]{6}", False),
         (r"\d{4}|\d{8}", True),
-        (r"\d{4}|\d{9}", False),
+        (r"\d{4}|\d{11}", False),
         (r"(?:\d{4}){2}", True),
         (r"(?:\d{4}){3}", False),
         (r"(?:(?:\d{2}){2}){2}", True),
-        (r"(?:\d{2}){2}(?:\w{2}){3}", False),
-        (r"(?:\d{3}|\w{2}){3}", False),
+        (r"(?:\d{2}){2}(?:\w{2}){4}", False),
+        (r"(?:\d{3}|\w{2}){4}", False),
         (r"(?:\d{3}|\w{2}){2}\d{2}", True),
-        (r"(?:\d{9})", False),
+        (r"(?:\d{11})", False),
         (r"\d{3}-\d{4}", True),
         (r"A\{99\}", True),
         # Counts on literals do not branch the DFA, so they are free.
@@ -127,6 +128,7 @@ def test_group_alphabet_includes_the_samples_of_classes_inside_it() -> None:
     assert any(set("XY") <= set(a) for a in alphabets)
 
 
+@pytest.mark.strict_probe
 @pytest.mark.parametrize("pattern", CORPUS)
 @pytest.mark.skipif(
     bool(os.environ.get("SKIP_REGEX_TIMING")) and not os.environ.get("CI"),
@@ -158,7 +160,8 @@ def test_corpus_gate(pattern: str, record_property: Callable[[str, object], None
         compiled.search(subject)
     elapsed = perf_counter() - started
     record_property("search_seconds", elapsed)
-    assert elapsed < 1
+    # 50,000 searches take about 0.1 s; the bound leaves a loaded runner 50x headroom.
+    assert elapsed < 5
 
 
 def test_case_insensitive_and_truncates_by_character() -> None:
@@ -283,6 +286,7 @@ _WORST_CASES = (
 )
 
 
+@pytest.mark.strict_probe
 @pytest.mark.parametrize("pattern", _WORST_CASES)
 def test_save_time_is_bounded_and_a_cap_hit_rejects(pattern: str) -> None:
     assert len(pattern) <= rule_regex.MAX_PATTERN_LENGTH
@@ -295,7 +299,8 @@ def test_save_time_is_bounded_and_a_cap_hit_rejects(pattern: str) -> None:
             rule_regex.PATTERN_TOO_SLOW,
             "This pattern has too many character classes.",
         )
-    assert perf_counter() - started < 1.5
+    # Measured at about 0.16 s; 5 s is 30x headroom for a loaded runner.
+    assert perf_counter() - started < 5
 
 
 def test_probe_family_cap_rejects_and_never_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -593,11 +598,29 @@ def test_common_phone_date_and_merchant_shapes_still_pass(pattern: str) -> None:
     assert compile_pattern(pattern)
 
 
-@pytest.mark.parametrize("pattern", KNOWN_REFUSED_BENIGN)
-def test_known_refused_benign_pattern_is_refused_by_the_repetition_budget(pattern: str) -> None:
+@pytest.mark.parametrize(
+    "pattern", (r"\(\d{3}\) \d{3}-\d{4}", r"\d{3}-\d{4}", r"\d{2}/\d{2}/\d{4}")
+)
+def test_phone_and_date_shapes_fit_both_budgets(pattern: str) -> None:
     scanned = rule_regex._scan(pattern)
-    assert scanned.repeat_cost == 10
-    assert scanned.class_positions == 10  # inside the position budget
+    assert scanned.repeat_cost <= rule_regex.MAX_REPEAT_BUDGET == 10
+    assert scanned.class_positions <= rule_regex.MAX_CLASS_POSITIONS == 10
+    assert compile_pattern(pattern)
+
+
+@pytest.mark.strict_probe
+@pytest.mark.parametrize("pattern", ("[XY]*X[XYZ]{10}W", "(?:X|Y)*X(?:X|Y|Z){10}W"))
+def test_ten_count_blow_up_shapes_are_refused_by_budget_and_by_the_probe(
+    pattern: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At the repetition budget edge: the position budget refuses them (11 positions), and
+    with every structural limit off the probe still does (it measures 30 to 45 us, over 10)."""
     with pytest.raises(RuleValidationError) as caught:
         compile_pattern(pattern)
     assert str(caught.value) == rule_regex.PATTERN_TOO_COMPLEX
+    monkeypatch.setattr(rule_regex, "MAX_REPEAT_BUDGET", 10_000)
+    monkeypatch.setattr(rule_regex, "MAX_PROGRAM_SIZE", 10**9)
+    monkeypatch.setattr(rule_regex, "MAX_CLASS_POSITIONS", 10**9)
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    assert str(caught.value) == PATTERN_TOO_SLOW

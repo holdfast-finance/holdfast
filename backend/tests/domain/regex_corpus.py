@@ -88,10 +88,8 @@ MUST_ACCEPT = (
     r"ACCT [X*]{4}\d{4}",
     "A" * 128,
     r"\d{2}/\d{2}/\d{4}",
+    r"\(\d{3}\) \d{3}-\d{4}",
 )
-
-# A benign pattern the repetition budget of 8 refuses (10 counted digits). Reported, not widened.
-KNOWN_REFUSED_BENIGN = (r"\(\d{3}\) \d{3}-\d{4}",)
 
 CORPUS = (
     *REQUIRED_REJECTIONS,
@@ -107,6 +105,7 @@ CORPUS = (
     "^[A-Z]+ [0-9]{4}$",
     r"\d{3}-\d{4}",
     r"\d{2}/\d{2}/\d{4}",
+    r"\(\d{3}\) \d{3}-\d{4}",
     "[^0-9]+ PAYMENT",
     r"(?:VENMO|ZELLE|PAYPAL) \*?[A-Z ]+",
     "[^A-W]{1}[XYZ]{120}#",
