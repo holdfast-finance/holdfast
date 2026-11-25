@@ -57,6 +57,27 @@ def test_split_columns_and_explicit_indexed_header() -> None:
     assert [item.amount for item in result.txns] == [Decimal("-4.00"), Decimal("10.00")]
 
 
+def test_amount_direction_sets_the_decimal_sign() -> None:
+    profile = csv_profile_from_mapping(dict(PROFILE, direction="Transaction Type"))
+    result = parse_csv(
+        "When,What,Value,Transaction Type\r\n"
+        "2026-02-01,Market,12.34,Debit\r\n"
+        "2026-02-02,Refund,5.67,credit\r\n",
+        profile,
+    )
+    assert [txn.amount for txn in result.txns] == [Decimal("-12.34"), Decimal("5.67")]
+
+
+@pytest.mark.parametrize(("amount", "direction"), [("-2.00", "debit"), ("2.00", "unknown")])
+def test_amount_direction_rejects_ambiguous_signs(amount: str, direction: str) -> None:
+    profile = csv_profile_from_mapping(dict(PROFILE, direction="Transaction Type"))
+    with pytest.raises(StatementParseError, match="CSV row 2:"):
+        parse_csv(
+            f"When,What,Value,Transaction Type\n2026-02-01,Market,{amount},{direction}",
+            profile,
+        )
+
+
 def test_newest_first_running_balance_mismatch_is_flagged() -> None:
     profile = csv_profile_from_mapping(dict(PROFILE, balance="Balance", newest_first=True))
     result = parse_csv(

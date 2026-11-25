@@ -45,6 +45,7 @@ class CsvProfile:
     # because the column says which way the money moved. "reverse": the cell keeps its sign, so a
     # negative debit is a refund (inflow) and a negative credit a reversal (outflow).
     negative_split: Literal["reject", "reverse"] = "reject"
+    direction: Column | None = None
 
 
 def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
@@ -71,7 +72,12 @@ def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
         or (amount is None and debit is not None and credit is not None)
     ):
         raise StatementParseError("CSV profile requires either amount or both debit and credit")
-    columns = [c for c in (date_col, description, amount, debit, credit, balance) if c is not None]
+    direction = column("direction")
+    columns = [
+        col
+        for col in (date_col, description, amount, debit, credit, balance, direction)
+        if col is not None
+    ]
     if len(set(columns)) != len(columns):
         raise StatementParseError("CSV profile columns must be distinct")
 
@@ -91,6 +97,8 @@ def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
         raise StatementParseError("CSV profile sign must be as_printed or inverted")
     if sign == "inverted" and amount is None:
         raise StatementParseError("CSV profile inverted sign requires an amount column")
+    if direction is not None and (amount is None or sign != "as_printed"):
+        raise StatementParseError("CSV profile direction requires an amount without inverted sign")
     header = data.get("header", "auto")
     if header != "auto" and header != "present" and header != "absent":
         raise StatementParseError("CSV profile header must be auto, present or absent")
@@ -138,6 +146,7 @@ def csv_profile_from_mapping(data: Mapping[str, object]) -> CsvProfile:
         newest_first,
         "invert" if balance_sign == "invert" else "as_is",
         "reverse" if negative_split == "reverse" else "reject",
+        direction=direction,
     )
 
 
@@ -158,6 +167,13 @@ def _records(text: str, delimiter: str) -> Iterator[tuple[int, list[str]]]:
 def _row_amount(cells: Mapping[Column, str], profile: CsvProfile) -> Decimal:
     if profile.amount is not None:
         amount = check_amount_bounds(parse_amount(cells[profile.amount]))
+        if profile.direction is not None:
+            direction = cells[profile.direction].casefold()
+            if direction not in {"debit", "credit"}:
+                raise StatementParseError("unrecognized debit or credit direction")
+            if amount < ZERO:
+                raise StatementParseError("negative amount with a debit or credit direction")
+            return amount.copy_negate() if direction == "debit" else amount
         return amount.copy_negate() if profile.sign == "inverted" else amount
     elif profile.debit is not None and profile.credit is not None:
         debit_cell, credit_cell = cells[profile.debit], cells[profile.credit]
@@ -196,6 +212,7 @@ def parse_csv(source: str | bytes, profile: CsvProfile) -> TransactionExport:
         profile.debit,
         profile.credit,
         profile.balance,
+        profile.direction,
     )
     names = {column for column in columns if isinstance(column, str)}
     headings: list[str] = []
