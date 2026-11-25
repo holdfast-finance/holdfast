@@ -69,6 +69,14 @@ def test_four_equal_daily_charges_pair_with_or_without_authorized_dates(
     )
 
 
+@pytest.mark.parametrize("authorized", [None, 1, 0])
+def test_coverage_edge_requires_exact_authorization_date(authorized: int | None) -> None:
+    old = replace(imported(1), coverage_edge=True)
+    new = connected(11, 1, authorized=authorized)
+    pairs = match([old], [new], coverage_by_account={ACCOUNT: [CoverageInterval(day(-7), DAY)]})
+    assert pairs == ((SupersedePair(old.id, new.id, held=False),) if authorized == 0 else ())
+
+
 def test_two_coffees_pair_once_each_and_one_connector_only_pairs_once() -> None:
     first, second = imported(1), imported(2)
     coffee, another_coffee = connected(11), connected(12)

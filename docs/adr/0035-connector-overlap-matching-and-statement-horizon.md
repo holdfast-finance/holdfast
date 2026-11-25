@@ -63,6 +63,12 @@ For a symmetric window on sorted dates, this greedy walk is a maximum-cardinalit
 leaves **no** unmatched import row and unmatched connector row within 3 days of each other in a
 group.
 
+A pre-adoption import row within three days of a coverage boundary can also
+match a connector row posted outside coverage. The account and amount must
+match exactly, and the connector must report an authorization date equal
+to the statement date. Resolve the ordinary matching groups first and use
+only their remaining connector candidates for these edge pairs.
+
 ### 3. Held pairs (R2-S2)
 A pair is **held** instead of superseded when both of these are true:
 - either row has more than one candidate within the window in its group
@@ -114,6 +120,10 @@ and are counted as `held`:
   paired. That is visible as a pair and reversible by un-adopt.
 - Duplicates with a posting lag over 3 days are not matched. V1's per-day counts (contract §6.4,
   measure 3b) surface them.
+
+At a coverage boundary, adjacent posting dates alone are insufficient.
+Equal amounts with the same reported authorization date can still describe
+different charges. The held-pair rules apply to those candidates.
 
 ## Alternatives considered
 - **Greedy by date distance (revision 1):** not maximum (R2-B2).

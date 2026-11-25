@@ -89,6 +89,7 @@ class ImportCandidate:
     is_pending: bool = False
     in_supersession: bool = False
     arrived_after_adoption: bool = False
+    coverage_edge: bool = False
 
     def __post_init__(self) -> None:
         validate_amount(self.amount)
@@ -168,6 +169,8 @@ def match(
     account_coverage = coverage_by_account if coverage_by_account is not None else {}
     import_groups: dict[tuple[UUID, Decimal], list[ImportCandidate]] = defaultdict(list)
     connector_groups: dict[tuple[UUID, Decimal], list[ConnectorCandidate]] = defaultdict(list)
+    edge_imports: dict[tuple[UUID, Decimal, date], list[ImportCandidate]] = defaultdict(list)
+    edge_connectors: dict[tuple[UUID, Decimal, date], list[ConnectorCandidate]] = defaultdict(list)
     for row in imports:
         if row.is_pending or row.in_supersession:
             continue
@@ -175,6 +178,8 @@ def match(
             row.posted_date, account_coverage.get(row.account_id, ())
         ):
             import_groups[row.account_id, row.amount].append(row)
+        elif row.coverage_edge:
+            edge_imports[row.account_id, row.amount, row.posted_date].append(row)
     for connector in connectors:
         if (
             connector.is_pending
@@ -185,10 +190,18 @@ def match(
         ):
             continue
         connector_groups[connector.account_id, connector.amount].append(connector)
+        if connector.authorized_date is not None:
+            edge_connectors[
+                connector.account_id, connector.amount, connector.authorized_date
+            ].append(connector)
 
     pairs: list[SupersedePair] = []
     for key in sorted(import_groups.keys() & connector_groups.keys()):
         pairs.extend(_match_group(import_groups[key], connector_groups[key]))
+    used = {pair.connector_id for pair in pairs}
+    for edge_key in sorted(edge_imports.keys() & edge_connectors.keys()):
+        candidates = [row for row in edge_connectors[edge_key] if row.id not in used]
+        pairs.extend(_match_group(edge_imports[edge_key], candidates))
     return tuple(pairs)
 
 

@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db_context import scoped_session
 from app.domain.statement_parse import ParsedBlock, ParsedStatement, mask_long_digit_runs
-from app.models import Account, Document, ImportRun, Transaction
+from app.models import Account, Document, ImportRun, SyncRun, Transaction
+from app.services.ingest import IngestService
 from app.services.ledger_service import LedgerWriter, NewTransaction
 from app.services.statement_accounts import (
     AccountNotVisibleError as AccountNotVisibleError,
@@ -248,11 +249,15 @@ async def import_statement(
     person_id: uuid.UUID | None = None,
     household_wide: bool = False,
     target: AccountTarget | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> ImportResult:
     """Persist ``statement``. One database transaction: a failure leaves nothing behind.
 
     The import job passes ``household_wide`` (it may write any account, like a sync job). A request
     path never does (ADR 0008, ``test_household_wide_guard``): it passes its own ``person_id``.
+    ``user_id`` names the acting user; with it (or ``household_wide``) an adopted account is
+    matched against its connector rows after each block (ADR 0035 4). A person session without
+    either skips the matcher, and the next sync matches.
     """
     async with scoped_session(factory, household_id, person_id, household_wide=household_wide) as s:
         doc = await _document(s, household_id, meta, statement.profile_id, person_id)
@@ -286,7 +291,15 @@ async def import_statement(
         for block in statement.blocks:
             results.append(
                 await _import_block(
-                    s, household_id, doc, statement, block, person_id, target, household_wide
+                    s,
+                    household_id,
+                    doc,
+                    statement,
+                    block,
+                    person_id,
+                    target,
+                    household_wide,
+                    user_id,
                 )
             )
         # A flagged run latches the document in the database (trigger), so decide once, after
@@ -488,6 +501,7 @@ async def _import_block(
     person_id: uuid.UUID | None,
     target: AccountTarget | None = None,
     household_wide: bool = False,
+    user_id: uuid.UUID | None = None,
 ) -> BlockResult:
     acct = await _account(s, household_id, statement, block, person_id, target, household_wide)
     prior = (
@@ -583,6 +597,23 @@ async def _import_block(
     run.status = "succeeded"
     run.finished_at = datetime.now(UTC)
     await s.flush()
+    if (
+        inserted
+        and not flagged
+        and acct.bank_connection_id is not None
+        and acct.source in ("plaid", "simplefin")
+        and (household_wide or user_id)
+    ):
+        history_complete = acct.adopted_at is not None or bool(
+            await s.scalar(
+                select(SyncRun.history_complete)
+                .where(SyncRun.bank_connection_id == acct.bank_connection_id)
+                .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+                .limit(1)
+            )
+        )
+        if history_complete:
+            await IngestService(s, household_id, user_id=user_id).match_accounts({acct.id})
     return BlockResult(
         run.id,
         acct.id,
