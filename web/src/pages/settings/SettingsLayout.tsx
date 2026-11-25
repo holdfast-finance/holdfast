@@ -20,7 +20,7 @@ export function SettingsLayout() {
     <section aria-labelledby="page-title" className="mx-auto flex max-w-3xl flex-col gap-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <h1 id="page-title" className="text-3xl md:text-4xl">
+          <h1 id="page-title" tabIndex={-1} className="text-3xl md:text-4xl">
             Settings
           </h1>
           {me && (

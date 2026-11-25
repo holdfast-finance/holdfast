@@ -11,7 +11,7 @@ import type { MeResponse, PasswordLoginRequest } from '@/api/contracts'
 import type { components } from '@/api/schema'
 import { queryKeys } from '@/app/queryClient'
 import { clearOAuthSession } from '@/features/connections/oauthSession'
-import { withReauth } from '@/stores/reauth'
+import { useReauthStore, withReauth } from '@/stores/reauth'
 
 /*
  * Auth hooks over the Phase 1 API contract. WebAuthn ceremonies run in the browser through
@@ -66,6 +66,7 @@ export function useLogout() {
     onSettled: () => {
       // Whatever the server said, forget everything this tab knew.
       clearOAuthSession()
+      useReauthStore.getState().cancel()
       client.clear()
       client.setQueryData(queryKeys.me, null)
     },

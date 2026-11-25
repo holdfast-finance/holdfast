@@ -11,9 +11,19 @@ import {
   type OAuthSession,
 } from '@/features/connections/oauthSession'
 import { openPlaidLink } from '@/features/connections/plaidLink'
+import { useReauthStore } from '@/stores/reauth'
 import { SettingsSection } from '@/pages/settings/SettingsLayout'
 
 const BACK = '/settings/connections'
+
+/** A route change should not strand focus on a page that is gone: land it on the new h1. */
+function focusPageTitle(tries = 30): void {
+  requestAnimationFrame(() => {
+    const title = document.getElementById('page-title')
+    if (title) title.focus()
+    else if (tries > 0) focusPageTitle(tries - 1)
+  })
+}
 
 /**
  * Where a bank's OAuth page sends the browser back (the redirect URI registered with Plaid).
@@ -27,22 +37,41 @@ export function ConnectionsOAuth() {
   const [session] = useState<OAuthSession | null>(readOAuthSession)
   const [problem, setProblem] = useState<unknown>(null)
   const started = useRef(false)
+  const returnedTo = useRef(window.location.href)
+  const handler = useRef<{ destroy: () => void } | null>(null)
+  // Bumped on unmount: a Link that finishes loading for an older run is destroyed, not used.
+  const generation = useRef(0)
+  const aborted = useRef(false)
+  const reauthPending = useReauthStore((s) => s.pending !== null)
   const exchange = useExchange()
   const resolve = useResolveReservation()
 
   useEffect(() => {
+    aborted.current = false
+    const run = generation.current
+    return () => {
+      aborted.current = true
+      generation.current = run + 1
+      started.current = false
+      handler.current?.destroy()
+      handler.current = null
+    }
+  }, [])
+
+  useEffect(() => {
     if (!session || started.current) return
     started.current = true
-    const returnedTo = window.location.href
+    const run = generation.current
     void navigate(location.pathname, { replace: true })
     const finish = () => {
       void navigate(BACK, { replace: true })
+      focusPageTitle()
     }
     void openPlaidLink(session.token, {
-      receivedRedirectUri: returnedTo,
+      receivedRedirectUri: returnedTo.current,
       // A second bank hop re-opens the OAuth page: keep the token for it.
       onEvent: (eventName) => {
-        if (eventName === 'OPEN_OAUTH') {
+        if (eventName === 'OPEN_OAUTH' && !aborted.current) {
           saveOAuthSession({ token: session.token, reservationId: session.reservationId })
         }
       },
@@ -67,10 +96,16 @@ export function ConnectionsOAuth() {
         clearOAuthSession()
         resolve.mutate(session.reservationId, { onSettled: finish })
       },
-    }).catch((error: unknown) => {
-      clearOAuthSession()
-      setProblem(error)
     })
+      .then((opened) => {
+        if (generation.current !== run) opened.destroy()
+        else handler.current = opened
+      })
+      .catch((error: unknown) => {
+        if (generation.current !== run) return
+        clearOAuthSession()
+        setProblem(error)
+      })
   }, [session, navigate, location.pathname, exchange, resolve])
 
   if (!session) {
@@ -100,7 +135,7 @@ export function ConnectionsOAuth() {
     >
       {problem === null ? (
         <p role="status" className="text-sm text-muted-foreground">
-          Opening Plaid Link again…
+          {reauthPending ? "Confirming it's you…" : 'Opening Plaid Link again…'}
         </p>
       ) : (
         <>

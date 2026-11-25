@@ -88,7 +88,9 @@ export function abandonErrorMessage(error: unknown): string {
 export function resolveErrorMessage(error: unknown): string {
   if (isApiError(error)) {
     if (error.code === ERROR_CODES.plaidUnavailable) return linkErrorMessage(error)
-    if (error.code === ERROR_CODES.plaidError) return linkErrorMessage(error)
+    if (error.code === ERROR_CODES.plaidError) {
+      return 'Plaid refused the request. Nothing was changed. Try again later.'
+    }
     if (error.code === ERROR_CODES.notFound) return "That link doesn't exist any more."
     if (error.code === ERROR_CODES.reauthRequired || error.code === ERROR_CODES.rateLimited) {
       return errorMessage(error)

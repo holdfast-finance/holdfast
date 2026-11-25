@@ -1,6 +1,8 @@
 import { MutationCache, QueryCache, QueryClient, type QueryKey } from '@tanstack/react-query'
 
 import { ApiError } from '@/api/client'
+import { clearOAuthSession } from '@/features/connections/oauthSession'
+import { useReauthStore } from '@/stores/reauth'
 
 /** Query keys shared by the hooks in `src/api/hooks.ts` and the 401 handler below. */
 export const queryKeys = {
@@ -33,6 +35,8 @@ function onUnauthorized(client: QueryClient, error: unknown, key?: QueryKey): vo
   if (!(error instanceof ApiError) || error.status !== 401) return
   if (key && sameKey(key, queryKeys.me)) return
   if (client.getQueryData(queryKeys.me) === null) return
+  clearOAuthSession()
+  useReauthStore.getState().cancel()
   client.removeQueries({ predicate: (q) => !sameKey(q.queryKey, queryKeys.me) })
   client.setQueryData(queryKeys.me, null)
 }
