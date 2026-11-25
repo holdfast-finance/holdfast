@@ -301,3 +301,6 @@ simple folding). A heuristic over sampled subjects cannot close a class of attac
   `_scan` is now a small parser over an allowlist (see the contract). Anything outside it is
   refused as unsupported before the budgets or the probe run, so the controls only ever see syntax
   the parser fully understands. A seeded differential test against RE2 guards the two together.
+- **Long literal prefixes** (round 7). Probe prefixes came from runs capped at three characters, so
+  `QJVK.*X` plus 22 dots slipped through. `_scan` now keeps every maximal literal run and the probe
+  emits a prefix family per run, longest first, within the family cap.

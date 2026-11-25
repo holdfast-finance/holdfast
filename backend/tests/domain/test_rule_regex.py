@@ -34,6 +34,7 @@ def test_required_corpus_patterns_are_refused(pattern: str) -> None:
         PATTERN_TOO_SLOW,
         rule_regex.PATTERN_TOO_COMPLEX,
         rule_regex.PATTERN_UNSUPPORTED,
+        rule_regex.PATTERN_INLINE_FLAGS,
     )
 
 
@@ -53,6 +54,7 @@ def test_probe_alone_still_refuses_the_required_patterns(
         PATTERN_TOO_SLOW,
         rule_regex.PATTERN_TOO_COMPLEX,
         rule_regex.PATTERN_UNSUPPORTED,
+        rule_regex.PATTERN_INLINE_FLAGS,
     )
 
 
@@ -144,7 +146,9 @@ def test_corpus_gate(pattern: str, record_property: Callable[[str, object], None
     # Independent 1,024-character subjects plus longer versions of the probe families.
     subjects += tuple(
         prefix + "".join(rng.choices(union, k=1024 - len(prefix)))
-        for family in rule_regex._probe_families(alphabets, literals, runs, groups)
+        for family in rule_regex._probe_families(
+            alphabets, literals, runs, groups, scanned.maximal_runs
+        )
         for prefix in family
     )
     started = perf_counter()
@@ -183,7 +187,11 @@ def test_posix_and_nested_brackets_are_unsupported() -> None:
         with pytest.raises(RuleValidationError) as caught:
             compile_pattern(pattern)
         # RE2 itself refuses a few of these first, which is as good.
-        assert str(caught.value) in (rule_regex.PATTERN_UNSUPPORTED, rule_regex.PATTERN_INVALID)
+        assert str(caught.value) in (
+            rule_regex.PATTERN_UNSUPPORTED,
+            rule_regex.PATTERN_INLINE_FLAGS,
+            rule_regex.PATTERN_INVALID,
+        )
 
 
 def test_stored_patterns_are_not_probed_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,7 +402,7 @@ def test_inline_flags_are_refused_on_every_path(pattern: str) -> None:
     for compile_ in (compile_pattern, rule_regex.compile_stored_pattern):
         with pytest.raises(RuleValidationError) as caught:
             compile_(pattern)
-        assert str(caught.value) == rule_regex.PATTERN_UNSUPPORTED
+        assert str(caught.value) == rule_regex.PATTERN_INLINE_FLAGS
 
 
 @pytest.mark.parametrize(
@@ -515,3 +523,38 @@ def test_scanner_and_re2_agree_on_random_allowlist_patterns(
     record_property("differential_bracket_atoms", brackets)
     assert accepted >= 300
     assert brackets >= 100
+
+
+@pytest.mark.parametrize("pattern", ("(?P<brand>AB|CD)E", r"\QAB\E", "[[:alpha:]]", "A]", "A{,9}"))
+def test_other_unsupported_syntax_gets_the_neutral_message(pattern: str) -> None:
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern(pattern)
+    message = str(caught.value)
+    assert message in (rule_regex.PATTERN_UNSUPPORTED, rule_regex.PATTERN_INVALID)
+    assert "case-insensitive" not in message
+    assert message != rule_regex.PATTERN_INLINE_FLAGS
+
+
+def test_inline_flags_keep_the_case_insensitive_explanation() -> None:
+    with pytest.raises(RuleValidationError) as caught:
+        compile_pattern("(?i)AB")
+    assert str(caught.value) == rule_regex.PATTERN_INLINE_FLAGS
+    assert "case-insensitive" in str(caught.value)
+
+
+def test_maximal_literal_runs_are_recorded_uncapped() -> None:
+    assert rule_regex._scan("ACHPMT.*X").maximal_runs == ("ACHPMT", "X")
+    assert rule_regex._scan("AB*C").maximal_runs == ("A", "C")
+    assert rule_regex._scan("AB|CDEF").maximal_runs == ("AB", "CDEF")
+    assert rule_regex._scan(r"A\.B").maximal_runs == ("A.B",)
+
+
+def test_long_prefix_families_are_generated_longest_first() -> None:
+    scanned = rule_regex._scan("ACHPMT.*X" + "." * 22 + "W")
+    alphabets = tuple(rule_regex._atom_alphabets(scanned.atoms))
+    families = list(
+        rule_regex._probe_families(
+            alphabets, scanned.literals, scanned.runs, (), scanned.maximal_runs
+        )
+    )
+    assert any(subject.startswith("ACHPMT") for family in families for subject in family)

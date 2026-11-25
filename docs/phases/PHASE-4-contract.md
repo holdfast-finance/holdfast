@@ -151,7 +151,10 @@ def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 
   `^ $` and `.`. Everything else (flags, named groups, `\Q..\E`, POSIX classes, bare `]` or `}`)
   is PATTERN_UNSUPPORTED. A seeded differential test (6,000 random patterns) checks that anything the
   parser accepts compiles in RE2 and that each bracket atom matches one character.
-  `normalize_for_rules` applies NFKC again after `upper()`.
+  `normalize_for_rules` applies NFKC again after `upper()`. `_scan` records every maximal literal run
+  uncapped, and the probe emits one prefix family per run (longest first, `MAX_PREFIX_RUNS = 4`).
+  Inline flags give `PATTERN_INLINE_FLAGS`; other refused syntax gives the neutral
+  `PATTERN_UNSUPPORTED`.
 - Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
   the same calculator. `MAX_CLASS_POSITIONS = 24`, refused with PATTERN_TOO_COMPLEX. Literals are free,
   and a count on a single literal or a pure-literal group costs nothing against either budget

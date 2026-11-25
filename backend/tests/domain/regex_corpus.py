@@ -38,6 +38,10 @@ REQUIRED_REJECTIONS = (
     # Unsupported syntax the scanner used to misparse: `[[:]` is not a POSIX class.
     "(?:[[:]|ა.*ბ.{100}#])",
     "(?:[[:]|(?-i:x)])",
+    # Literal prefixes longer than three characters.
+    "QJVK.*X" + "." * 22 + "W",
+    "ACHPMT.*X" + "." * 22 + "W",
+    "QJVK[XY]*X" + "[XY]" * 22 + "W",
 )
 
 # The four escape-only-class patterns again at a total count of 8, which the repetition
@@ -58,6 +62,9 @@ PROBE_ONLY_VARIANTS += (
     "QJV.*X" + "." * 21 + "W",
     "QJV.*X" + "[^#]" * 20 + "#",
     "QJV[XY]*X" + "[XY]" * 20 + "W",
+    "QJVK.*X" + "." * 20 + "W",
+    "ACHPMT.*X" + "." * 20 + "W",
+    "QJVK[XY]*X" + "[XY]" * 20 + "W",
 )
 
 # Required rejections the repetition budget alone refuses (nothing for a probe to sample).

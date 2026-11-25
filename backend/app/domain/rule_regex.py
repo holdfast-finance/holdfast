@@ -21,6 +21,7 @@ MAX_SUBJECT_LENGTH = 256
 PROBE_LIMIT_MICROSECONDS = 10
 MAX_CLASS_ATOMS = 16
 MAX_PROBE_FAMILIES = 160
+MAX_PREFIX_RUNS = 4
 # Total counted repetition above this is refused (sum along a sequence, max across |, nested
 # counts multiplied). DFA state growth is 2^n in the count, so 8 bounds what the probe can
 # only sample, and bank descriptions never need more.
@@ -37,8 +38,9 @@ PATTERNS_UNAVAILABLE = "Patterns aren't available on this server."
 PATTERN_INVALID = "This pattern uses unsupported syntax."
 PATTERN_TOO_SLOW = "This pattern is too slow to run on every transaction."
 PATTERN_UNSUPPORTED = (
-    "This pattern uses syntax that isn't supported. Matching is always case-insensitive."
+    "This pattern uses syntax that isn't supported. See the supported syntax list."
 )
+PATTERN_INLINE_FLAGS = "Inline flags aren't supported. Matching is always case-insensitive."
 PATTERN_TOO_COMPLEX = "This pattern is too complex to check. Try a simpler one."
 _PRINTABLE_ASCII = "".join(chr(code) for code in range(32, 127))
 _DESCRIPTION_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789    *#-./"
@@ -132,8 +134,8 @@ _HEX = frozenset("0123456789abcdefABCDEF")
 MAX_COUNT = 1000  # RE2's own ceiling on a counted repetition
 
 
-def _unsupported() -> RuleValidationError:
-    return RuleValidationError(PATTERN_UNSUPPORTED)
+def _unsupported(message: str = PATTERN_UNSUPPORTED) -> RuleValidationError:
+    return RuleValidationError(message)
 
 
 def _hex_escape(pattern: str, i: int) -> tuple[int, str]:
@@ -274,6 +276,8 @@ class _Scan:
     class_positions: int
     # No class, dot, alternation or repetition anywhere: the DFA has at most len + 1 states.
     pure_literal: bool
+    # Every maximal literal run, uncapped, in pattern order. Probe prefixes come from these.
+    maximal_runs: tuple[str, ...] = ()
 
 
 def _scan(pattern: str) -> _Scan:
@@ -296,6 +300,8 @@ def _scan(pattern: str) -> _Scan:
     literals: dict[str, str] = {}
     runs: dict[str, str] = {}
     recent = ""
+    run_now = ""
+    maximal: list[str] = []
     # What the previous after allows next: "elem" takes a quantifier, "quant" takes a lazy ?.
     prev = "start"
     i = 0
@@ -321,7 +327,10 @@ def _scan(pattern: str) -> _Scan:
                 after = "anchor"
         elif char == "(":
             if pattern.startswith("(?", i) and not pattern.startswith("(?:", i):
-                raise _unsupported()
+                # Flag syntax is `(?` then flag letters or `-`. Named groups and the rest are
+                # plain unsupported syntax.
+                is_flags = pattern[i + 2 : i + 3] in tuple("imsU-")
+                raise _unsupported(PATTERN_INLINE_FLAGS if is_flags else PATTERN_UNSUPPORTED)
             end = i + (3 if pattern.startswith("(?:", i) else 1)
             open_groups.append(({}, {}))
             levels.append([0, 0, 0, 0])
@@ -390,11 +399,18 @@ def _scan(pattern: str) -> _Scan:
                 literals.setdefault(letter, letter)
                 for letters, _ in open_groups:
                     letters.setdefault(letter, letter)
+                run_now += letter
                 recent = (recent + letter)[-3:]
                 for size in range(2, len(recent) + 1):
                     runs.setdefault(recent[-size:], recent[-size:])
-        elif after not in ("quant", "lazy"):
-            recent = ""
+        else:
+            if after == "quant":
+                run_now = run_now[:-1]  # the quantified character is optional or repeated
+            if after not in ("quant", "lazy"):
+                recent = ""
+            if run_now and after != "lazy":
+                maximal.append(run_now)
+                run_now = ""
         prev = after
         i = end
     if open_groups:
@@ -407,6 +423,7 @@ def _scan(pattern: str) -> _Scan:
         max(levels[0][:2]),
         max(levels[0][2:]),
         pure_literal,
+        tuple(maximal) + ((run_now,) if run_now else ()),
     )
 
 
@@ -486,6 +503,7 @@ def _probe_families(
     literals: tuple[str, ...],
     runs: tuple[str, ...],
     groups: tuple[str, ...],
+    prefixes: tuple[str, ...] = (),
 ) -> Iterator[tuple[str, ...]]:
     rng = Random(2404)  # noqa: S311 -- deterministic synthetic probe
     yield _subjects(rng, "ABC", 24)
@@ -501,16 +519,18 @@ def _probe_families(
         yield _subjects(rng, union, 32)
     # A literal prefix followed by a dense mix of the pattern's own literals and a few class
     # samples: the shape that written-out repetition after a literal anchor needs.
-    prefix = max(runs, key=len, default="".join(literals[:1]))
-    for alphabet in dict.fromkeys((*alphabets, *groups)):
-        for dense in dict.fromkeys(
-            (alphabet[:4], "".join(dict.fromkeys(alphabet[:4] + "".join(literals))))
-        ):
-            if len(dense) > 1:
-                yield tuple(
-                    prefix + "".join(rng.choices(dense, k=MAX_SUBJECT_LENGTH - len(prefix)))
-                    for _ in range(32)
-                )
+    # One family per maximal literal run, longest first, so a long prefix is never skipped.
+    chosen = sorted(dict.fromkeys(prefixes), key=len, reverse=True)[:MAX_PREFIX_RUNS]
+    for prefix in chosen or [max(runs, key=len, default="".join(literals[:1]))]:
+        for alphabet in dict.fromkeys((*alphabets, *groups)):
+            for dense in dict.fromkeys(
+                (alphabet[:4], "".join(dict.fromkeys(alphabet[:4] + "".join(literals))))
+            ):
+                if len(dense) > 1:
+                    yield tuple(
+                        prefix + "".join(rng.choices(dense, k=MAX_SUBJECT_LENGTH - len(prefix)))
+                        for _ in range(32)
+                    )
     for alphabet in dict.fromkeys(alphabets):
         yield _subjects(rng, alphabet, 32)
         for literal in literals:
@@ -577,7 +597,9 @@ def compile_pattern(pattern: str) -> CompiledPattern:
         return compiled
     alphabets = tuple(_atom_alphabets(scanned.atoms))
     groups = _group_alphabets(scanned.groups)
-    families = _probe_families(alphabets, scanned.literals, scanned.runs, groups)
+    families = _probe_families(
+        alphabets, scanned.literals, scanned.runs, groups, scanned.maximal_runs
+    )
     for count, subjects in enumerate(families, 1):
         if count > MAX_PROBE_FAMILIES:
             # A cap that is hit rejects. It never accepts what it could not finish probing.
