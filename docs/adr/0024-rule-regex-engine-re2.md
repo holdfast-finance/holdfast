@@ -260,3 +260,60 @@ Lattice's measurements, 2026-11-21:
   measured so far: counted classes after an unanchored prefix, decoys, escapes, negation, POSIX and
   frequent literals. A new evasion is a corpus addition and a probe change in `rule_regex.py`,
   reviewed by Bulwark. The cap and the 256-character subject bound the damage in the meantime.
+
+## Follow-up (C3d review rounds 1 and 2): structural limits before the probe
+
+Four rewrites of the blow-up shapes evaded the probe (alternation groups of classes, Unicode
+property classes, single-letter classes, and a literal whose full case mapping differs from RE2's
+simple folding). A heuristic over sampled subjects cannot close a class of attacks alone, so
+`compile_pattern` now applies structural limits first, and the probe is the second line:
+
+- **Total counted-repetition budget of 8** (round 3; round 2 capped each count at 16). DFA state
+  growth is 2^n in the count, so 16 was too generous, and a per-count cap missed `[W]{16}[W]{16}`.
+  Counts add along a sequence, the larger side counts across `|`, nesting multiplies
+  (`(?:a{4}){8}` is 32) and `{n,}` counts n. Over 8 is refused. `\d{3}-\d{4}` costs 7. Bank
+  descriptions never need more.
+- **RE2 program-size ceiling** of 2,000 (`MAX_PROGRAM_SIZE`, from the binding's `programsize`).
+  The benign corpus peaks at 153 (13x headroom). `\p{L}+` is 1,202 and passes. A 16-fold
+  `\p{Greek}|\p{Cyrillic}` group is 1,617, and ASCII-class blow-ups are far smaller, so this
+  ceiling is a coarse bound on Unicode class unions, not the primary control.
+- **Probe fixes.** A group's alphabet is its literals (as RE2 folds them, never `str.upper()`)
+  plus the samples of every class inside it. One bounded union family mixes all samples. Dedupe
+  keys use simple lower-casing, so `ß` is not `SS`.
+- With the first two limits switched off, the probe alone still refuses every required rejection,
+  including variants of the evasions at a total count of 8. The probe also fails closed: a class
+  written only as escapes (`[\x{10D0}-\x{10EF}]`) is sampled at both range ends and the midpoint,
+  and a class with no sample at all refuses the pattern instead of falling back to a generic
+  alphabet.
+- **Class-position budget of 24** (round 4). Hand-written copies of a class cost nothing in the
+  repetition budget (`QJV.*X` plus 121 dots). Every `.`, class or branching group in sequence
+  counts 1, times its count, and the total is capped at 24. Literals are free, and a count on a
+  literal or pure-literal group costs nothing against either budget, so `\*{8}\d{4}` passes.
+  Pure-literal patterns (no `.`, class, `|`, `*`, `+`, `?` or `{n}`) skip the timing probe. Their
+  DFA has at most len + 1 states only with a single case mode, which round 5 guarantees: inline
+  flags are refused, since `(?-i:\x{2126})` makes the folding twins K/Kelvin, Ω/Ohm and Å/Angstrom
+  branch. Subjects and patterns are also NFKC-normalised for rule matching, and probe alphabets use
+  exact code points, not case-folded keys.
+  The probe gained literal-prefix + dense-trigger families, so variants at 21 positions are
+  refused by the probe alone.
+- **Strict allowlist grammar** (round 6). Mirroring RE2's grammar failed: `[[:]` is a class in RE2
+  but the scanner closed it early, hiding everything after it from the flag check and both budgets.
+  `_scan` is now a small parser over an allowlist (see the contract). Anything outside it is
+  refused as unsupported before the budgets or the probe run, so the controls only ever see syntax
+  the parser fully understands. A seeded differential test against RE2 guards the two together.
+- **Long literal prefixes** (round 7). Probe prefixes came from runs capped at three characters, so
+  `QJVK.*X` plus 22 dots slipped through. `_scan` now keeps every maximal literal run and the probe
+  emits a prefix family per run, longest first, within the family cap.
+- **Class-position budget lowered from 24 to 10** (round 8). Prefix shapes the probe cannot enumerate
+  (two prefixes, a prefix split by a class, a class or `\d` or `(?:A|B)` before the prefix, decoys
+  after it) still cost 110 to 128 µs. Measured against class positions with the probe off: 8 is 1.5 µs,
+  10 is 1.9, 12 is 53, 16 is 92, 23 is 114. The cliff is the DFA cache, between 10 and 12, so the
+  budget sits at 10, in line with the repetition budget of 8, and no more probe families are added.
+  `\d{3}-\d{4}` (7) and `\d{2}/\d{2}/\d{4}` (8) pass. `\(\d{3}\) \d{3}-\d{4}` fits the position budget
+  (10) but costs 10 against the repetition budget of 8, so it is refused and reported, not widened.
+- **Repetition budget raised from 8 to 10** (round 8 follow-up), matching the position budget. Both
+  bound the same DFA growth and the measured cliff is between 10 and 12. `\(\d{3}\) \d{3}-\d{4}` (10)
+  now passes. `[XY]*X[XYZ]{10}W` and its group form have 11 positions and are refused by the position
+  budget, and by the probe alone at 30 to 45 us.
+  Timing tests: acceptance tests run with the probe limit x10 (a loaded runner pushed benign
+  patterns near 10 us over it), and the tests that assert the probe's own refusals carry `strict_probe`.

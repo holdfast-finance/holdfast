@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -31,7 +32,7 @@ from app.domain.category_precedence import can_replace_category
 from app.domain.fingerprint import normalize_description
 from app.domain.merchant import MAX_KEY_LENGTH, MERCHANT_KEY_VERSION, merchant_key
 from app.domain.money import ZERO
-from app.domain.rule_regex import CompiledPattern, compile_pattern
+from app.domain.rule_regex import CompiledPattern, compile_pattern, compile_stored_pattern
 from app.domain.rule_regex import RuleValidationError as RuleValidationError
 
 AccountScope = Literal["any", "joint", "own"]
@@ -41,6 +42,13 @@ TOKEN_VERSION = 2
 MAX_DESCRIPTION_VALUE_LENGTH = 128
 MAX_AMOUNT = Decimal(10) ** 12
 CENT = Decimal("0.01")
+
+
+def normalize_for_rules(text: str) -> str:
+    """NFKC, then the fingerprint normalisation. Rule matching only: fingerprints, merchant
+    keys and every stored hash keep ``normalize_description`` unchanged."""
+    # NFKC again after upper(): case mapping can emit characters with compatibility forms.
+    return unicodedata.normalize("NFKC", normalize_description(unicodedata.normalize("NFKC", text)))
 
 
 def _check_amount(amount: Decimal) -> None:
@@ -71,7 +79,13 @@ class MerchantKeyVersionMismatch(RuleValidationError):
 
 @dataclass(frozen=True, slots=True)
 class DescriptionCondition:
-    """Match normalized descriptions. Regex mode goes through ``compile_pattern``."""
+    """Match normalized descriptions.
+
+    Regex mode goes through ``compile_pattern`` (with the save-time cost probe) on the
+    create/save path. The loader builds rows that already passed that probe through the
+    private ``_from_store``, which uses ``compile_stored_pattern`` so loading is
+    deterministic (ADR 0024). Nothing under ``app/api`` or ``app/services`` may call it.
+    """
 
     mode: Literal["contains", "starts-with", "exact", "regex"]
     value: str = field(repr=False)
@@ -79,14 +93,27 @@ class DescriptionCondition:
     _regex: CompiledPattern | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        self._init(compile_pattern)
+
+    @classmethod
+    def _from_store(
+        cls, mode: Literal["contains", "starts-with", "exact", "regex"], value: str
+    ) -> DescriptionCondition:
+        condition = object.__new__(cls)
+        object.__setattr__(condition, "mode", mode)
+        object.__setattr__(condition, "value", value)
+        condition._init(compile_stored_pattern)
+        return condition
+
+    def _init(self, compile_regex: Callable[[str], CompiledPattern]) -> None:
         if self.mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
         if not self.value.strip():
             raise RuleValidationError("Description text is required.")
         if self.mode != "regex" and len(self.value) > MAX_DESCRIPTION_VALUE_LENGTH:
             raise RuleValidationError("Description text is too long.")
-        literal = normalize_description(self.value) if self.mode != "regex" else ""
-        regex = compile_pattern(self.value) if self.mode == "regex" else None
+        literal = normalize_for_rules(self.value) if self.mode != "regex" else ""
+        regex = compile_regex(self.value) if self.mode == "regex" else None
         object.__setattr__(self, "_literal", literal)
         object.__setattr__(self, "_regex", regex)
 
@@ -257,7 +284,7 @@ def _ordered_rules(rules: Iterable[Rule]) -> list[Rule]:
 
 
 def _first_match(ordered: list[Rule], txn: RuleTransaction) -> RuleMatch | None:
-    normalized = normalize_description(txn.description)
+    normalized = normalize_for_rules(txn.description)
     for rule in ordered:
         if rule_may_touch(rule, txn) and rule.conditions.matches(txn, normalized):
             return RuleMatch(txn.id, rule.id, rule.action)
@@ -319,10 +346,10 @@ def preview_for(
         if not target.enabled:
             break
         if not rule_may_touch(target, txn):
-            if target.conditions.matches(txn, normalize_description(txn.description)):
+            if target.conditions.matches(txn, normalize_for_rules(txn.description)):
                 skipped_not_writable += 1
             continue
-        if not target.conditions.matches(txn, normalize_description(txn.description)):
+        if not target.conditions.matches(txn, normalize_for_rules(txn.description)):
             continue
         if txn.is_split:
             skipped_split += 1
@@ -419,8 +446,12 @@ def _day(obj: Mapping[str, object], key: str) -> date | None:
     raise RuleValidationError("Dates must be ISO dates.")
 
 
-def conditions_from_json(obj: Mapping[str, object]) -> RuleConditions:
-    """Strict inverse of ``conditions_to_json``. Unknown keys and wrong types are refused."""
+def conditions_from_json(obj: Mapping[str, object], *, stored: bool = False) -> RuleConditions:
+    """Strict inverse of ``conditions_to_json``. Unknown keys and wrong types are refused.
+
+    ``stored=True`` is for the loader reading saved rows: regexes are recompiled without the
+    cost probe. Anything that creates or edits a rule leaves it False and is probed.
+    """
     if set(obj) - _KEYS:
         raise RuleValidationError("Unknown condition key.")
     version = obj.get("v")
@@ -440,7 +471,10 @@ def conditions_from_json(obj: Mapping[str, object]) -> RuleConditions:
         mode = raw_desc["mode"]
         if mode not in ("contains", "starts-with", "exact", "regex"):
             raise RuleValidationError("Unknown description match mode.")
-        description = DescriptionCondition(mode, raw_desc["value"])  # type: ignore[arg-type]
+        if stored:
+            description = DescriptionCondition._from_store(mode, raw_desc["value"])  # type: ignore[arg-type]
+        else:
+            description = DescriptionCondition(mode, raw_desc["value"])  # type: ignore[arg-type]
 
     key = obj.get("merchant_key")
     key_version = obj.get("merchant_key_version")

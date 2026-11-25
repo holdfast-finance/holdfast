@@ -129,15 +129,59 @@ def merchant_key(merchant_name: str | None, description_raw: str) -> str | None
 ### 2.2 `app/domain/rule_regex.py` (new in C3c, engine in C3d)
 ```python
 class CompiledPattern(Protocol):
-    def search(self, text: str) -> bool: ...
+    def search(self, text: str, clock: RegexClock | None = None,
+               *, rule_id: UUID | None = None) -> bool: ...
 MAX_PATTERN_LENGTH = 128
 MAX_SUBJECT_LENGTH = 256          # ADR 0024 point 5 (was 1,024; measured, see the ADR)
 PROBE_LIMIT_MICROSECONDS = 10     # ADR 0024 point 4b, per probe family
 MAX_CLASS_ATOMS = 16              # ADR 0024 point 4b
 REGEX_BUDGET_SECONDS = 10         # ADR 0024 point 9: preview, apply, clear
-INGEST_REGEX_MS_PER_ROW = 0.5     # ADR 0024 point 9: ingest, checked every 1,000 rows
-def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationError
+INGEST_REGEX_US_PER_ROW = 500     # int microseconds, no float. ADR 0024 point 9: ingest, checked every 1,000 rows
+MAX_PROBE_FAMILIES = 160          # save-time work cap. Hitting it rejects, never accepts
+MAX_REPEAT_BUDGET = 10            # TOTAL counted repetition: sum along a sequence, max across `|`, nesting multiplies, `{n,}` counts n. Over it: PATTERN_TOO_COMPLEX
+MAX_CLASS_POSITIONS = 10          # class/dot/branching-group positions, written-out copies included
+MAX_PROGRAM_SIZE = 2000           # RE2 compiled program size (`programsize`) ceiling
+def compile_pattern(pattern: str) -> CompiledPattern   # save path: RE2 + cost probe; raises RuleValidationError
+def compile_stored_pattern(pattern: str) -> CompiledPattern  # loader path: RE2 only, no probe
 ```
+- Strict grammar (round 6): `_scan` is an allowlist parser (`_parse_escape`, `_parse_bracket`,
+  `_parse_count`). It runs on stored and new patterns, after RE2 compiles them. It accepts literals,
+  escaped metacharacters, `\d \D \w \W \s \S \b \B`, `\xHH`, `\x{H..}`, `\p`, brackets with no nested `[`
+  and no leading `]`, `(?:...)`, `(...)`, `|`, `* + ?` with a lazy `?`, `{n}`, `{n,}`, `{n,m}` (max 1,000),
+  `^ $` and `.`. Everything else (flags, named groups, `\Q..\E`, POSIX classes, bare `]` or `}`)
+  is PATTERN_UNSUPPORTED. A seeded differential test (6,000 random patterns) checks that anything the
+  parser accepts compiles in RE2 and that each bracket atom matches one character.
+  `normalize_for_rules` applies NFKC again after `upper()`. `_scan` records every maximal literal run
+  uncapped, and the probe emits one prefix family per run (longest first, `MAX_PREFIX_RUNS = 4`).
+  Inline flags give `PATTERN_INLINE_FLAGS`; other refused syntax gives the neutral
+  `PATTERN_UNSUPPORTED`.
+- Class positions: every `.`, class or branching group in sequence counts 1, times its `{n}`, over
+  the same calculator. `MAX_CLASS_POSITIONS = 10` (was 24), refused with PATTERN_TOO_COMPLEX. With the probe off, search cost against positions measured 8: 1.5 µs, 10: 1.9, 12: 53, 16: 92, 23: 114, so the DFA-cache cliff sits between 10 and 12 and the probe cannot enumerate every prefix shape above it. Literals are free,
+  and a count on a single literal or a pure-literal group costs nothing against either budget
+  (programsize bounds it). Pure-literal patterns skip the
+  timing probe. The code's rule: no `.`, no class or class escape (`\d`, `\pL`), no `|`, no `*`, `+`
+  or `?`, and no `{n}` (plain `(?:...)` groups, anchors and escaped literals are allowed). Inline
+  flags are refused (PATTERN_UNSUPPORTED): only `(?:` and `(?P<name>` open a group, so there is one
+  case mode. Subjects and patterns go through NFKC (`rules.normalize_for_rules`, rule matching
+  only: fingerprints and merchant keys keep `normalize_description`). The probe adds literal-prefix + dense-trigger families.
+- Repetition budget (10, same as the position budget; both bound the same DFA growth, cliff
+  between 10 and 12): `[W]{8}[W]{8}` is 16 and refused, `\d{3}-\d{4}` is 7 and valid. The probe fails
+  closed: escape-only classes are sampled from their decoded range ends and midpoint, and a class
+  with no sample refuses the pattern.
+- Structural limits run before the probe (ADR 0024 follow-up). `MAX_PROGRAM_SIZE = 2000` is
+  13x the benign corpus peak (153), leaves `\p{L}+` (1,202) valid, and a 16-fold
+  `\p{Greek}|\p{Cyrillic}` group (1,617) is under it, so the repetition cap is the primary control
+  and the probe refuses that one.
+  The probe remains for patterns inside both limits.
+- `stored` is not a constructor argument. The loader reaches `compile_stored_pattern` only through
+  `DescriptionCondition._from_store`, via `conditions_from_json(obj, stored=True)`. A test fails if
+  `app/api/` or `app/services/` mention either.
+- `search(text, clock, rule_id)` times the call into `RegexClock` (integer nanoseconds). Over budget
+  it raises `RegexBudgetExceeded`, and with no `rule_id` it still raises (fail closed).
+- `compile_stored_pattern` is only for rows that already passed the probe: the loader
+  (`conditions_from_json(obj, stored=True)`, which calls `DescriptionCondition._from_store`) uses it so that loading is deterministic (ADR 0024
+  point 4b). Create, edit and preview paths use `compile_pattern`. A test fails if any other module
+  references it.
 - **C3c deletes the C3a `re` validator** (`_REGEX_TOKEN`, `_compile_safe_regex`, the `re`
   import). Until C3d, `compile_pattern` raises `RuleValidationError("Patterns aren't available
   yet.")` for every input.
@@ -162,7 +206,7 @@ def compile_pattern(pattern: str) -> CompiledPattern   # raises RuleValidationEr
     most regex time.
   - Preview, apply and clear stop at `REGEX_BUDGET_SECONDS` and return 503 `rules_too_slow`, with
     nothing written.
-  - Ingest checks every 1,000 rows. Above `INGEST_REGEX_MS_PER_ROW`, it skips `regex` rules for the
+  - Ingest checks every 1,000 rows. Above `INGEST_REGEX_US_PER_ROW`, it skips `regex` rules for the
     rest of that import.
   - Timing decides only whether a run stops, never what a completed run matches. Apply and clear
     recompute and compare the token, so a stopped run can never write a different count.

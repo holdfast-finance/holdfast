@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import unicodedata
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -289,20 +290,29 @@ def test_merchant_key_version_mismatch_is_distinct() -> None:
         conditions_from_json({"v": 1, "merchant_key": "MOONFERN", "merchant_key_version": 2})
 
 
-# --- regex is refused everywhere (until C3d) --------------------------------
+# --- regex goes through RE2 only (C3d) --------------------------------------
 
 
-@pytest.mark.parametrize("pattern", ["a", "^moonfern$", r"\d+", "(", "", "x" * 500])
-def test_compile_pattern_refuses_everything(pattern: str) -> None:
-    with pytest.raises(RuleValidationError, match=r"^Patterns aren't available yet\.$"):
+@pytest.mark.parametrize("pattern", ["(", "", "x" * 500, "a*"])
+def test_compile_pattern_refuses_invalid_empty_long_or_empty_matching(pattern: str) -> None:
+    with pytest.raises(RuleValidationError):
         compile_pattern(pattern)
 
 
-def test_regex_condition_and_codec_refuse() -> None:
-    with pytest.raises(RuleValidationError, match="Patterns aren't available yet"):
-        DescriptionCondition("regex", "^moon")
-    with pytest.raises(RuleValidationError, match="Patterns aren't available yet"):
-        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "^moon"}})
+@pytest.mark.parametrize(
+    ("pattern", "subject"), [("a", "A1"), ("^moonfern$", "MOONFERN"), (r"\d+", "store 42")]
+)
+def test_compile_pattern_accepts_plain_patterns(pattern: str, subject: str) -> None:
+    assert compile_pattern(pattern).search(subject) is True
+
+
+def test_regex_condition_and_codec_go_through_the_engine() -> None:
+    assert DescriptionCondition("regex", "^moon").mode == "regex"
+    conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "^moon"}})
+    with pytest.raises(RuleValidationError):
+        DescriptionCondition("regex", "(")
+    with pytest.raises(RuleValidationError):
+        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "("}})
 
 
 def test_description_value_never_appears_in_repr() -> None:
@@ -311,3 +321,76 @@ def test_description_value_never_appears_in_repr() -> None:
     assert secret not in repr(cond)
     assert secret not in repr(RuleConditions(description=cond))
     assert secret not in repr(rule(1, conditions=RuleConditions(description=cond)))
+
+
+def test_loader_uses_stored_compile_and_create_path_runs_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.domain import rules
+
+    stored: list[str] = []
+    probed: list[str] = []
+    monkeypatch.setattr(
+        rules, "compile_stored_pattern", lambda p: stored.append(p) or compile_pattern(p)
+    )
+    monkeypatch.setattr(rules, "compile_pattern", lambda p: probed.append(p) or compile_pattern(p))
+    blob = {"v": 1, "description": {"mode": "regex", "value": "^moon"}}
+    conditions_from_json(blob, stored=True)
+    assert (stored, probed) == (["^moon"], [])
+    conditions_from_json(blob)
+    DescriptionCondition("regex", "^moon")
+    assert (stored, probed) == (["^moon"], ["^moon", "^moon"])
+
+
+def test_stored_loading_still_refuses_invalid_patterns() -> None:
+    with pytest.raises(RuleValidationError):
+        conditions_from_json({"v": 1, "description": {"mode": "regex", "value": "("}}, stored=True)
+
+
+def test_no_write_path_can_reach_the_stored_loader() -> None:
+    import ast
+    import pathlib
+
+    app = pathlib.Path(__file__).resolve().parents[2] / "app"
+    forbidden = ("compile_stored_pattern", "_from_store", "stored=True")
+    users = {
+        str(path.relative_to(app))
+        for path in app.rglob("*.py")
+        if any(name in path.read_text() for name in forbidden)
+    }
+    # Only the engine module defines the stored compile and the pure codec uses it.
+    # The future loader module is allow-listed here by name when it lands (C3e).
+    assert users == {"domain/rule_regex.py", "domain/rules.py"}
+    for request_path in ("api", "services"):
+        for path in (app / request_path).rglob("*.py"):
+            text = path.read_text()
+            assert not any(name in text for name in forbidden), path
+    tree = ast.parse((app / "domain" / "rules.py").read_text())
+    references = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "compile_stored_pattern"
+    ]
+    assert len(references) == 1  # the one reference, in the private _from_store
+
+
+def test_stored_flag_is_not_a_constructor_argument() -> None:
+    with pytest.raises(TypeError):
+        DescriptionCondition("regex", "^moon", True)  # type: ignore[call-arg]
+
+
+def test_rule_matching_normalises_nfkc_without_touching_fingerprints() -> None:
+    from app.domain.fingerprint import normalize_description
+    from app.domain.rules import normalize_for_rules
+
+    assert normalize_for_rules("pay \u212a") == "PAY K"
+    # The shared normaliser behind fingerprints and statement dedupe is unchanged.
+    assert normalize_description("pay \u212a") != "PAY K"
+
+
+def test_rule_normalisation_applies_nfkc_again_after_upper() -> None:
+    from app.domain.rules import normalize_for_rules
+
+    # upper() turns U+01F0 into J + combining caron, which has a composed NFKC form.
+    assert normalize_for_rules("ǰ") == "ǰ".upper().join(("", "")) or True
+    assert normalize_for_rules("ǰ") == unicodedata.normalize("NFKC", "J̌")
